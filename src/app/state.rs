@@ -1,4 +1,5 @@
 use crate::agent::r#loop::PlanStep;
+use crate::memory::compactor::CompactState;
 use crate::types::{ConfirmationChoice, Event};
 
 pub struct AppState {
@@ -10,10 +11,12 @@ pub struct AppState {
     pub selected_menu: usize,
     pub pending_confirm: Option<(String, String)>,
     pub final_summary: Option<String>,
+    pub task: String,
+    pub compactor: CompactState,
 }
 
 impl AppState {
-    pub fn new(plan: Vec<PlanStep>) -> Self {
+    pub fn new(plan: Vec<PlanStep>, task: String) -> Self {
         Self {
             events: Vec::new(),
             plan,
@@ -23,6 +26,8 @@ impl AppState {
             selected_menu: 0,
             pending_confirm: None,
             final_summary: None,
+            task,
+            compactor: CompactState::new(8),
         }
     }
 

@@ -1,4 +1,5 @@
 mod agent;
+mod memory;
 mod app;
 mod safety;
 mod tools;
@@ -8,6 +9,7 @@ mod ui;
 use std::{io, time::Duration};
 
 use agent::r#loop::plan_from_codex_or_sample;
+use memory::store::MemoryStore;
 use app::state::AppState;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
@@ -35,13 +37,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
-    let mut app = AppState::new(plan_from_codex_or_sample());
+    let task = std::env::var("GOLDBOT_TASK").unwrap_or_else(|_| "整理当前目录并汇总文件信息".to_string());
+    let mut app = AppState::new(plan_from_codex_or_sample(), task);
 
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         if app.running && app.pending_confirm.is_none() {
             run_one_step(&mut app);
+            let _ = app.compactor.tick_and_maybe_compact(&mut app.events);
         }
 
         if event::poll(Duration::from_millis(120))?
@@ -158,6 +162,10 @@ fn finish(app: &mut AppState, summary: String) {
     app.events.push(Event::Final {
         summary: summary.clone(),
     });
+    let store = MemoryStore::new();
+    let _ = store.append_short_term(&app.task, &summary);
+    let _ = store.append_long_term(&format!("task= {}; final= {}", app.task, summary));
+
     app.running = false;
     app.final_summary = Some(summary);
     app.collapsed = true;

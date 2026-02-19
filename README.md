@@ -35,3 +35,9 @@ GOLDBOT_USE_CODEX=1 GOLDBOT_TASK="整理当前目录的大文件" cargo run
 说明：
 - 通过 `codex exec` 生成 JSON 计划（provider 文件：`src/agent/provider.rs`）
 - 若 Codex 不可用或返回异常，自动回退到示例 planner
+
+
+## 记忆机制
+- 短期记忆：每次任务结束写入 `memory/YYYY-MM-DD.md`
+- 长期记忆：关键结论追加写入 `MEMORY.md`
+- 上下文压缩：按轮数阈值触发，保留压缩摘要 + 最近事件，避免上下文膨胀
