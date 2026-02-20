@@ -1,62 +1,137 @@
-use std::process::Command;
-
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
-pub struct CodexPlan {
-    pub steps: Vec<CodexStep>,
-    pub final_summary: Option<String>,
+// ── Conversation message types ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Role {
+    System,
+    User,
+    Assistant,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CodexStep {
-    pub thought: String,
-    pub command: String,
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
 }
 
-pub struct CodexProvider;
-
-impl CodexProvider {
-    pub fn build_plan(task: &str, max_steps: usize) -> Result<CodexPlan> {
-        let prompt = format!(
-            "你是一个本地自动化助手规划器。\n请根据用户任务生成命令执行计划。\n\
-             输出必须是 JSON 且只能是 JSON，结构:\n\
-             {{\"steps\":[{{\"thought\":\"...\",\"command\":\"...\"}}],\"final_summary\":\"...\"}}\n\
-             约束:\n\
-             1) steps 最多 {max_steps} 条\n\
-             2) 命令必须跨平台可替换，优先只给当前平台可运行的一套\n\
-             3) 不要包含 markdown 代码块\n\
-             用户任务: {task}"
-        );
-
-        let output = Command::new("codex")
-            .args(["exec", &prompt])
-            .output()
-            .context("failed to run codex CLI")?;
-
-        if !output.status.success() {
-            return Err(anyhow!(
-                "codex exec failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        let json = extract_json_object(&raw)
-            .ok_or_else(|| anyhow!("codex output did not contain JSON object"))?;
-        let plan: CodexPlan = serde_json::from_str(json).context("invalid JSON from codex")?;
-
-        if plan.steps.is_empty() {
-            return Err(anyhow!("codex returned empty steps"));
-        }
-
-        Ok(plan)
+impl Message {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: Role::System, content: content.into() }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: Role::User, content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self { role: Role::Assistant, content: content.into() }
     }
 }
 
-fn extract_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end > start).then_some(&text[start..=end])
+// ── Anthropic-compatible API wire types ───────────────────────────────────────
+
+#[derive(Serialize)]
+struct ApiRequest {
+    model: String,
+    max_tokens: u32,
+    system: String,
+    messages: Vec<ApiMessage>,
+}
+
+#[derive(Serialize)]
+struct ApiMessage {
+    role: &'static str,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ApiResponse {
+    content: Vec<ContentBlock>,
+}
+
+#[derive(Deserialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
+
+// ── HTTP client builder ───────────────────────────────────────────────────────
+
+pub fn build_http_client() -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+
+    if let Ok(proxy_url) = std::env::var("HTTP_PROXY") {
+        builder = builder.proxy(reqwest::Proxy::all(&proxy_url)?);
+    }
+
+    if let Ok(ms) = std::env::var("API_TIMEOUT_MS") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            builder = builder
+                .timeout(std::time::Duration::from_millis(ms))
+                .connect_timeout(std::time::Duration::from_secs(10));
+        }
+    }
+
+    builder.build().map_err(Into::into)
+}
+
+// ── LLM call ─────────────────────────────────────────────────────────────────
+
+/// Send the full conversation to the LLM and return its raw text response.
+pub async fn chat(client: &reqwest::Client, messages: &[Message]) -> Result<String> {
+    let base_url = std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/anthropic".to_string());
+    let api_key = std::env::var("ANTHROPIC_AUTH_TOKEN")
+        .context("ANTHROPIC_AUTH_TOKEN env var not set")?;
+    let model = std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        .unwrap_or_else(|_| "GLM-4.7".to_string());
+
+    // Anthropic API separates system from the messages array.
+    let system = messages
+        .iter()
+        .find(|m| m.role == Role::System)
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    let api_messages: Vec<ApiMessage> = messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .map(|m| ApiMessage {
+            role: if m.role == Role::User { "user" } else { "assistant" },
+            content: m.content.clone(),
+        })
+        .collect();
+
+    let body = ApiRequest { model, max_tokens: 2048, system, messages: api_messages };
+
+    let resp = client
+        .post(format!("{base_url}/v1/messages"))
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .context("HTTP request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("API error {status}: {text}"));
+    }
+
+    let parsed: ApiResponse = resp.json().await.context("failed to parse API response")?;
+
+    let text: String = parsed
+        .content
+        .iter()
+        .filter(|b| b.kind == "text")
+        .filter_map(|b| b.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("");
+
+    if text.is_empty() {
+        return Err(anyhow!("API returned empty content"));
+    }
+    Ok(text)
 }

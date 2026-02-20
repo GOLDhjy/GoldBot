@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::types::Event;
 
 #[derive(Debug, Clone)]
