@@ -1,5 +1,7 @@
 # GoldBot (TUI MVP)
 
+> [English Version](README_EN.md) | 简体中文
+
 跨平台 TUI Agent 原型：单次进入后按计划循环执行命令，展示过程，并在结束后默认折叠只显示最终结果。
 
 ## 特性
