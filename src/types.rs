@@ -17,6 +17,7 @@ pub enum Event {
     },
     NeedsConfirmation {
         command: String,
+        #[allow(dead_code)]
         reason: String,
     },
     Final {

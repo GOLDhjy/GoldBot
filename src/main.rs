@@ -285,6 +285,7 @@ struct App {
     max_steps: usize,
     llm_calling: bool,
     llm_stream_preview: String, // rolling raw stream buffer
+    llm_preview_shown: String,  // last preview rendered in status
     needs_agent_step: bool,
     running: bool,
     quit: bool,
@@ -304,6 +305,7 @@ impl App {
             max_steps: 30,
             llm_calling: false,
             llm_stream_preview: String::new(),
+            llm_preview_shown: String::new(),
             needs_agent_step: false,
             running: false,
             quit: false,
@@ -354,18 +356,25 @@ fn format_event(event: &Event) -> Vec<String> {
                 }
             })
         }
-        Event::NeedsConfirmation { command, reason } => {
+        Event::NeedsConfirmation { command, .. } => {
             let first = command.lines().next().unwrap_or(command.as_str());
             let cmd_display = if command.lines().count() > 1 {
                 format!("{} …", first)
             } else {
                 first.to_string()
             };
-            vec![
-                format!("  ⚠ {}：{}", reason, cmd_display)
-                    .yellow()
-                    .to_string(),
-            ]
+            let mut lines = vec![
+                "  ⚠ 需要确认".dark_yellow().to_string(),
+                format!("    {}", cmd_display).bold().cyan().to_string(),
+            ];
+            if command_contains_heredoc(command) {
+                lines.push(
+                    "    (EOF 是 Here-doc 的结束标记，表示接下来是多行写入内容)"
+                        .dark_grey()
+                        .to_string(),
+                );
+            }
+            lines
         }
         Event::Final { summary } => lines_with(summary, |i, line| {
             if i == 0 {
@@ -426,13 +435,19 @@ fn format_event_compact(event: &Event) -> Vec<String> {
         Event::Thinking { .. } => Vec::new(),
         Event::ToolCall { label, .. } => vec![format!("  • {}", label).cyan().to_string()],
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
-        Event::NeedsConfirmation { command, reason } => {
+        Event::NeedsConfirmation { command, .. } => {
             let first = command.lines().next().unwrap_or(command.as_str());
-            vec![
-                format!("    ⚠ {}：{}", reason, shorten_text(first, 72))
-                    .yellow()
+            let mut lines = vec![
+                "    ⚠ 需要确认".dark_yellow().to_string(),
+                format!("      {}", shorten_text(first, 72))
+                    .bold()
+                    .cyan()
                     .to_string(),
-            ]
+            ];
+            if command_contains_heredoc(command) {
+                lines.push("      (EOF = Here-doc 结束标记)".dark_grey().to_string());
+            }
+            lines
         }
         Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
     }
@@ -522,6 +537,10 @@ fn summarize_paths(paths: &[String]) -> String {
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn command_contains_heredoc(command: &str) -> bool {
+    command.contains("<<")
 }
 
 fn absolutize_path_for_display(path: &str) -> String {
@@ -636,6 +655,7 @@ async fn run_loop(
                 LlmWorkerEvent::Done(result) => {
                     app.llm_calling = false;
                     app.llm_stream_preview.clear();
+                    app.llm_preview_shown.clear();
                     screen.status.clear();
                     process_llm_result(app, screen, result);
                 }
@@ -647,6 +667,7 @@ async fn run_loop(
             app.needs_agent_step = false;
             app.llm_calling = true;
             app.llm_stream_preview.clear();
+            app.llm_preview_shown.clear();
             screen.status = "⏳ Thinking...".to_string();
             screen.refresh();
 
@@ -689,15 +710,28 @@ fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
     }
 
     app.llm_stream_preview.push_str(delta);
-    if app.llm_stream_preview.len() > 4096 {
-        let drop_len = app.llm_stream_preview.len().saturating_sub(4096);
-        app.llm_stream_preview.drain(..drop_len);
-    }
+    trim_left_to_max_bytes(&mut app.llm_stream_preview, 16_384);
 
     let preview = extract_live_preview(&app.llm_stream_preview);
     if preview.is_empty() {
         return;
     }
+
+    let punctuation_flush = preview.ends_with(['。', '！', '？', '.', '!', '?', ';', '；']);
+    let grew_by = preview
+        .chars()
+        .count()
+        .saturating_sub(app.llm_preview_shown.chars().count());
+    let should_refresh = app.llm_preview_shown.is_empty()
+        || preview.chars().count() < app.llm_preview_shown.chars().count()
+        || !preview.starts_with(&app.llm_preview_shown)
+        || grew_by >= 8
+        || punctuation_flush;
+    if !should_refresh {
+        return;
+    }
+
+    app.llm_preview_shown = preview.clone();
     screen.status = format!("⏳ {}", preview);
     screen.refresh();
 }
@@ -714,7 +748,7 @@ fn extract_live_preview(raw: &str) -> String {
 
     let no_tags = strip_xml_tags(s);
     let collapsed = no_tags.split_whitespace().collect::<Vec<_>>().join(" ");
-    fit_single_line_tail(&collapsed, 48)
+    tail_chars(&collapsed, 240)
 }
 
 fn strip_xml_tags(s: &str) -> String {
@@ -729,6 +763,29 @@ fn strip_xml_tags(s: &str) -> String {
         }
     }
     out
+}
+
+fn tail_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    s.chars().skip(count - max_chars).collect()
+}
+
+fn trim_left_to_max_bytes(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+
+    let mut cut = s.len().saturating_sub(max_bytes);
+    while cut < s.len() && !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s.drain(..cut);
 }
 
 // ── Key handling ──────────────────────────────────────────────────────────────
@@ -958,6 +1015,7 @@ fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.steps_taken = 0;
     app.running = true;
     app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
     app.needs_agent_step = true;
     app.pending_confirm = None;
     app.pending_confirm_note = false;
@@ -1112,6 +1170,7 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     app.running = false;
     app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
     app.pending_confirm = None;
     app.pending_confirm_note = false;
     screen.confirm_selected = None;

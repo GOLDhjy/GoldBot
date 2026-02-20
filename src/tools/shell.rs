@@ -232,6 +232,9 @@ fn looks_read_only(trimmed: &str, lower: &str) -> bool {
     if contains_write_redirection(trimmed) {
         return false;
     }
+    if is_read_only_sed(trimmed) {
+        return true;
+    }
     matches_any_prefix(
         lower,
         &[
@@ -259,7 +262,7 @@ fn looks_read_only(trimmed: &str, lower: &str) -> bool {
 fn looks_write(trimmed: &str, lower: &str) -> bool {
     contains_write_redirection(trimmed)
         || lower.contains("<<")
-        || matches_any_prefix(lower, &["tee ", "touch ", "printf ", "echo "])
+        || matches_any_prefix(lower, &["tee "])
         || lower.contains("open(") && (lower.contains("\"w\"") || lower.contains("'w'"))
 }
 
@@ -273,17 +276,55 @@ fn looks_update(_trimmed: &str, lower: &str) -> bool {
     )
 }
 
+fn is_read_only_sed(cmd: &str) -> bool {
+    let tokens = tokenize_shell_like(cmd);
+    if tokens.is_empty() {
+        return false;
+    }
+    if normalize_command_token(&tokens[0]) != "sed" {
+        return false;
+    }
+    !tokens
+        .iter()
+        .skip(1)
+        .any(|t| t == "-i" || t.starts_with("-i"))
+}
+
 fn matches_any_prefix(lower: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| lower.starts_with(p))
 }
 
 fn contains_write_redirection(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
-    let mut i = 0;
+    let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'>' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
-                i += 2;
+            let mut j = i + 1;
+            if j < bytes.len() && (bytes[j] == b'>' || bytes[j] == b'|') {
+                j += 1;
+            }
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j >= bytes.len() {
+                return true;
+            }
+            if bytes[j] == b'&' {
+                i = j + 1;
+                continue;
+            }
+
+            let start = j;
+            while j < bytes.len() {
+                let ch = bytes[j];
+                if ch.is_ascii_whitespace() || matches!(ch, b';' | b'|' | b'&') {
+                    break;
+                }
+                j += 1;
+            }
+            let target = cmd[start..j].trim_matches(|ch| matches!(ch, '"' | '\''));
+            if is_non_mutating_redirection_target(target) {
+                i = j;
                 continue;
             }
             return true;
@@ -328,6 +369,7 @@ fn extract_target(cmd: &str) -> Option<String> {
         "cat" | "less" | "more" | "head" | "tail" | "stat" => {
             tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied()
         }
+        "sed" => tokens.last().copied(),
         "rm" | "mkdir" | "rmdir" | "touch" | "chmod" | "chown" => {
             tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied()
         }
@@ -363,15 +405,26 @@ fn absolutize_target_for_display(target: &str) -> String {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| ".".to_string());
     }
-    let path = Path::new(target);
+    let path = expand_tilde(target).unwrap_or_else(|| PathBuf::from(target));
     let abs = if path.is_absolute() {
-        path.to_path_buf()
+        path
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(&path),
+            Err(_) => path,
+        }
     };
     abs.to_string_lossy().replace('\\', "/")
+}
+
+fn expand_tilde(target: &str) -> Option<PathBuf> {
+    if target == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from);
+    }
+    if let Some(rest) = target.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    None
 }
 
 fn extract_target_from_redirection(cmd: &str) -> Option<String> {
@@ -379,7 +432,11 @@ fn extract_target_from_redirection(cmd: &str) -> Option<String> {
     for (idx, token) in tokens.iter().enumerate() {
         if *token == ">" || *token == ">>" {
             if let Some(next) = tokens.get(idx + 1) {
-                return normalize_target(next);
+                let target = next.trim_matches(|ch| matches!(ch, '"' | '\''));
+                if is_non_mutating_redirection_target(target) {
+                    continue;
+                }
+                return normalize_target(target);
             }
         }
     }
@@ -405,11 +462,22 @@ fn extract_target_from_redirection(cmd: &str) -> Option<String> {
                 j += 1;
             }
             if start < j {
-                return normalize_target(&cmd[start..j]);
+                let target = cmd[start..j].trim_matches(|ch| matches!(ch, '"' | '\''));
+                if is_non_mutating_redirection_target(target) {
+                    continue;
+                }
+                return normalize_target(target);
             }
         }
     }
     None
+}
+
+fn is_non_mutating_redirection_target(target: &str) -> bool {
+    if target == "/dev/null" {
+        return true;
+    }
+    cfg!(target_os = "windows") && target.eq_ignore_ascii_case("nul")
 }
 
 fn extract_python_script_target(cmd: &str) -> Option<&str> {
@@ -686,5 +754,29 @@ mod tests {
             intent.label(),
             format!("Search(pattern: \"plan_from_codex_or_sample\", path: {cwd}/src)")
         );
+    }
+
+    #[test]
+    fn classify_sed_print_is_read() {
+        let intent = classify_command("sed -n '738,920p' src/main.rs");
+        assert_eq!(intent.kind, OperationKind::Read);
+    }
+
+    #[test]
+    fn classify_sed_in_place_is_update() {
+        let intent = classify_command("sed -i '' 's/foo/bar/g' src/main.rs");
+        assert_eq!(intent.kind, OperationKind::Update);
+    }
+
+    #[test]
+    fn classify_ls_stderr_to_dev_null_is_read() {
+        let intent =
+            classify_command("ls -la .github/ 2>/dev/null || echo \"No .github directory\"");
+        assert_eq!(intent.kind, OperationKind::Read);
+        let cwd = std::env::current_dir()
+            .expect("cwd")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(intent.label(), format!("Read({cwd}/.github/)"));
     }
 }

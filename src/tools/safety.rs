@@ -13,7 +13,16 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
         return (RiskLevel::Block, "已拦截：系统关键命令".into());
     }
 
-    let mut should_confirm = contains_unquoted_redirection(command);
+    let has_heredoc = contains_unquoted_heredoc(command);
+    let has_output_redirection = contains_unquoted_output_redirection(command);
+    let mut should_confirm = has_heredoc || has_output_redirection;
+    let mut confirm_reason = if has_heredoc {
+        Some("需要确认：这是 Here-doc 写入（<<EOF），会创建或覆盖文件".to_string())
+    } else if has_output_redirection {
+        Some("需要确认：命令包含重定向（> / >>），会写入文件".to_string())
+    } else {
+        None
+    };
 
     for segment in split_unquoted_segments(command) {
         let tokens = tokenize_shell(&segment);
@@ -28,14 +37,14 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
 
         if is_confirm_command(&cmd, &tokens, cmd_index) {
             should_confirm = true;
+            if confirm_reason.is_none() {
+                confirm_reason = Some("需要确认：该命令可能会修改文件或系统状态".to_string());
+            }
         }
     }
 
     if should_confirm {
-        (
-            RiskLevel::Confirm,
-            "需要确认：该命令可能会修改文件或系统状态".into(),
-        )
+        (RiskLevel::Confirm, confirm_reason.unwrap_or_default())
     } else {
         (RiskLevel::Safe, "低风险只读命令".into())
     }
@@ -54,11 +63,9 @@ fn is_confirm_command(cmd: &str, tokens: &[String], cmd_index: usize) -> bool {
             | "mv"
             | "ren"
             | "cp"
-            | "mkdir"
             | "chmod"
             | "chown"
             | "perl"
-            | "touch"
             | "tee"
             | "curl"
             | "wget"
@@ -249,7 +256,7 @@ fn tokenize_shell(segment: &str) -> Vec<String> {
     out
 }
 
-fn contains_unquoted_redirection(command: &str) -> bool {
+fn contains_unquoted_output_redirection(command: &str) -> bool {
     let b = command.as_bytes();
     let mut i = 0usize;
     let mut in_single = false;
@@ -281,13 +288,39 @@ fn contains_unquoted_redirection(command: &str) -> bool {
 
         if !in_single && !in_double {
             if c == b'>' {
-                if i + 1 < b.len() && b[i + 1] == b'&' {
-                    i += 2;
+                let mut j = i + 1;
+                if j < b.len() && (b[j] == b'>' || b[j] == b'|') {
+                    j += 1;
+                }
+
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j >= b.len() {
+                    return true;
+                }
+
+                // FD duplication like 2>&1 is not a filesystem mutation.
+                if b[j] == b'&' {
+                    i = j + 1;
                     continue;
                 }
-                return true;
-            }
-            if c == b'<' && i + 1 < b.len() && b[i + 1] == b'<' {
+
+                let start = j;
+                while j < b.len() {
+                    let ch = b[j];
+                    if ch.is_ascii_whitespace() || matches!(ch, b';' | b'|' | b'&') {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                let target = command[start..j].trim_matches(|ch| matches!(ch, '"' | '\''));
+                if is_safe_redirection_target(target) {
+                    i = j;
+                    continue;
+                }
+
                 return true;
             }
         }
@@ -295,6 +328,50 @@ fn contains_unquoted_redirection(command: &str) -> bool {
         i += 1;
     }
 
+    false
+}
+
+fn is_safe_redirection_target(target: &str) -> bool {
+    if target == "/dev/null" {
+        return true;
+    }
+    cfg!(target_os = "windows") && target.eq_ignore_ascii_case("nul")
+}
+
+fn contains_unquoted_heredoc(command: &str) -> bool {
+    let b = command.as_bytes();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while i < b.len() {
+        let c = b[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if c == b'\\' && !in_single {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if c == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double && c == b'<' && i + 1 < b.len() && b[i + 1] == b'<' {
+            return true;
+        }
+        i += 1;
+    }
     false
 }
 
@@ -338,5 +415,48 @@ mod tests {
     fn sed_in_place_requires_confirmation() {
         let (risk, _) = assess_command("sed -i '' 's/foo/bar/g' src/main.rs");
         assert_eq!(risk, RiskLevel::Confirm);
+    }
+
+    #[test]
+    fn cat_read_is_safe() {
+        let (risk, _) = assess_command("cat README.md");
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn cat_heredoc_requires_confirmation() {
+        let (risk, reason) = assess_command("cat > README_EN.md << 'EOF'");
+        assert_eq!(risk, RiskLevel::Confirm);
+        assert!(
+            reason.contains("Here-doc") || reason.contains("重定向"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn find_with_stderr_redirect_to_dev_null_is_safe() {
+        let (risk, _) =
+            assess_command(r#"find .. -maxdepth 2 -type d -iname "*gold*" 2>/dev/null"#);
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn ls_stderr_redirect_to_dev_null_is_safe() {
+        let (risk, _) =
+            assess_command(r#"ls -la .github/ 2>/dev/null || echo "No .github directory""#);
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn ls_redirect_to_file_requires_confirmation() {
+        let (risk, reason) = assess_command("ls > out.txt");
+        assert_eq!(risk, RiskLevel::Confirm);
+        assert!(reason.contains("重定向"), "unexpected reason: {reason}");
+    }
+
+    #[test]
+    fn mkdir_p_is_safe() {
+        let (risk, _) = assess_command("mkdir -p .github/workflows Formula");
+        assert_eq!(risk, RiskLevel::Safe);
     }
 }
