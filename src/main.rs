@@ -9,14 +9,13 @@ use std::{
 };
 
 use agent::{
-    provider::{Message, build_http_client, chat},
+    provider::{Message, build_http_client, chat_stream_with},
     react::{SYSTEM_PROMPT, parse_llm_response},
 };
 use crossterm::{
     cursor,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
     style::{Print, Stylize},
@@ -26,7 +25,7 @@ use memory::store::MemoryStore;
 use tokio::sync::mpsc;
 use tools::safety::{RiskLevel, assess_command};
 use types::{Event, LlmAction};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthChar;
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 // The bottom of the terminal is a "managed" area that is redrawn in place.
@@ -57,6 +56,7 @@ struct Screen {
     pub status: String,
     pub input: String,
     task_lines: usize,
+    task_rendered: Vec<String>, // raw rendered task lines currently visible above managed area
     managed_lines: usize, // lines currently on screen in managed area
     pub confirm_selected: Option<usize>, // Some(n) → in confirmation mode, n selected
     pub input_focused: bool,
@@ -69,6 +69,7 @@ impl Screen {
             status: String::new(),
             input: String::new(),
             task_lines: 0,
+            task_rendered: Vec::new(),
             managed_lines: 2,
             confirm_selected: None,
             input_focused: true,
@@ -142,6 +143,7 @@ impl Screen {
     /// Emit event lines into the scrolling area above, then redraw managed area.
     fn emit(&mut self, lines: &[String]) {
         self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
+        self.task_rendered.extend(lines.iter().cloned());
         self.clear_managed();
         for line in lines {
             let _ = execute!(self.stdout, Print(format!("{}\r\n", line)));
@@ -157,6 +159,7 @@ impl Screen {
 
     fn reset_task_lines(&mut self) {
         self.task_lines = 0;
+        self.task_rendered.clear();
     }
 
     fn rendered_rows(&self, line: &str) -> usize {
@@ -164,14 +167,18 @@ impl Screen {
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
         let plain = strip_ansi(line);
-        let width = UnicodeWidthStr::width(plain.as_str());
+        let width = rendered_text_width(plain.as_str());
         width.saturating_sub(1) / cols + 1
     }
 
     /// Erase all task lines + managed area and replace with `kept`.
     fn collapse_to(&mut self, kept: &[String]) {
-        let up = self
-            .task_lines
+        let rendered_rows = self
+            .task_rendered
+            .iter()
+            .map(|line| self.rendered_rows(line))
+            .sum::<usize>();
+        let up = rendered_rows
             .saturating_add(self.managed_lines.saturating_sub(1))
             .min(u16::MAX as usize) as u16;
         let _ = execute!(
@@ -181,9 +188,11 @@ impl Screen {
             Clear(ClearType::FromCursorDown),
         );
         self.task_lines = 0;
+        self.task_rendered.clear();
         for line in kept {
             let _ = execute!(self.stdout, Print(format!("{}\r\n", line)));
             self.task_lines += self.rendered_rows(line);
+            self.task_rendered.push(line.clone());
         }
         self.draw_managed();
     }
@@ -208,6 +217,23 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+fn rendered_text_width(s: &str) -> usize {
+    const TAB_STOP: usize = 8;
+    let mut col = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '\t' => {
+                let advance = TAB_STOP - (col % TAB_STOP);
+                col += advance;
+            }
+            '\r' | '\n' => {}
+            c if c.is_control() => {}
+            c => col += UnicodeWidthChar::width(c).unwrap_or(0),
+        }
+    }
+    col
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 struct App {
     messages: Vec<Message>,
@@ -215,6 +241,7 @@ struct App {
     steps_taken: usize,
     max_steps: usize,
     llm_calling: bool,
+    llm_stream_preview: String, // rolling raw stream buffer
     needs_agent_step: bool,
     running: bool,
     quit: bool,
@@ -233,6 +260,7 @@ impl App {
             steps_taken: 0,
             max_steps: 30,
             llm_calling: false,
+            llm_stream_preview: String::new(),
             needs_agent_step: false,
             running: false,
             quit: false,
@@ -243,6 +271,11 @@ impl App {
             task_collapsed: false,
         }
     }
+}
+
+enum LlmWorkerEvent {
+    Delta(String),
+    Done(anyhow::Result<String>),
 }
 
 // ── Event formatting ──────────────────────────────────────────────────────────
@@ -309,6 +342,126 @@ fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
     v.iter().enumerate().map(|(i, l)| f(i, l)).collect()
 }
 
+#[derive(Default)]
+struct FsChangeSummary {
+    created: Vec<String>,
+    updated: Vec<String>,
+    deleted: Vec<String>,
+}
+
+fn format_event_compact(event: &Event) -> Vec<String> {
+    match event {
+        Event::Thinking { .. } => Vec::new(),
+        Event::ToolCall { label, .. } => vec![format!("  • {}", label).cyan().to_string()],
+        Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
+        Event::NeedsConfirmation { command, reason } => {
+            let first = command.lines().next().unwrap_or(command.as_str());
+            vec![
+                format!("    ⚠ confirm needed: {} — {}", shorten_text(first, 72), reason)
+                    .yellow()
+                    .to_string(),
+            ]
+        }
+        Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
+    }
+}
+
+fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
+    let mut raw = Vec::new();
+    if let Some(fs) = parse_fs_changes(output) {
+        if !fs.created.is_empty() {
+            raw.push(format!("    ⎿ created: {}", summarize_paths(&fs.created)));
+        }
+        if !fs.updated.is_empty() {
+            raw.push(format!("    ⎿ updated: {}", summarize_paths(&fs.updated)));
+        }
+        if !fs.deleted.is_empty() {
+            raw.push(format!("    ⎿ deleted: {}", summarize_paths(&fs.deleted)));
+        }
+    }
+
+    if raw.is_empty() {
+        if let Some(line) = first_non_empty_line(output) {
+            raw.push(format!("    ⎿ {}", shorten_text(line, 110)));
+        } else {
+            raw.push("    ⎿ (no output)".to_string());
+        }
+    }
+
+    raw.into_iter()
+        .map(|line| {
+            if exit_code == 0 {
+                line.dark_grey().to_string()
+            } else {
+                line.red().to_string()
+            }
+        })
+        .collect()
+}
+
+fn parse_fs_changes(output: &str) -> Option<FsChangeSummary> {
+    let mut in_section = false;
+    let mut fs = FsChangeSummary::default();
+
+    for line in output.lines() {
+        let t = line.trim();
+        if !in_section {
+            if t == "Filesystem changes:" {
+                in_section = true;
+            }
+            continue;
+        }
+
+        if t.starts_with("Preview ") {
+            break;
+        }
+        if let Some(path) = t.strip_prefix("+ ") {
+            fs.created.push(path.to_string());
+            continue;
+        }
+        if let Some(path) = t.strip_prefix("~ ") {
+            fs.updated.push(path.to_string());
+            continue;
+        }
+        if let Some(path) = t.strip_prefix("- ") {
+            fs.deleted.push(path.to_string());
+        }
+    }
+
+    if !in_section {
+        return None;
+    }
+    Some(fs)
+}
+
+fn summarize_paths(paths: &[String]) -> String {
+    const MAX_SHOWN: usize = 2;
+    let mut out = paths
+        .iter()
+        .take(MAX_SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > MAX_SHOWN {
+        out.push_str(&format!(" (+{} more)", paths.len() - MAX_SHOWN));
+    }
+    out
+}
+
+fn first_non_empty_line(output: &str) -> Option<&str> {
+    output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn shorten_text(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 // ── Collapse / expand ─────────────────────────────────────────────────────────
 
 fn collapsed_lines(app: &App) -> Vec<String> {
@@ -317,6 +470,12 @@ fn collapsed_lines(app: &App) -> Vec<String> {
         text: app.task.clone(),
     });
     lines.push(String::new());
+    for ev in &app.task_events {
+        lines.extend(format_event_compact(ev));
+    }
+    if !app.task_events.is_empty() {
+        lines.push(String::new());
+    }
     lines.extend(format_event(&Event::Final {
         summary: summary.to_string(),
     }));
@@ -348,11 +507,11 @@ fn toggle_collapse(app: &mut App, screen: &mut Screen) {
     if app.task_collapsed {
         screen.collapse_to(&expanded_lines(app));
         app.task_collapsed = false;
-        screen.status = "[d] collapse".dark_grey().to_string();
+        screen.status = "[Ctrl+d] compact view".dark_grey().to_string();
     } else {
         screen.collapse_to(&collapsed_lines(app));
         app.task_collapsed = true;
-        screen.status = "[d] expand".dark_grey().to_string();
+        screen.status = "[Ctrl+d] full details".dark_grey().to_string();
     }
     screen.refresh();
 }
@@ -366,13 +525,11 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new();
 
     enable_raw_mode()?;
-    execute!(io::stdout(), EnableMouseCapture)?;
     let mut screen = Screen::new()?;
 
     let run_result = run_loop(&mut app, &mut screen, http_client).await;
 
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = execute!(io::stdout(), Print("\r\n"));
     run_result
 }
@@ -386,27 +543,39 @@ async fn run_loop(
         start_task(app, screen, task);
     }
 
-    let (tx, mut rx) = mpsc::channel::<anyhow::Result<String>>(1);
+    let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
 
     loop {
-        if let Ok(result) = rx.try_recv() {
-            app.llm_calling = false;
-            screen.status.clear();
-            process_llm_result(app, screen, result);
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                LlmWorkerEvent::Delta(delta) => handle_llm_stream_delta(app, screen, &delta),
+                LlmWorkerEvent::Done(result) => {
+                    app.llm_calling = false;
+                    app.llm_stream_preview.clear();
+                    screen.status.clear();
+                    process_llm_result(app, screen, result);
+                }
+            }
         }
 
         if app.running && app.pending_confirm.is_none() && app.needs_agent_step && !app.llm_calling
         {
             app.needs_agent_step = false;
             app.llm_calling = true;
+            app.llm_stream_preview.clear();
             screen.status = "⏳ Thinking...".dim().to_string();
             screen.refresh();
 
-            let tx2 = tx.clone();
+            let tx_done = tx.clone();
+            let tx_delta = tx.clone();
             let client = http_client.clone();
             let messages = app.messages.clone();
             tokio::spawn(async move {
-                let _ = tx2.send(chat(&client, &messages).await).await;
+                let result = chat_stream_with(&client, &messages, |piece| {
+                    let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
+                })
+                .await;
+                let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
             });
         }
 
@@ -416,9 +585,6 @@ async fn run_loop(
                     if handle_key(app, screen, key.code, key.modifiers) {
                         break;
                     }
-                }
-                CEvent::Mouse(mouse) => {
-                    handle_mouse(app, screen, mouse);
                 }
                 _ => {}
             }
@@ -433,11 +599,78 @@ async fn run_loop(
     Ok(())
 }
 
+fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
+    if !app.llm_calling || delta.is_empty() {
+        return;
+    }
+
+    app.llm_stream_preview.push_str(delta);
+    if app.llm_stream_preview.len() > 4096 {
+        let drop_len = app.llm_stream_preview.len().saturating_sub(4096);
+        app.llm_stream_preview.drain(..drop_len);
+    }
+
+    let preview = extract_live_preview(&app.llm_stream_preview);
+    if preview.is_empty() {
+        return;
+    }
+    screen.status = format!("⏳ {}", preview).dim().to_string();
+    screen.refresh();
+}
+
+fn extract_live_preview(raw: &str) -> String {
+    let mut s = if let Some(start) = raw.rfind("<thought>") {
+        &raw[start + "<thought>".len()..]
+    } else {
+        raw
+    };
+    if let Some(end) = s.rfind("</thought>") {
+        s = &s[..end];
+    }
+
+    let no_tags = strip_xml_tags(s);
+    let collapsed = no_tags.split_whitespace().collect::<Vec<_>>().join(" ");
+    tail_chars(&collapsed, 56)
+}
+
+fn strip_xml_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn tail_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.trim().to_string();
+    }
+    let tail: String = chars[chars.len() - max..].iter().collect();
+    format!("…{}", tail.trim())
+}
+
 // ── Key handling ──────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) -> bool {
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
+    }
+    if key == KeyCode::Char('d')
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && !app.running
+        && app.final_summary.is_some()
+        && screen.confirm_selected.is_none()
+        && !app.pending_confirm_note
+    {
+        toggle_collapse(app, screen);
+        return false;
     }
 
     if screen.confirm_selected.is_some() {
@@ -457,6 +690,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     0 => {
                         // Execute
                         screen.confirm_selected = None;
+                        screen.input_focused = true;
                         app.pending_confirm_note = false;
                         let Some(cmd) = app.pending_confirm.take() else {
                             screen.refresh();
@@ -468,6 +702,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     1 => {
                         // Skip
                         screen.confirm_selected = None;
+                        screen.input_focused = true;
                         app.pending_confirm_note = false;
                         let Some(cmd) = app.pending_confirm.take() else {
                             screen.refresh();
@@ -568,17 +803,34 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     screen.input_focused = true;
                     screen.refresh();
                 }
-                KeyCode::Char('d') if modifiers.is_empty() && app.final_summary.is_some() => {
-                    toggle_collapse(app, screen)
+                KeyCode::Esc if modifiers.is_empty() => return true,
+                KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                    screen.input_focused = true;
+                    screen.input.push(c);
+                    screen.refresh();
                 }
-                KeyCode::Esc | KeyCode::Char('q') if modifiers.is_empty() => return true,
+                KeyCode::Backspace => {
+                    screen.input_focused = true;
+                    screen.refresh();
+                }
                 _ => {}
             }
         }
     } else {
         // ── Running (LLM in flight) ───────────────────────────────────────────
-        if key == KeyCode::Char('q') && modifiers.is_empty() {
-            return true;
+        // Let user pre-type the next input while current loop is running.
+        match key {
+            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                screen.input_focused = true;
+                screen.input.push(c);
+                screen.refresh();
+            }
+            KeyCode::Backspace => {
+                screen.input_focused = true;
+                screen.input.pop();
+                screen.refresh();
+            }
+            _ => {}
         }
     }
 
@@ -618,23 +870,6 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
     screen.refresh();
 }
 
-fn handle_mouse(app: &mut App, screen: &mut Screen, mouse: MouseEvent) {
-    if app.running {
-        return;
-    }
-    if !matches!(mouse.kind, MouseEventKind::Down(_)) {
-        return;
-    }
-    if screen.confirm_selected.is_some() {
-        return;
-    }
-    if app.pending_confirm_note {
-        return;
-    }
-    screen.input_focused = !screen.input_focused;
-    screen.refresh();
-}
-
 // ── Task lifecycle ────────────────────────────────────────────────────────────
 
 fn start_task(app: &mut App, screen: &mut Screen, task: String) {
@@ -646,10 +881,12 @@ fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.task = task.clone();
     app.steps_taken = 0;
     app.running = true;
+    app.llm_stream_preview.clear();
     app.needs_agent_step = true;
     app.pending_confirm = None;
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
+    screen.input_focused = true;
     app.task_events.clear();
     app.final_summary = None;
     app.task_collapsed = false;
@@ -798,9 +1035,11 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     let _ = store.append_long_term(&format!("task={} | result={}", app.task, summary));
 
     app.running = false;
+    app.llm_stream_preview.clear();
     app.pending_confirm = None;
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
-    screen.status = "[d] expand".dark_grey().to_string();
+    screen.input_focused = true;
+    screen.status = "[Ctrl+d] full details".dark_grey().to_string();
     screen.refresh();
 }

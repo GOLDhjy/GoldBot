@@ -103,6 +103,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 // ── LLM call ─────────────────────────────────────────────────────────────────
 
 /// Send the full conversation to the LLM and return its raw text response.
+#[allow(dead_code)]
 pub async fn chat(client: &reqwest::Client, messages: &[Message]) -> Result<String> {
     let (base_url, api_key, body) = build_request(messages, false)?;
 
@@ -238,16 +239,20 @@ fn drain_sse_frames<F>(pending: &mut String, merged: &mut String, on_delta: &mut
 where
     F: FnMut(&str),
 {
-    while let Some(pos) = pending.find("\n\n") {
-        let frame = pending[..pos].to_string();
-        pending.drain(..pos + 2);
-        handle_sse_frame(&frame, merged, on_delta);
-    }
-
-    if let Some(pos) = pending.find("\r\n\r\n") {
-        let frame = pending[..pos].to_string();
-        pending.drain(..pos + 4);
-        handle_sse_frame(&frame, merged, on_delta);
+    loop {
+        if let Some(pos) = pending.find("\n\n") {
+            let frame = pending[..pos].to_string();
+            pending.drain(..pos + 2);
+            handle_sse_frame(&frame, merged, on_delta);
+            continue;
+        }
+        if let Some(pos) = pending.find("\r\n\r\n") {
+            let frame = pending[..pos].to_string();
+            pending.drain(..pos + 4);
+            handle_sse_frame(&frame, merged, on_delta);
+            continue;
+        }
+        break;
     }
 }
 
