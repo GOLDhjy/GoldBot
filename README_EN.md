@@ -1,75 +1,132 @@
-# GoldBot (TUI MVP)
+# GoldBot - AI Terminal Automation Agent
 
-> 简体中文 | [English Version](README_EN.md)
+A cross-platform TUI Agent built with Rust that automatically plans and executes shell commands via LLM to complete tasks.
 
-A cross-platform TUI Agent prototype: enters once, executes commands in a loop following a plan, displays the process, and defaults to showing only the final summary after completion.
+[简体中文版](README.md)
 
 ## Features
 
-### Unified Tool Interface
-- `run_command` unified tool interface
-  - macOS/Linux: `bash -lc`
-  - Windows: `powershell -NoProfile -Command`
+- **Three-Level Safety Control**: Safe/Confirm/Block
+- **Persistent Memory**: Short-term (daily) + Long-term (auto-extracted preferences)
+- **ReAct Loop**: Think → Act → Observe → Think again
+- **Smart Command Classification**: Read/Write/Update/Search/Bash
+- **Real-time TUI**: Streamed thinking process, collapsed by default after completion
+- **Cross-Platform**: macOS/Linux (bash) / Windows (PowerShell)
 
-### Risk Control (Three-Level Assessment)
-- **Safe** - Execute directly (e.g., `ls`, `git status`, `sed -n`)
-- **Confirm** - Popup menu for confirmation (e.g., `rm`, `git commit`, `sed -i`)
-- **Block** - Directly block (e.g., `sudo`, `format`, fork bombs)
-- High-risk commands trigger a **selectable menu** (not text input)
+## Installation
 
-### Command Classification
-Commands are automatically classified into 5 types:
-- **Read** - Read-only operations (e.g., `cat`, `ls`, `sed -n`)
-- **Write** - Write operations (e.g., `cat > file`)
-- **Update** - Update operations (e.g., `sed -i`, `rm`)
-- **Search** - Search operations (e.g., `rg`, `grep`)
-- **Bash** - Other shell commands
+### One-Line Install (Recommended)
 
-### Process Visibility
-- Event types: `Thinking / ToolCall / ToolResult / NeedsConfirmation / Final`
-- Collapsed by default after completion, showing only final summary
-- Press `d` to expand/collapse details
-
-## Running
+**macOS / Linux**
 
 ```bash
-cargo run
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/main/scripts/install.sh | bash
 ```
 
-## Keyboard Shortcuts
-
-- `Esc` - Exit
-- `Ctrl+d` - Collapse/expand details (after task completion)
-- `↑/↓` - Navigate confirmation menu
-- `Enter` - Confirm menu selection
-
-## Notes
-
-Currently in MVP stage. LLM decision-making uses a deterministic planner (no API Key required), which can be replaced with a real LLM + tools loop in the future.
-
-## Codex Provider Integration (Implemented)
-
-By default, the built-in example planner is used. To generate plans via local Codex at startup:
+Or via Homebrew:
 
 ```bash
-GOLDBOT_USE_CODEX=1 GOLDBOT_TASK="Organize large files in current directory" cargo run
+brew install GOLDhjy/GoldBot/goldbot
 ```
 
-Notes:
-- Generates JSON plan via `codex exec` (provider file: `src/agent/provider.rs`)
-- Automatically falls back to example planner if Codex is unavailable or returns an error
+### Build from Source
 
-## Memory Mechanism
+```bash
+cargo install --git https://github.com/GOLDhjy/GoldBot.git
+```
 
-- **Short-term memory** - Stored in Markdown at `memory/YYYY-MM-DD.md` (`Task`/`Final` sections with code blocks)
-- **Long-term memory** - Stored as a Markdown bullet list in `MEMORY.md`, using concise one-sentence durable facts (preferences/defaults/long-lived constraints), with deduplication
-- **Write gate** - Long-term memory is written only when the user explicitly signals durable intent (for example: remember/default/prefer/from now on)
-- **Pre-compaction flush** - Before context compaction, durable notes are flushed from older turns into long-term memory
-- **Auto-load on startup** - Long-term memory + recent short-term logs (last 2 days) are injected into the system prompt
+## Project Structure
 
-Default storage location (outside the repo):
-- macOS / Linux: `~/.goldbot/`
-- Windows: `%APPDATA%\\GoldBot\\`
+```
+GoldBot/
+├── src/
+│   ├── main.rs           # Entry point + main event loop
+│   ├── agent/
+│   │   ├── react.rs      # ReAct framework: system prompt + response parsing
+│   │   ├── step.rs       # Core steps: start → process → execute → finish
+│   │   └── provider.rs   # LLM interface (HTTP + streaming)
+│   ├── tools/
+│   │   ├── shell.rs      # Command execution + classification
+│   │   └── safety.rs     # Risk assessment (Safe/Confirm/Block)
+│   ├── memory/
+│   │   ├── store.rs      # Memory storage (short/long-term)
+│   │   └── compactor.rs  # Context compression
+│   ├── ui/
+│   │   ├── screen.rs     # TUI screen management
+│   │   └── format.rs     # Event formatting
+│   └── types.rs
+├── Cargo.toml
+└── README.md
+```
 
-Override with:
-- `GOLDBOT_MEMORY_DIR=/your/path`
+## How It Works
+
+### Main Event Loop (main.rs)
+
+```text
+loop {
+    1. Handle LLM streaming response (update thinking preview)
+    2. Trigger Agent step (async LLM API call)
+    3. Handle keyboard input (Ctrl+C/D, ↑/↓/Enter)
+}
+```
+
+### ReAct Loop Flow
+
+```text
+User enters task
+  → start_task() (reset state, set needs_agent_step=true)
+  → LLM call (send System Prompt + history)
+  → process_llm_result() (parse <thought> and <tool>/<final>)
+  
+  Branches:
+  ├─ <tool>shell → execute_command()
+  │      ├─ Safe → Execute directly
+  │      ├─ Confirm → Popup menu
+  │      └─ Block → Reject
+  │           → Add result to history → needs_agent_step=true (loop)
+  │
+  └─ <final> → finish()
+       → Save memory → Collapse display → running=false (exit)
+```
+
+### Safety Assessment
+
+```text
+Block: sudo, format, fork bomb
+Confirm: rm, mv, cp, git commit, curl, wget, >, >>
+Safe: ls, cat, grep, git status
+```
+
+### Memory Mechanism
+
+- **Short-term**: ~/.goldbot/memory/YYYY-MM-DD.md (full conversations)
+- **Long-term**: ~/.goldbot/MEMORY.md (preferences/rules only, deduplicated)
+- **Startup injection**: Auto-load long-term memory + recent 2-day short-term memory
+
+## Usage
+
+```bash
+goldbot
+```
+
+### Keyboard Shortcuts
+
+- `Ctrl+C` - Exit
+- `Ctrl+D` - Collapse/expand details
+- `↑/↓/Enter` - Navigate confirmation menu
+
+### Confirmation Menu
+
+1. Execute - Execute command
+2. Skip - Skip command
+3. Abort - Abort task
+4. Note - Add instruction
+
+## Tech Stack
+
+- Rust 2024 Edition
+- Tokio (async runtime)
+- crossterm (TUI)
+- reqwest (HTTP)
+- serde_json
