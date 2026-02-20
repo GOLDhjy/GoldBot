@@ -11,6 +11,7 @@ permissions:
 
 env:
   BIN_NAME: goldbot
+  BIN_BUILD_NAME: GoldBot
 
 jobs:
   build:
@@ -60,7 +61,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           PKG="${BIN_NAME}-v${VERSION}-${{ matrix.suffix }}"
           mkdir -p "dist/${PKG}"
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.bin_ext }}" "dist/${PKG}/"
+          cp "target/${{ matrix.target }}/release/${BIN_BUILD_NAME}${{ matrix.bin_ext }}" "dist/${PKG}/${BIN_NAME}${{ matrix.bin_ext }}"
           cp README.md "dist/${PKG}/"
           tar -C dist -czf "dist/${PKG}.tar.gz" "${PKG}"
 
@@ -71,7 +72,7 @@ jobs:
           $Version = $env:GITHUB_REF_NAME.TrimStart("v")
           $Pkg = "$env:BIN_NAME-v$Version-${{ matrix.suffix }}"
           New-Item -ItemType Directory -Force -Path "dist/$Pkg" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME${{ matrix.bin_ext }}" "dist/$Pkg/"
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN_BUILD_NAME${{ matrix.bin_ext }}" "dist/$Pkg/$env:BIN_NAME${{ matrix.bin_ext }}"
           Copy-Item "README.md" "dist/$Pkg/"
           Compress-Archive -Path "dist/$Pkg/*" -DestinationPath "dist/$Pkg.zip" -Force
 
