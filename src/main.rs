@@ -13,8 +13,8 @@ use agent::{
     provider::{Message, build_http_client, chat_stream_with},
     react::SYSTEM_PROMPT,
     step::{
-        execute_command, finish, handle_llm_stream_delta, maybe_flush_and_compact_before_call,
-        process_llm_result, start_task,
+        execute_command, finish, handle_llm_stream_delta, handle_llm_thinking_delta,
+        maybe_flush_and_compact_before_call, process_llm_result, start_task,
     },
 };
 use crossterm::{
@@ -50,6 +50,7 @@ pub(crate) struct App {
     pub task_events: Vec<Event>,
     pub final_summary: Option<String>,
     pub task_collapsed: bool,
+    pub show_thinking: bool,
 }
 
 impl App {
@@ -58,6 +59,7 @@ impl App {
         let system_prompt = store.build_system_prompt(SYSTEM_PROMPT);
         Self {
             messages: vec![Message::system(system_prompt)],
+
             task: String::new(),
             steps_taken: 0,
             max_steps: 30,
@@ -72,12 +74,15 @@ impl App {
             task_events: Vec::new(),
             final_summary: None,
             task_collapsed: false,
+            show_thinking: true,
         }
     }
+
 }
 
 pub(crate) enum LlmWorkerEvent {
     Delta(String),
+    ThinkingDelta(String),
     Done(anyhow::Result<String>),
 }
 
@@ -114,6 +119,9 @@ async fn run_loop(
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 LlmWorkerEvent::Delta(delta) => handle_llm_stream_delta(app, screen, &delta),
+                LlmWorkerEvent::ThinkingDelta(chunk) => {
+                    handle_llm_thinking_delta(app, screen, &chunk)
+                }
                 LlmWorkerEvent::Done(result) => {
                     app.llm_calling = false;
                     app.llm_stream_preview.clear();
@@ -138,10 +146,20 @@ async fn run_loop(
             let tx_delta = tx.clone();
             let client = http_client.clone();
             let messages = app.messages.clone();
+            let show_thinking = app.show_thinking;
             tokio::spawn(async move {
-                let result = chat_stream_with(&client, &messages, |piece| {
-                    let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
-                })
+                let result = chat_stream_with(
+                    &client,
+                    &messages,
+                    show_thinking,
+                    |piece| {
+                        let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
+                    },
+                    |chunk| {
+                        let _ =
+                            tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
+                    },
+                )
                 .await;
                 let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
             });
@@ -181,6 +199,23 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
         && !app.pending_confirm_note
     {
         toggle_collapse(app, screen);
+        return false;
+    }
+    if key == KeyCode::Tab
+        && modifiers.is_empty()
+        && screen.confirm_selected.is_none()
+        && !app.pending_confirm_note
+    {
+        app.show_thinking = !app.show_thinking;
+        let label = if app.show_thinking {
+            "Thinking: ON"
+        } else {
+            "Thinking: OFF"
+        };
+        if !app.llm_calling {
+            screen.status = label.dark_grey().to_string();
+            screen.refresh();
+        }
         return false;
     }
 

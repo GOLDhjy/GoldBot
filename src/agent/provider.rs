@@ -37,16 +37,28 @@ impl Message {
     }
 }
 
-// ── Anthropic-compatible API wire types ───────────────────────────────────────
+// ── GLM native API wire types (OpenAI-compatible format) ──────────────────────
+
+#[derive(Serialize)]
+struct ThinkingParam {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    /// false = preserve reasoning across turns (recommended).
+    /// Omitted when thinking is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clear_thinking: Option<bool>,
+}
 
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
-    max_tokens: u32,
-    system: String,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingParam>,
 }
 
 #[derive(Serialize)]
@@ -55,29 +67,41 @@ struct ApiMessage {
     content: String,
 }
 
+// ── Non-streaming response ────────────────────────────────────────────────────
+
 #[derive(Deserialize)]
 struct ApiResponse {
-    content: Vec<ContentBlock>,
+    choices: Vec<ApiChoice>,
 }
 
 #[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    text: Option<String>,
+struct ApiChoice {
+    message: ApiChoiceMessage,
 }
+
+#[derive(Deserialize)]
+struct ApiChoiceMessage {
+    content: Option<String>,
+}
+
+// ── Streaming SSE response ────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct StreamEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    delta: Option<StreamDelta>,
-    content_block: Option<ContentBlock>,
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
 }
 
 #[derive(Deserialize)]
 struct StreamDelta {
-    text: Option<String>,
+    /// Text response content delta.
+    content: Option<String>,
+    /// Native thinking content delta.
+    reasoning_content: Option<String>,
 }
 
 // ── HTTP client builder ───────────────────────────────────────────────────────
@@ -100,17 +124,20 @@ pub fn build_http_client() -> Result<reqwest::Client> {
     builder.build().map_err(Into::into)
 }
 
-// ── LLM call ─────────────────────────────────────────────────────────────────
+// ── LLM calls ────────────────────────────────────────────────────────────────
 
 /// Send the full conversation to the LLM and return its raw text response.
 #[allow(dead_code)]
-pub async fn chat(client: &reqwest::Client, messages: &[Message]) -> Result<String> {
-    let (base_url, api_key, body) = build_request(messages, false)?;
+pub async fn chat(
+    client: &reqwest::Client,
+    messages: &[Message],
+    show_thinking: bool,
+) -> Result<String> {
+    let (base_url, api_key, body) = build_request(messages, false, show_thinking)?;
 
     let resp = client
-        .post(format!("{base_url}/v1/messages"))
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
         .send()
         .await
@@ -120,21 +147,23 @@ pub async fn chat(client: &reqwest::Client, messages: &[Message]) -> Result<Stri
 }
 
 /// Stream text deltas while returning the final merged response.
-/// Falls back to non-stream JSON parsing if SSE is not available.
-pub async fn chat_stream_with<F>(
+/// `on_delta` receives text content; `on_thinking_delta` receives native thinking content.
+pub async fn chat_stream_with<F, G>(
     client: &reqwest::Client,
     messages: &[Message],
+    show_thinking: bool,
     mut on_delta: F,
+    mut on_thinking_delta: G,
 ) -> Result<String>
 where
     F: FnMut(&str),
+    G: FnMut(&str),
 {
-    let (base_url, api_key, body) = build_request(messages, true)?;
+    let (base_url, api_key, body) = build_request(messages, true, show_thinking)?;
 
     let mut resp = client
-        .post(format!("{base_url}/v1/messages"))
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
         .send()
         .await
@@ -162,9 +191,9 @@ where
 
     while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
         pending.push_str(&String::from_utf8_lossy(&chunk));
-        drain_sse_frames(&mut pending, &mut merged, &mut on_delta);
+        drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
     }
-    drain_sse_frames(&mut pending, &mut merged, &mut on_delta);
+    drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
 
     if merged.is_empty() {
         return Err(anyhow!("API returned empty content"));
@@ -172,39 +201,48 @@ where
     Ok(merged)
 }
 
-fn build_request(messages: &[Message], stream: bool) -> Result<(String, String, ApiRequest)> {
-    let base_url = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/anthropic".to_string());
-    let api_key =
-        std::env::var("ANTHROPIC_AUTH_TOKEN").context("ANTHROPIC_AUTH_TOKEN env var not set")?;
-    let model =
-        std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
+fn build_request(
+    messages: &[Message],
+    stream: bool,
+    show_thinking: bool,
+) -> Result<(String, String, ApiRequest)> {
+    const BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+    const MODEL: &str = "GLM-4.7";
 
-    let system = messages
-        .iter()
-        .find(|m| m.role == Role::System)
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let base_url = std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
+    let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
+    let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| MODEL.to_string());
 
     let api_messages: Vec<ApiMessage> = messages
         .iter()
-        .filter(|m| m.role != Role::System)
         .map(|m| ApiMessage {
-            role: if m.role == Role::User {
-                "user"
-            } else {
-                "assistant"
+            role: match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
             },
             content: m.content.clone(),
         })
         .collect();
 
+    let thinking = if show_thinking {
+        Some(ThinkingParam {
+            kind: "enabled",
+            clear_thinking: Some(false),
+        })
+    } else {
+        Some(ThinkingParam {
+            kind: "disabled",
+            clear_thinking: None,
+        })
+    };
+
     let body = ApiRequest {
         model,
-        max_tokens: 2048,
-        system,
         messages: api_messages,
+        max_tokens: Some(4096),
         stream: if stream { Some(true) } else { None },
+        thinking,
     };
 
     Ok((base_url, api_key, body))
@@ -218,13 +256,12 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
     }
 
     let parsed: ApiResponse = resp.json().await.context("failed to parse API response")?;
-    let text: String = parsed
-        .content
-        .iter()
-        .filter(|b| b.kind == "text")
-        .filter_map(|b| b.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("");
+    let text = parsed
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .unwrap_or_default();
 
     if text.is_empty() {
         return Err(anyhow!("API returned empty content"));
@@ -232,30 +269,42 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
     Ok(text)
 }
 
-fn drain_sse_frames<F>(pending: &mut String, merged: &mut String, on_delta: &mut F)
+fn drain_sse_frames<F, G>(
+    pending: &mut String,
+    merged: &mut String,
+    on_delta: &mut F,
+    on_thinking_delta: &mut G,
+)
 where
     F: FnMut(&str),
+    G: FnMut(&str),
 {
     loop {
         if let Some(pos) = pending.find("\n\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 2);
-            handle_sse_frame(&frame, merged, on_delta);
+            handle_sse_frame(&frame, merged, on_delta, on_thinking_delta);
             continue;
         }
         if let Some(pos) = pending.find("\r\n\r\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 4);
-            handle_sse_frame(&frame, merged, on_delta);
+            handle_sse_frame(&frame, merged, on_delta, on_thinking_delta);
             continue;
         }
         break;
     }
 }
 
-fn handle_sse_frame<F>(frame: &str, merged: &mut String, on_delta: &mut F)
+fn handle_sse_frame<F, G>(
+    frame: &str,
+    merged: &mut String,
+    on_delta: &mut F,
+    on_thinking_delta: &mut G,
+)
 where
     F: FnMut(&str),
+    G: FnMut(&str),
 {
     for raw_line in frame.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -268,22 +317,43 @@ where
         let Ok(event) = serde_json::from_str::<StreamEvent>(data) else {
             continue;
         };
-        if let Some(text) = extract_stream_text(&event) {
+        let Some(choice) = event.choices.into_iter().next() else {
+            continue;
+        };
+        if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
             merged.push_str(&text);
             on_delta(&text);
+        }
+        if let Some(thinking) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+            on_thinking_delta(&thinking);
         }
     }
 }
 
-fn extract_stream_text(event: &StreamEvent) -> Option<String> {
-    match event.kind.as_str() {
-        "content_block_delta" => event.delta.as_ref()?.text.clone().filter(|t| !t.is_empty()),
-        "content_block_start" => event
-            .content_block
-            .as_ref()?
-            .text
-            .clone()
-            .filter(|t| !t.is_empty()),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_request_thinking_enabled_sets_correct_fields() {
+        // Validate ThinkingParam serialization for enabled state
+        let param = ThinkingParam {
+            kind: "enabled",
+            clear_thinking: Some(false),
+        };
+        let json = serde_json::to_string(&param).unwrap();
+        assert!(json.contains("\"enabled\""));
+        assert!(json.contains("\"clear_thinking\":false"));
+    }
+
+    #[test]
+    fn build_request_thinking_disabled_omits_clear_thinking() {
+        let param = ThinkingParam {
+            kind: "disabled",
+            clear_thinking: None,
+        };
+        let json = serde_json::to_string(&param).unwrap();
+        assert!(json.contains("\"disabled\""));
+        assert!(!json.contains("clear_thinking"));
     }
 }

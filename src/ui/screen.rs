@@ -198,9 +198,9 @@ impl Screen {
 fn startup_subtitle_lines() -> Vec<String> {
     let version = env!("CARGO_PKG_VERSION");
     let model =
-        std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
-    let base_url = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/anthropic".to_string());
+        std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
+    let base_url = std::env::var("BIGMODEL_BASE_URL")
+        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/coding/paas/v4".to_string());
     let provider = extract_host_from_url(&base_url).unwrap_or(base_url);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().replace('\\', "/"))

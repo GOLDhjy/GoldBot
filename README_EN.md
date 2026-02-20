@@ -15,21 +15,46 @@ A cross-platform TUI Agent built with Rust that automatically plans and executes
 
 ## Installation
 
-### One-Line Install (Recommended)
+### macOS / Linux (Recommended)
 
-**macOS / Linux**
+**One-Line Install (Recommended)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash
 ```
 
-Or via Homebrew:
+**Install specific version**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash -s -- --version v0.2.0
+```
+
+**Install from source**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash -s -- --source
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex
+```
+
+### Homebrew (macOS / Linux)
 
 ```bash
 brew install GOLDhjy/GoldBot/goldbot
 ```
 
-### Build from Source
+### Manual Download (3 Platforms)
+
+- macOS Intel: `goldbot-v*-macos-x86_64.tar.gz`
+- macOS Apple Silicon: `goldbot-v*-macos-aarch64.tar.gz`
+- Linux x86_64: `goldbot-v*-linux-x86_64.tar.gz`
+- Windows x86_64: `goldbot-v*-windows-x86_64.zip`
+
+### Build from Source (All Platforms)
 
 ```bash
 cargo install --git https://github.com/GOLDhjy/GoldBot.git

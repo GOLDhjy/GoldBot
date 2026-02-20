@@ -86,7 +86,9 @@ pub(crate) fn process_llm_result(
 
     if !thought.is_empty() {
         let ev = Event::Thinking { text: thought };
-        emit_live_event(screen, &ev);
+        if app.show_thinking {
+            emit_live_event(screen, &ev);
+        }
         app.task_events.push(ev);
     }
     app.messages.push(Message::assistant(response));
@@ -193,6 +195,45 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     screen.refresh();
 }
 
+/// Called with native thinking block deltas from the LLM.
+/// Shows them directly in the status bar as preview.
+pub(crate) fn handle_llm_thinking_delta(app: &mut App, screen: &mut Screen, chunk: &str) {
+    if !app.llm_calling || chunk.is_empty() {
+        return;
+    }
+
+    app.llm_stream_preview.push_str(chunk);
+    trim_left_to_max_bytes(&mut app.llm_stream_preview, 16_384);
+
+    let collapsed = app
+        .llm_stream_preview
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let preview = tail_chars(&collapsed, 240);
+    if preview.is_empty() {
+        return;
+    }
+
+    let punctuation_flush = preview.ends_with(['。', '！', '？', '.', '!', '?', ';', '；']);
+    let grew_by = preview
+        .chars()
+        .count()
+        .saturating_sub(app.llm_preview_shown.chars().count());
+    let should_refresh = app.llm_preview_shown.is_empty()
+        || preview.chars().count() < app.llm_preview_shown.chars().count()
+        || !preview.starts_with(&app.llm_preview_shown)
+        || grew_by >= 8
+        || punctuation_flush;
+    if !should_refresh {
+        return;
+    }
+
+    app.llm_preview_shown = preview.clone();
+    screen.status = format!("⏳ {}", preview);
+    screen.refresh();
+}
+
 pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
     if !app.llm_calling || delta.is_empty() {
         return;
@@ -200,6 +241,11 @@ pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta:
 
     app.llm_stream_preview.push_str(delta);
     trim_left_to_max_bytes(&mut app.llm_stream_preview, 16_384);
+
+    // When native thinking is on, preview comes from ThinkingDelta events; skip here.
+    if app.show_thinking {
+        return;
+    }
 
     let preview = extract_live_preview(&app.llm_stream_preview);
     if preview.is_empty() {

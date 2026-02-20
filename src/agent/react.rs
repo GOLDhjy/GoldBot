@@ -1,8 +1,6 @@
 use crate::types::LlmAction;
 use anyhow::{Result, anyhow};
 
-/// System prompt injected at the start of every conversation.
-/// Defines the agent's identity, the available tools, and the exact response format.
 pub const SYSTEM_PROMPT: &str = "\
 You are GoldBot, a local terminal automation agent.
 You help users complete tasks by running shell commands step by step.
@@ -30,6 +28,7 @@ When the task is complete, respond with EXACTLY:
 - If a command fails, diagnose from the output and try a different approach.
 - If file writes fail because heredoc formatting/indentation is broken, it is a command construction issue; retry using printf or python -c to write the file content exactly.
 - macOS / Linux shell (bash).";
+
 
 /// Parse the raw text returned by the LLM into a thought + action pair.
 pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {

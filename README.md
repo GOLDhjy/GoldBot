@@ -13,21 +13,46 @@
 
 ## 安装
 
-### 一行命令安装（推荐）
+### macOS / Linux（推荐）
 
-**macOS / Linux**
+**一行命令安装（推荐）**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash
 ```
 
-或使用 Homebrew：
+**指定版本安装**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash -s -- --version v0.2.0
+```
+
+**从源码安装**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.sh | bash -s -- --source
+```
+
+### Windows（PowerShell）
+
+```powershell
+irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex
+```
+
+### Homebrew（macOS / Linux）
 
 ```bash
 brew install GOLDhjy/GoldBot/goldbot
 ```
 
-### 从源码编译
+### 手动下载（3 平台）
+
+- macOS Intel: `goldbot-v*-macos-x86_64.tar.gz`
+- macOS Apple Silicon: `goldbot-v*-macos-aarch64.tar.gz`
+- Linux x86_64: `goldbot-v*-linux-x86_64.tar.gz`
+- Windows x86_64: `goldbot-v*-windows-x86_64.zip`
+
+### 从源码编译（所有平台）
 
 ```bash
 cargo install --git https://github.com/GOLDhjy/GoldBot.git
