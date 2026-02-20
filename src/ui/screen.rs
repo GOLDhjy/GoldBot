@@ -309,13 +309,31 @@ pub(crate) fn split_tail_lines_by_width(
         return Vec::new();
     }
 
-    let plain = strip_ansi(s).replace('\t', " ");
     let mut wrapped = Vec::new();
-    for raw_line in plain.lines() {
+    for raw_line in s.lines() {
+        let raw_line = raw_line.replace('\t', " ");
         let mut cur = String::new();
         let mut cur_w = 0usize;
-        for ch in raw_line.chars() {
-            if ch == '\r' || ch.is_control() {
+        let mut chars = raw_line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                continue;
+            }
+            if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+                // Keep ANSI style sequence in output, but treat it as zero-width.
+                cur.push(ch);
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+                for c in chars.by_ref() {
+                    cur.push(c);
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch.is_control() {
                 continue;
             }
             let w = UnicodeWidthChar::width(ch).unwrap_or(0);
@@ -343,7 +361,8 @@ pub(crate) fn split_tail_lines_by_width(
 
     let mut tail = wrapped[wrapped.len() - max_lines..].to_vec();
     if let Some(first) = tail.first_mut() {
-        *first = fit_single_line_tail(&format!("…{}", first), max_width);
+        let plain = strip_ansi(first);
+        *first = fit_single_line_tail(&format!("…{}", plain), max_width);
     }
     tail
 }

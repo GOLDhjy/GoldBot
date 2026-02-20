@@ -43,10 +43,6 @@ impl Message {
 struct ThinkingParam {
     #[serde(rename = "type")]
     kind: &'static str,
-    /// false = preserve reasoning across turns (recommended).
-    /// Omitted when thinking is disabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    clear_thinking: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -225,17 +221,9 @@ fn build_request(
         })
         .collect();
 
-    let thinking = if show_thinking {
-        Some(ThinkingParam {
-            kind: "enabled",
-            clear_thinking: Some(false),
-        })
-    } else {
-        Some(ThinkingParam {
-            kind: "disabled",
-            clear_thinking: None,
-        })
-    };
+    let thinking = Some(ThinkingParam {
+        kind: if show_thinking { "enabled" } else { "disabled" },
+    });
 
     let body = ApiRequest {
         model,
@@ -335,25 +323,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_request_thinking_enabled_sets_correct_fields() {
-        // Validate ThinkingParam serialization for enabled state
-        let param = ThinkingParam {
-            kind: "enabled",
-            clear_thinking: Some(false),
-        };
-        let json = serde_json::to_string(&param).unwrap();
-        assert!(json.contains("\"enabled\""));
-        assert!(json.contains("\"clear_thinking\":false"));
+    fn thinking_param_enabled_serializes_correctly() {
+        let json = serde_json::to_string(&ThinkingParam { kind: "enabled" }).unwrap();
+        assert_eq!(json, r#"{"type":"enabled"}"#);
     }
 
     #[test]
-    fn build_request_thinking_disabled_omits_clear_thinking() {
-        let param = ThinkingParam {
-            kind: "disabled",
-            clear_thinking: None,
-        };
-        let json = serde_json::to_string(&param).unwrap();
-        assert!(json.contains("\"disabled\""));
-        assert!(!json.contains("clear_thinking"));
+    fn thinking_param_disabled_serializes_correctly() {
+        let json = serde_json::to_string(&ThinkingParam { kind: "disabled" }).unwrap();
+        assert_eq!(json, r#"{"type":"disabled"}"#);
     }
 }

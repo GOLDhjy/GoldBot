@@ -208,12 +208,12 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     {
         app.show_thinking = !app.show_thinking;
         let label = if app.show_thinking {
-            "Thinking: ON"
+            format!("{} {}", "Thinking:".dark_grey(), "ON".green().bold())
         } else {
-            "Thinking: OFF"
+            format!("{} {}", "Thinking:".dark_grey(), "OFF".yellow().bold())
         };
         if !app.llm_calling {
-            screen.status = label.dark_grey().to_string();
+            screen.status = label;
             screen.refresh();
         }
         return false;
