@@ -53,7 +53,12 @@ fn summarize_events(events: &[Event]) -> String {
             _ => {}
         }
     }
-    format!("{} thoughts, {} tool calls, last_result: {}", thoughts, calls, trim(&last_result, 120))
+    format!(
+        "{} thoughts, {} tool calls, last_result: {}",
+        thoughts,
+        calls,
+        trim(&last_result, 120)
+    )
 }
 
 fn trim(s: &str, n: usize) -> String {

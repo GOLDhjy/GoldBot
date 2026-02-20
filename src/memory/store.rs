@@ -29,9 +29,7 @@ impl MemoryStore {
             fs::create_dir_all(parent)?;
         }
         let now = Local::now().format("%H:%M:%S");
-        let block = format!(
-            "\n## {now}\n- task: {task}\n- final: {final_output}\n"
-        );
+        let block = format!("\n## {now}\n- task: {task}\n- final: {final_output}\n");
         append_file(path, &block)
     }
 

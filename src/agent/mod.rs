@@ -1,2 +1,2 @@
-pub mod react;
 pub mod provider;
+pub mod react;

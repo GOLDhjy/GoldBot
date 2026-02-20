@@ -1,5 +1,5 @@
-use anyhow::{Result, anyhow};
 use crate::types::LlmAction;
+use anyhow::{Result, anyhow};
 
 /// System prompt injected at the start of every conversation.
 /// Defines the agent's identity, the available tools, and the exact response format.

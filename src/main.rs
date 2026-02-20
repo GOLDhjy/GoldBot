@@ -9,12 +9,15 @@ use std::{
 };
 
 use agent::{
-    react::{SYSTEM_PROMPT, parse_llm_response},
     provider::{Message, build_http_client, chat},
+    react::{SYSTEM_PROMPT, parse_llm_response},
 };
 use crossterm::{
     cursor,
-    event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     style::{Print, Stylize},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
@@ -23,6 +26,7 @@ use memory::store::MemoryStore;
 use tokio::sync::mpsc;
 use tools::safety::{RiskLevel, assess_command};
 use types::{Event, LlmAction};
+use unicode_width::UnicodeWidthStr;
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 // The bottom of the terminal is a "managed" area that is redrawn in place.
@@ -31,13 +35,14 @@ use types::{Event, LlmAction};
 //   ─ status line  : "  ⏳ Thinking…"  or blank
 //   ─ input line   : "❯ <text>"
 //
-// Confirmation mode  (managed_lines = 4):
-//   ─ "  ❯ Execute"   (selected, cyan+bold)
+// Confirmation mode  (managed_lines = 5):
+//   ─ "  ❯ Execute"   (selected)
 //   ─ "    Skip"
 //   ─ "    Abort"
-//   ─ "❯ "            (greyed out — typing disabled)
+//   ─ "    Add Note"
+//   ─ "❯ ..."         (type note directly, or use ↑/↓ + Enter)
 //
-// task_lines counts lines currently shown for the active task so that
+// task_lines counts rendered rows currently shown for the active task so that
 // collapse_to() can erase and replace them without touching earlier history.
 const TITLE_BANNER: [&str; 5] = [
     "   ____       _     _ ____        _   ",
@@ -52,8 +57,9 @@ struct Screen {
     pub status: String,
     pub input: String,
     task_lines: usize,
-    managed_lines: usize,               // lines currently on screen in managed area
+    managed_lines: usize, // lines currently on screen in managed area
     pub confirm_selected: Option<usize>, // Some(n) → in confirmation mode, n selected
+    pub input_focused: bool,
 }
 
 impl Screen {
@@ -65,13 +71,18 @@ impl Screen {
             task_lines: 0,
             managed_lines: 2,
             confirm_selected: None,
+            input_focused: true,
         };
         for line in TITLE_BANNER {
             execute!(s.stdout, Print(format!("{}\r\n", line.cyan().bold())))?;
         }
         execute!(
             s.stdout,
-            Print("  Local terminal automation agent\r\n".dark_grey().to_string()),
+            Print(
+                "  Local terminal automation agent\r\n"
+                    .dark_grey()
+                    .to_string()
+            ),
             Print("\r\n"),
             Print("❯ ")
         )?;
@@ -81,10 +92,11 @@ impl Screen {
 
     /// Erase the managed area; cursor ends at col 0 of the first managed line.
     fn clear_managed(&mut self) {
+        let up = self.managed_lines.saturating_sub(1).min(u16::MAX as usize) as u16;
         let _ = execute!(
             self.stdout,
             cursor::MoveToColumn(0),
-            cursor::MoveUp((self.managed_lines - 1) as u16),
+            cursor::MoveUp(up),
             Clear(ClearType::FromCursorDown),
         );
     }
@@ -92,18 +104,23 @@ impl Screen {
     /// Draw the managed area and update managed_lines to match what was drawn.
     fn draw_managed(&mut self) {
         if let Some(selected) = self.confirm_selected {
-            // Vertical confirmation menu (3 options + disabled input = 4 lines).
-            let labels = ["Execute", "Skip", "Abort"];
+            // Vertical confirmation menu (4 options + hint line = 5 lines).
+            let labels = ["Execute", "Skip", "Abort", "Add Note"];
             for (i, label) in labels.iter().enumerate() {
                 let line = if i == selected {
-                    format!("  ❯ {}\r\n", label).bold().cyan().to_string()
+                    format!("  ❯ {}\r\n", label)
+                        .bold()
+                        .black()
+                        .on_cyan()
+                        .to_string()
                 } else {
-                    format!("    {}\r\n", label).dark_grey().to_string()
+                    format!("    {}\r\n", label).white().to_string()
                 };
                 let _ = execute!(self.stdout, Print(line));
             }
-            let _ = execute!(self.stdout, Print("❯ ".dark_grey().to_string()));
-            self.managed_lines = 4;
+            let hint = "❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter";
+            let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
+            self.managed_lines = 5;
         } else {
             // Normal: status + input.
             let st = if self.status.is_empty() {
@@ -111,7 +128,12 @@ impl Screen {
             } else {
                 format!("  {}\r\n", self.status)
             };
-            let _ = execute!(self.stdout, Print(st), Print(format!("❯ {}", self.input)));
+            let prompt = if self.input_focused {
+                format!("❯ {}", self.input)
+            } else {
+                format!("❯ {}", self.input).dark_grey().to_string()
+            };
+            let _ = execute!(self.stdout, Print(st), Print(prompt));
             self.managed_lines = 2;
         }
         let _ = self.stdout.flush();
@@ -119,7 +141,7 @@ impl Screen {
 
     /// Emit event lines into the scrolling area above, then redraw managed area.
     fn emit(&mut self, lines: &[String]) {
-        self.task_lines += lines.len();
+        self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
         self.clear_managed();
         for line in lines {
             let _ = execute!(self.stdout, Print(format!("{}\r\n", line)));
@@ -137,9 +159,21 @@ impl Screen {
         self.task_lines = 0;
     }
 
+    fn rendered_rows(&self, line: &str) -> usize {
+        let cols = crossterm::terminal::size()
+            .map(|(c, _)| c.max(1) as usize)
+            .unwrap_or(80);
+        let plain = strip_ansi(line);
+        let width = UnicodeWidthStr::width(plain.as_str());
+        width.saturating_sub(1) / cols + 1
+    }
+
     /// Erase all task lines + managed area and replace with `kept`.
     fn collapse_to(&mut self, kept: &[String]) {
-        let up = (self.task_lines + self.managed_lines - 1) as u16;
+        let up = self
+            .task_lines
+            .saturating_add(self.managed_lines.saturating_sub(1))
+            .min(u16::MAX as usize) as u16;
         let _ = execute!(
             self.stdout,
             cursor::MoveToColumn(0),
@@ -149,10 +183,29 @@ impl Screen {
         self.task_lines = 0;
         for line in kept {
             let _ = execute!(self.stdout, Print(format!("{}\r\n", line)));
-            self.task_lines += 1;
+            self.task_lines += self.rendered_rows(line);
         }
         self.draw_managed();
     }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            let _ = chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -166,7 +219,8 @@ struct App {
     running: bool,
     quit: bool,
     pending_confirm: Option<String>,
-    task_events: Vec<Event>,        // intermediate events saved for expand
+    pending_confirm_note: bool, // typing note for risky command
+    task_events: Vec<Event>,    // intermediate events saved for expand
     final_summary: Option<String>,
     task_collapsed: bool,
 }
@@ -183,6 +237,7 @@ impl App {
             running: false,
             quit: false,
             pending_confirm: None,
+            pending_confirm_note: false,
             task_events: Vec::new(),
             final_summary: None,
             task_collapsed: false,
@@ -195,24 +250,32 @@ impl App {
 fn format_event(event: &Event) -> Vec<String> {
     match event {
         Event::UserTask { text } => lines_with(text, |i, line| {
-            if i == 0 { format!("❯ {}", line).bold().to_string() } else { format!("  {}", line) }
-        }),
-        Event::Thinking { text } => {
-            lines_with(text, |_, line| format!("  {}", line).dark_grey().to_string())
-        }
-        Event::ToolCall { command } => lines_with(command, |i, line| {
             if i == 0 {
-                format!("  ⏺ {}", line).cyan().to_string()
+                format!("❯ {}", line).bold().to_string()
             } else {
-                format!("    {}", line).dark_grey().to_string()
+                format!("  {}", line)
             }
         }),
-        Event::ToolResult { output, exit_code, .. } => {
+        Event::Thinking { text } => lines_with(text, |_, line| {
+            format!("  {}", line).dark_grey().to_string()
+        }),
+        Event::ToolCall { label, command } => {
+            let mut lines = vec![format!("  ⏺ {}", label).cyan().to_string()];
+            lines.extend(lines_with(command, |_, line| {
+                format!("    {}", line).dark_grey().to_string()
+            }));
+            lines
+        }
+        Event::ToolResult { output, exit_code } => {
             let ok = *exit_code == 0;
             lines_with(output, |i, line| {
                 let pfx = if i == 0 { "  ⎿ " } else { "    " };
                 let s = format!("{}{}", pfx, line);
-                if ok { s.dark_grey().to_string() } else { s.red().to_string() }
+                if ok {
+                    s.dark_grey().to_string()
+                } else {
+                    s.red().to_string()
+                }
             })
         }
         Event::NeedsConfirmation { command, reason } => {
@@ -222,7 +285,11 @@ fn format_event(event: &Event) -> Vec<String> {
             } else {
                 first.to_string()
             };
-            vec![format!("  ⚠ {} — {}", cmd_display, reason).yellow().to_string()]
+            vec![
+                format!("  ⚠ {} — {}", cmd_display, reason)
+                    .yellow()
+                    .to_string(),
+            ]
         }
         Event::Final { summary } => lines_with(summary, |i, line| {
             if i == 0 {
@@ -236,7 +303,9 @@ fn format_event(event: &Event) -> Vec<String> {
 
 fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
     let v: Vec<&str> = text.lines().collect();
-    if v.is_empty() { return vec![f(0, "")]; }
+    if v.is_empty() {
+        return vec![f(0, "")];
+    }
     v.iter().enumerate().map(|(i, l)| f(i, l)).collect()
 }
 
@@ -244,22 +313,30 @@ fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
 
 fn collapsed_lines(app: &App) -> Vec<String> {
     let summary = app.final_summary.as_deref().unwrap_or("");
-    let mut lines = format_event(&Event::UserTask { text: app.task.clone() });
+    let mut lines = format_event(&Event::UserTask {
+        text: app.task.clone(),
+    });
     lines.push(String::new());
-    lines.extend(format_event(&Event::Final { summary: summary.to_string() }));
+    lines.extend(format_event(&Event::Final {
+        summary: summary.to_string(),
+    }));
     lines.push(String::new());
     lines
 }
 
 fn expanded_lines(app: &App) -> Vec<String> {
     let summary = app.final_summary.as_deref().unwrap_or("");
-    let mut lines = format_event(&Event::UserTask { text: app.task.clone() });
+    let mut lines = format_event(&Event::UserTask {
+        text: app.task.clone(),
+    });
     lines.push(String::new());
     for ev in &app.task_events {
         lines.extend(format_event(ev));
     }
     lines.push(String::new());
-    lines.extend(format_event(&Event::Final { summary: summary.to_string() }));
+    lines.extend(format_event(&Event::Final {
+        summary: summary.to_string(),
+    }));
     lines.push(String::new());
     lines
 }
@@ -289,11 +366,13 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new();
 
     enable_raw_mode()?;
+    execute!(io::stdout(), EnableMouseCapture)?;
     let mut screen = Screen::new()?;
 
     let run_result = run_loop(&mut app, &mut screen, http_client).await;
 
     let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = execute!(io::stdout(), Print("\r\n"));
     run_result
 }
@@ -316,10 +395,7 @@ async fn run_loop(
             process_llm_result(app, screen, result);
         }
 
-        if app.running
-            && app.pending_confirm.is_none()
-            && app.needs_agent_step
-            && !app.llm_calling
+        if app.running && app.pending_confirm.is_none() && app.needs_agent_step && !app.llm_calling
         {
             app.needs_agent_step = false;
             app.llm_calling = true;
@@ -334,16 +410,23 @@ async fn run_loop(
             });
         }
 
-        if event::poll(Duration::from_millis(50))?
-            && let CEvent::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            if handle_key(app, screen, key.code, key.modifiers) {
-                break;
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                CEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    if handle_key(app, screen, key.code, key.modifiers) {
+                        break;
+                    }
+                }
+                CEvent::Mouse(mouse) => {
+                    handle_mouse(app, screen, mouse);
+                }
+                _ => {}
             }
         }
 
-        if app.quit { break; }
+        if app.quit {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -352,18 +435,13 @@ async fn run_loop(
 
 // ── Key handling ──────────────────────────────────────────────────────────────
 
-fn handle_key(
-    app: &mut App,
-    screen: &mut Screen,
-    key: KeyCode,
-    modifiers: KeyModifiers,
-) -> bool {
+fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) -> bool {
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
 
     if screen.confirm_selected.is_some() {
-        // ── Confirmation mode: ↑/↓ navigate, Enter confirm ───────────────────
+        // ── Confirmation mode: ↑/↓ navigate, Enter confirm, or type note ─────
         let sel = screen.confirm_selected.unwrap();
         match key {
             KeyCode::Up => {
@@ -371,63 +449,131 @@ fn handle_key(
                 screen.refresh();
             }
             KeyCode::Down => {
-                screen.confirm_selected = Some((sel + 1).min(2));
+                screen.confirm_selected = Some((sel + 1).min(3));
                 screen.refresh();
             }
             KeyCode::Enter => {
-                screen.confirm_selected = None;
-                let Some(cmd) = app.pending_confirm.take() else {
-                    screen.refresh();
-                    return false;
-                };
                 match sel {
                     0 => {
                         // Execute
+                        screen.confirm_selected = None;
+                        app.pending_confirm_note = false;
+                        let Some(cmd) = app.pending_confirm.take() else {
+                            screen.refresh();
+                            return false;
+                        };
                         execute_command(app, screen, &cmd);
                         app.needs_agent_step = true;
                     }
                     1 => {
                         // Skip
-                        let msg = "User chose to skip this command";
+                        screen.confirm_selected = None;
+                        app.pending_confirm_note = false;
+                        let Some(cmd) = app.pending_confirm.take() else {
+                            screen.refresh();
+                            return false;
+                        };
+                        let msg = format!("User chose to skip this command: {cmd}");
                         app.messages.push(Message::user(format!("Tool result:\n{msg}")));
                         let ev = Event::ToolResult {
-                            _command: cmd,
                             exit_code: 0,
-                            output: msg.to_string(),
+                            output: msg,
                         };
                         screen.emit(&format_event(&ev));
                         app.task_events.push(ev);
                         app.needs_agent_step = true;
                     }
-                    _ => {
+                    2 => {
                         // Abort
+                        screen.confirm_selected = None;
+                        app.pending_confirm_note = false;
+                        app.pending_confirm = None;
                         finish(app, screen, "Task aborted by user".to_string());
                     }
+                    _ => begin_confirm_note_mode(app, screen, None),
                 }
+            }
+            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                begin_confirm_note_mode(app, screen, Some(c))
+            }
+            _ => {}
+        }
+    } else if app.pending_confirm_note {
+        // ── Note mode: user adds extra instruction before executing risky cmd ──
+        match key {
+            KeyCode::Enter => {
+                let note = screen.input.trim().to_string();
+                if note.is_empty() {
+                    exit_confirm_note_mode(app, screen, true);
+                    return false;
+                }
+
+                let pending_cmd = app.pending_confirm.clone().unwrap_or_default();
+                app.messages.push(Message::user(format!(
+                    "User rejected the pending risky command and added instruction:\n{note}\nPending command was:\n{pending_cmd}"
+                )));
+                let ev = Event::Thinking {
+                    text: format!("User note: {note}"),
+                };
+                screen.emit(&format_event(&ev));
+                app.task_events.push(ev);
+
+                app.pending_confirm = None;
+                app.pending_confirm_note = false;
+                app.needs_agent_step = true;
+                screen.status.clear();
+                screen.input.clear();
+                screen.input_focused = true;
+                screen.refresh();
+            }
+            KeyCode::Esc if modifiers.is_empty() => exit_confirm_note_mode(app, screen, true),
+            KeyCode::Backspace => {
+                screen.input.pop();
+                screen.refresh();
+            }
+            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                screen.input.push(c);
+                screen.refresh();
             }
             _ => {}
         }
     } else if !app.running {
         // ── Idle / input mode ─────────────────────────────────────────────────
-        match key {
-            KeyCode::Enter => {
-                let task = screen.input.trim().to_string();
-                if !task.is_empty() {
-                    screen.input.clear();
-                    start_task(app, screen, task);
+        if screen.input_focused {
+            match key {
+                KeyCode::Enter => {
+                    let task = screen.input.trim().to_string();
+                    if !task.is_empty() {
+                        screen.input.clear();
+                        start_task(app, screen, task);
+                    }
                 }
+                KeyCode::Esc if modifiers.is_empty() => {
+                    screen.input_focused = false;
+                    screen.refresh();
+                }
+                KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                    screen.input.push(c);
+                    screen.refresh();
+                }
+                KeyCode::Backspace => {
+                    screen.input.pop();
+                    screen.refresh();
+                }
+                _ => {}
             }
-            KeyCode::Char('d') if modifiers.is_empty() => toggle_collapse(app, screen),
-            KeyCode::Esc | KeyCode::Char('q') if modifiers.is_empty() => return true,
-            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                screen.input.push(c);
-                screen.refresh();
+        } else {
+            match key {
+                KeyCode::Char('i') if modifiers.is_empty() => {
+                    screen.input_focused = true;
+                    screen.refresh();
+                }
+                KeyCode::Char('d') if modifiers.is_empty() && app.final_summary.is_some() => {
+                    toggle_collapse(app, screen)
+                }
+                KeyCode::Esc | KeyCode::Char('q') if modifiers.is_empty() => return true,
+                _ => {}
             }
-            KeyCode::Backspace => {
-                screen.input.pop();
-                screen.refresh();
-            }
-            _ => {}
         }
     } else {
         // ── Running (LLM in flight) ───────────────────────────────────────────
@@ -437,6 +583,56 @@ fn handle_key(
     }
 
     false
+}
+
+fn begin_confirm_note_mode(app: &mut App, screen: &mut Screen, first_char: Option<char>) {
+    if app.pending_confirm.is_none() {
+        screen.refresh();
+        return;
+    }
+
+    app.pending_confirm_note = true;
+    screen.confirm_selected = None;
+    screen.input_focused = true;
+    screen.status = "✍ 输入补充说明后按 Enter；Esc 返回确认菜单"
+        .dark_yellow()
+        .to_string();
+    screen.input.clear();
+    if let Some(c) = first_char {
+        screen.input.push(c);
+    }
+    screen.refresh();
+}
+
+fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool) {
+    app.pending_confirm_note = false;
+    screen.input.clear();
+    screen.status.clear();
+    if back_to_menu && app.pending_confirm.is_some() {
+        screen.confirm_selected = Some(0);
+        screen.input_focused = false;
+    } else {
+        screen.confirm_selected = None;
+        screen.input_focused = true;
+    }
+    screen.refresh();
+}
+
+fn handle_mouse(app: &mut App, screen: &mut Screen, mouse: MouseEvent) {
+    if app.running {
+        return;
+    }
+    if !matches!(mouse.kind, MouseEventKind::Down(_)) {
+        return;
+    }
+    if screen.confirm_selected.is_some() {
+        return;
+    }
+    if app.pending_confirm_note {
+        return;
+    }
+    screen.input_focused = !screen.input_focused;
+    screen.refresh();
 }
 
 // ── Task lifecycle ────────────────────────────────────────────────────────────
@@ -452,6 +648,7 @@ fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.running = true;
     app.needs_agent_step = true;
     app.pending_confirm = None;
+    app.pending_confirm_note = false;
     screen.confirm_selected = None;
     app.task_events.clear();
     app.final_summary = None;
@@ -463,7 +660,11 @@ fn start_task(app: &mut App, screen: &mut Screen, task: String) {
 
 fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result<String>) {
     if app.steps_taken >= app.max_steps {
-        finish(app, screen, format!("Reached max steps ({}).", app.max_steps));
+        finish(
+            app,
+            screen,
+            format!("Reached max steps ({}).", app.max_steps),
+        );
         return;
     }
     app.steps_taken += 1;
@@ -471,7 +672,9 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
     let response = match result {
         Ok(r) => r,
         Err(e) => {
-            let ev = Event::Thinking { text: format!("[LLM error] {e}") };
+            let ev = Event::Thinking {
+                text: format!("[LLM error] {e}"),
+            };
             screen.emit(&format_event(&ev));
             app.task_events.push(ev);
             app.running = false;
@@ -491,7 +694,9 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
                  <thought>...</thought><final>...</final>"
                     .to_string(),
             ));
-            screen.status = format!("↻ Retrying invalid response format: {e}").dark_grey().to_string();
+            screen.status = format!("↻ Retrying invalid response format: {e}")
+                .dark_grey()
+                .to_string();
             screen.refresh();
             app.needs_agent_step = true;
             return;
@@ -521,14 +726,16 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
                     screen.emit(&format_event(&ev));
                     app.task_events.push(ev);
                     app.pending_confirm = Some(command);
+                    app.pending_confirm_note = false;
                     screen.confirm_selected = Some(0);
+                    screen.input_focused = false;
                     screen.refresh();
                 }
                 RiskLevel::Block => {
                     let msg = "Command blocked by safety policy";
-                    app.messages.push(Message::user(format!("Tool result:\n{msg}")));
+                    app.messages
+                        .push(Message::user(format!("Tool result:\n{msg}")));
                     let ev = Event::ToolResult {
-                        _command: command,
                         exit_code: -1,
                         output: msg.to_string(),
                     };
@@ -545,7 +752,11 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
 }
 
 fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
-    let call_ev = Event::ToolCall { command: cmd.to_string() };
+    let intent = tools::shell::classify_command(cmd);
+    let call_ev = Event::ToolCall {
+        label: intent.label(),
+        command: cmd.to_string(),
+    };
     screen.emit(&format_event(&call_ev));
     app.task_events.push(call_ev);
 
@@ -556,7 +767,6 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
                 out.exit_code, out.output
             )));
             let ev = Event::ToolResult {
-                _command: cmd.to_string(),
                 exit_code: out.exit_code,
                 output: out.output,
             };
@@ -565,9 +775,9 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
         }
         Err(e) => {
             let err = format!("execution failed: {e}");
-            app.messages.push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            app.messages
+                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
             let ev = Event::ToolResult {
-                _command: cmd.to_string(),
                 exit_code: -1,
                 output: err,
             };
@@ -589,6 +799,7 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     app.running = false;
     app.pending_confirm = None;
+    app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.status = "[d] expand".dark_grey().to_string();
     screen.refresh();
