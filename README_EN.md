@@ -61,6 +61,15 @@ Notes:
 
 ## Memory Mechanism
 
-- **Short-term memory** - Written to `memory/YYYY-MM-DD.md` after each task
-- **Long-term memory** - Key conclusions appended to `MEMORY.md`
-- **Context compression** - Triggered by round threshold, retains compressed summary + recent events to prevent context bloat
+- **Short-term memory** - Stored in Markdown at `memory/YYYY-MM-DD.md` (`Task`/`Final` sections with code blocks)
+- **Long-term memory** - Stored as a Markdown bullet list in `MEMORY.md`, using concise one-sentence durable facts (preferences/defaults/long-lived constraints), with deduplication
+- **Write gate** - Long-term memory is written only when the user explicitly signals durable intent (for example: remember/default/prefer/from now on)
+- **Pre-compaction flush** - Before context compaction, durable notes are flushed from older turns into long-term memory
+- **Auto-load on startup** - Long-term memory + recent short-term logs (last 2 days) are injected into the system prompt
+
+Default storage location (outside the repo):
+- macOS / Linux: `~/.goldbot/`
+- Windows: `%APPDATA%\\GoldBot\\`
+
+Override with:
+- `GOLDBOT_MEMORY_DIR=/your/path`

@@ -62,6 +62,15 @@ GOLDBOT_USE_CODEX=1 GOLDBOT_TASK="整理当前目录的大文件" cargo run
 - 若 Codex 不可用或返回异常，自动回退到示例 planner
 
 ## 记忆机制
-- **短期记忆**：每次任务结束写入 `memory/YYYY-MM-DD.md`
-- **长期记忆**：关键结论追加写入 `MEMORY.md`
-- **上下文压缩**：按轮数阈值触发，保留压缩摘要 + 最近事件，避免上下文膨胀
+- **短期记忆**：按 Markdown 结构写入 `memory/YYYY-MM-DD.md`（Task/Final 分节 + code block）
+- **长期记忆**：按 Markdown 列表写入 `MEMORY.md`，仅保存精简单句（偏好、默认规则、长期约束），并自动去重
+- **写入门槛**：仅当用户明确表达“记住/默认/以后/偏好”等长期意图时才写入长期记忆
+- **预压缩 flush**：上下文接近阈值前，先从旧对话提炼长期记忆，再执行压缩
+- **启动自动加载**：启动时会把长期记忆 + 最近两天短期记忆注入 system prompt
+
+默认存储位置（不在仓库内）：
+- macOS / Linux：`~/.goldbot/`
+- Windows：`%APPDATA%\\GoldBot\\`
+
+可通过环境变量覆盖：
+- `GOLDBOT_MEMORY_DIR=/your/path`

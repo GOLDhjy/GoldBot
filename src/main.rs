@@ -10,7 +10,7 @@ use std::{
 };
 
 use agent::{
-    provider::{Message, build_http_client, chat_stream_with},
+    provider::{Message, Role, build_http_client, chat_stream_with},
     react::{SYSTEM_PROMPT, parse_llm_response},
 };
 use crossterm::{
@@ -25,6 +25,10 @@ use tokio::sync::mpsc;
 use tools::safety::{RiskLevel, assess_command};
 use types::{Event, LlmAction};
 use unicode_width::UnicodeWidthChar;
+
+const MAX_MESSAGES_BEFORE_COMPACTION: usize = 48;
+const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
+const MAX_COMPACTION_SUMMARY_ITEMS: usize = 8;
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 // The bottom of the terminal is a "managed" area that is redrawn in place.
@@ -73,16 +77,20 @@ impl Screen {
             confirm_selected: None,
             input_focused: true,
         };
+        // Cargo/launcher output may leave cursor mid-line; force a clean line first.
+        execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
-            execute!(s.stdout, Print(format!("{}\r\n", line.cyan().bold())))?;
+            execute!(
+                s.stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                Print(format!("{}\r\n", line.cyan().bold()))
+            )?;
         }
         execute!(
             s.stdout,
-            Print(
-                "  Local terminal automation agent\r\n"
-                    .dark_grey()
-                    .to_string()
-            ),
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
             Print("\r\n"),
             Print("❯ ")
         )?;
@@ -123,12 +131,25 @@ impl Screen {
         } else {
             // Normal: status + input.
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
-            let status_text = fit_single_line_tail(&self.status, status_budget);
-            let st = if status_text.is_empty() {
-                "\r\n".to_string()
+            let max_status_lines = if self.status.starts_with("⏳ ") {
+                3
             } else {
-                format!("  {}\r\n", status_text)
+                1
             };
+            let status_lines =
+                split_tail_lines_by_width(&self.status, status_budget, max_status_lines);
+            let status_rows = if status_lines.is_empty() {
+                1
+            } else {
+                status_lines.len()
+            };
+            if status_lines.is_empty() {
+                let _ = execute!(self.stdout, Print("\r\n"));
+            } else {
+                for line in status_lines {
+                    let _ = execute!(self.stdout, Print(format!("  {}\r\n", line)));
+                }
+            }
             let input_budget = cols.saturating_sub(rendered_text_width("❯ "));
             let shown_input = fit_single_line_tail(&self.input, input_budget);
             let prompt = if self.input_focused {
@@ -136,8 +157,8 @@ impl Screen {
             } else {
                 format!("❯ {}", shown_input).dark_grey().to_string()
             };
-            let _ = execute!(self.stdout, Print(st), Print(prompt));
-            self.managed_lines = 2;
+            let _ = execute!(self.stdout, Print(prompt));
+            self.managed_lines = status_rows + 1;
         }
         let _ = self.stdout.flush();
     }
@@ -277,6 +298,50 @@ fn fit_single_line_tail(s: &str, max_width: usize) -> String {
     out
 }
 
+fn split_tail_lines_by_width(s: &str, max_width: usize, max_lines: usize) -> Vec<String> {
+    if max_width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let plain = strip_ansi(s).replace('\t', " ");
+    let mut wrapped = Vec::new();
+    for raw_line in plain.lines() {
+        let mut cur = String::new();
+        let mut cur_w = 0usize;
+        for ch in raw_line.chars() {
+            if ch == '\r' || ch.is_control() {
+                continue;
+            }
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w == 0 {
+                continue;
+            }
+            if cur_w + w > max_width && !cur.is_empty() {
+                wrapped.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            cur.push(ch);
+            cur_w += w;
+        }
+        if !cur.is_empty() {
+            wrapped.push(cur);
+        }
+    }
+
+    if wrapped.is_empty() {
+        return Vec::new();
+    }
+    if wrapped.len() <= max_lines {
+        return wrapped;
+    }
+
+    let mut tail = wrapped[wrapped.len() - max_lines..].to_vec();
+    if let Some(first) = tail.first_mut() {
+        *first = fit_single_line_tail(&format!("…{}", first), max_width);
+    }
+    tail
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 struct App {
     messages: Vec<Message>,
@@ -298,8 +363,10 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let store = MemoryStore::new();
+        let system_prompt = store.build_system_prompt(SYSTEM_PROMPT);
         Self {
-            messages: vec![Message::system(SYSTEM_PROMPT.to_string())],
+            messages: vec![Message::system(system_prompt)],
             task: String::new(),
             steps_taken: 0,
             max_steps: 30,
@@ -392,6 +459,97 @@ fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
         return vec![f(0, "")];
     }
     v.iter().enumerate().map(|(i, l)| f(i, l)).collect()
+}
+
+fn sanitize_final_summary_for_tui(text: &str) -> String {
+    let mut out = Vec::<String>::new();
+    let mut in_code_fence = false;
+
+    for raw in text.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+
+        let mut line = if in_code_fence {
+            trimmed.to_string()
+        } else {
+            markdown_line_to_plain(trimmed)
+        };
+        line = strip_inline_markdown(&line);
+        line = line.trim().to_string();
+        out.push(line);
+    }
+
+    let mut compact = Vec::<String>::new();
+    let mut prev_blank = true;
+    for line in out {
+        if line.is_empty() {
+            if !prev_blank {
+                compact.push(String::new());
+            }
+            prev_blank = true;
+        } else {
+            compact.push(line);
+            prev_blank = false;
+        }
+    }
+    while compact.last().is_some_and(|l| l.is_empty()) {
+        compact.pop();
+    }
+    compact.join("\n")
+}
+
+fn markdown_line_to_plain(line: &str) -> String {
+    if line.is_empty() {
+        return String::new();
+    }
+    if let Some(stripped) = strip_markdown_heading(line) {
+        return stripped;
+    }
+    if let Some(rest) = line.strip_prefix("> ") {
+        return rest.trim().to_string();
+    }
+    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return format!("• {}", rest.trim());
+    }
+    if let Some(rest) = strip_ordered_marker(line) {
+        return format!("• {}", rest.trim());
+    }
+    line.to_string()
+}
+
+fn strip_markdown_heading(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i] == b'#' {
+        i += 1;
+    }
+    if i == 0 || i >= bytes.len() || bytes[i] != b' ' {
+        return None;
+    }
+    Some(line[i + 1..].trim().to_string())
+}
+
+fn strip_ordered_marker(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > 0 && i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' ' {
+        return Some(&line[i + 2..]);
+    }
+    None
+}
+
+fn strip_inline_markdown(s: &str) -> String {
+    s.replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .replace('*', "")
+        .replace('_', "")
 }
 
 fn format_event_live(event: &Event) -> Vec<String> {
@@ -619,6 +777,115 @@ fn toggle_collapse(app: &mut App, screen: &mut Screen) {
     screen.refresh();
 }
 
+fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
+    if app.messages.len() <= MAX_MESSAGES_BEFORE_COMPACTION {
+        return;
+    }
+    if app.messages.len() <= KEEP_RECENT_MESSAGES_AFTER_COMPACTION + 1 {
+        return;
+    }
+
+    let split_at = app
+        .messages
+        .len()
+        .saturating_sub(KEEP_RECENT_MESSAGES_AFTER_COMPACTION);
+    if split_at <= 1 {
+        return;
+    }
+
+    let older: Vec<Message> = app.messages[1..split_at].to_vec();
+    let store = MemoryStore::new();
+    let mut flushed = 0usize;
+    let mut last_user_task: Option<String> = None;
+
+    for msg in &older {
+        match msg.role {
+            Role::User => {
+                if msg.content.starts_with("Tool result")
+                    || msg
+                        .content
+                        .starts_with("Your last response could not be parsed")
+                    || msg.content.starts_with("[Context compacted]")
+                {
+                    continue;
+                }
+                last_user_task = Some(msg.content.clone());
+            }
+            Role::Assistant => {
+                if let Some(final_text) = extract_last_tag_text(&msg.content, "final") {
+                    if let Some(task) = last_user_task.as_deref() {
+                        for note in store.derive_long_term_notes(task, &final_text) {
+                            if let Ok(true) = store.append_long_term_if_new(&note) {
+                                flushed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Role::System => {}
+        }
+    }
+
+    let summary = summarize_for_compaction(&older);
+    let mut compacted = Vec::new();
+    compacted.push(app.messages[0].clone());
+    if !summary.is_empty() {
+        compacted.push(Message::user(format!("[Context compacted]\n{summary}")));
+    }
+    compacted.extend_from_slice(&app.messages[split_at..]);
+    app.messages = compacted;
+
+    screen.status = if flushed > 0 {
+        format!("🧠 pre-compaction flush: {flushed} long-term notes")
+            .dark_grey()
+            .to_string()
+    } else {
+        "🧠 context compacted".dark_grey().to_string()
+    };
+    screen.refresh();
+}
+
+fn summarize_for_compaction(messages: &[Message]) -> String {
+    let mut items = Vec::new();
+    for msg in messages.iter().rev() {
+        match msg.role {
+            Role::User => {
+                if msg.content.starts_with("Tool result")
+                    || msg
+                        .content
+                        .starts_with("Your last response could not be parsed")
+                    || msg.content.starts_with("[Context compacted]")
+                {
+                    continue;
+                }
+                let one_line = msg.content.split_whitespace().collect::<Vec<_>>().join(" ");
+                items.push(format!("- user: {}", shorten_text(&one_line, 120)));
+            }
+            Role::Assistant => {
+                if let Some(final_text) = extract_last_tag_text(&msg.content, "final") {
+                    let one_line = final_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    items.push(format!("- final: {}", shorten_text(&one_line, 120)));
+                }
+            }
+            Role::System => {}
+        }
+        if items.len() >= MAX_COMPACTION_SUMMARY_ITEMS {
+            break;
+        }
+    }
+    items.reverse();
+    items.join("\n")
+}
+
+fn extract_last_tag_text(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let end = text.rfind(&close)?;
+    let head = &text[..end];
+    let start = head.rfind(&open)? + open.len();
+    Some(head[start..].trim().to_string())
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -664,6 +931,7 @@ async fn run_loop(
 
         if app.running && app.pending_confirm.is_none() && app.needs_agent_step && !app.llm_calling
         {
+            maybe_flush_and_compact_before_call(app, screen);
             app.needs_agent_step = false;
             app.llm_calling = true;
             app.llm_stream_preview.clear();
@@ -1159,6 +1427,7 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
 }
 
 fn finish(app: &mut App, screen: &mut Screen, summary: String) {
+    let summary = sanitize_final_summary_for_tui(&summary);
     app.final_summary = Some(summary.clone());
     app.task_collapsed = true;
 
@@ -1166,7 +1435,10 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     let store = MemoryStore::new();
     let _ = store.append_short_term(&app.task, &summary);
-    let _ = store.append_long_term(&format!("task={} | result={}", app.task, summary));
+    for note in store.derive_long_term_notes(&app.task, &summary) {
+        let _ = store.append_long_term_if_new(&note);
+    }
+    let _ = store.promote_repeated_short_term_to_long_term();
 
     app.running = false;
     app.llm_stream_preview.clear();
@@ -1177,4 +1449,22 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     screen.input_focused = true;
     screen.status = "[Ctrl+d] full details".dark_grey().to_string();
     screen.refresh();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_final_summary_for_tui;
+
+    #[test]
+    fn sanitize_final_strips_markdown() {
+        let raw = "## Title\n- **a**\n- `b`\n```bash\nls -la\n```\n1. item";
+        let got = sanitize_final_summary_for_tui(raw);
+        assert!(got.contains("Title"));
+        assert!(got.contains("• a"));
+        assert!(got.contains("• b"));
+        assert!(got.contains("ls -la"));
+        assert!(got.contains("• item"));
+        assert!(!got.contains("##"));
+        assert!(!got.contains("```"));
+    }
 }

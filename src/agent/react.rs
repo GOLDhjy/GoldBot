@@ -25,6 +25,7 @@ When the task is complete, respond with EXACTLY:
 - Output one command per response, then wait for the result before deciding the next step.
 - Use <final> as soon as the task is done — do not run unnecessary extra commands.
 - Keep <final> concise: summarize outcome only, do not repeat full tool logs already shown.
+- <final> must be plain terminal text. Do NOT use Markdown headings, lists, tables, or fenced code blocks.
 - Prefer read-only commands unless the task explicitly requires changes.
 - If a command fails, diagnose from the output and try a different approach.
 - If file writes fail because heredoc formatting/indentation is broken, it is a command construction issue; retry using printf or python -c to write the file content exactly.
