@@ -5,6 +5,7 @@ mod types;
 
 use std::{
     io::{self, Write},
+    path::Path,
     time::Duration,
 };
 
@@ -14,9 +15,7 @@ use agent::{
 };
 use crossterm::{
     cursor,
-    event::{
-        self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers,
-    },
+    event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     style::{Print, Stylize},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
@@ -57,7 +56,7 @@ struct Screen {
     pub input: String,
     task_lines: usize,
     task_rendered: Vec<String>, // raw rendered task lines currently visible above managed area
-    managed_lines: usize, // lines currently on screen in managed area
+    managed_lines: usize,       // lines currently on screen in managed area
     pub confirm_selected: Option<usize>, // Some(n) → in confirmation mode, n selected
     pub input_focused: bool,
 }
@@ -104,35 +103,38 @@ impl Screen {
 
     /// Draw the managed area and update managed_lines to match what was drawn.
     fn draw_managed(&mut self) {
+        let cols = crossterm::terminal::size()
+            .map(|(c, _)| c.max(1) as usize)
+            .unwrap_or(80);
         if let Some(selected) = self.confirm_selected {
             // Vertical confirmation menu (4 options + hint line = 5 lines).
             let labels = ["Execute", "Skip", "Abort", "Add Note"];
             for (i, label) in labels.iter().enumerate() {
                 let line = if i == selected {
-                    format!("  ❯ {}\r\n", label)
-                        .bold()
-                        .black()
-                        .on_cyan()
-                        .to_string()
+                    format!("  {} {}\r\n", "❯".cyan().bold(), label.bold().white())
                 } else {
-                    format!("    {}\r\n", label).white().to_string()
+                    format!("    {}\r\n", label).dark_grey().to_string()
                 };
                 let _ = execute!(self.stdout, Print(line));
             }
-            let hint = "❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter";
+            let hint = fit_single_line_tail("❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter", cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
             self.managed_lines = 5;
         } else {
             // Normal: status + input.
-            let st = if self.status.is_empty() {
+            let status_budget = cols.saturating_sub(rendered_text_width("  "));
+            let status_text = fit_single_line_tail(&self.status, status_budget);
+            let st = if status_text.is_empty() {
                 "\r\n".to_string()
             } else {
-                format!("  {}\r\n", self.status)
+                format!("  {}\r\n", status_text)
             };
+            let input_budget = cols.saturating_sub(rendered_text_width("❯ "));
+            let shown_input = fit_single_line_tail(&self.input, input_budget);
             let prompt = if self.input_focused {
-                format!("❯ {}", self.input)
+                format!("❯ {}", shown_input)
             } else {
-                format!("❯ {}", self.input).dark_grey().to_string()
+                format!("❯ {}", shown_input).dark_grey().to_string()
             };
             let _ = execute!(self.stdout, Print(st), Print(prompt));
             self.managed_lines = 2;
@@ -234,6 +236,47 @@ fn rendered_text_width(s: &str) -> usize {
     col
 }
 
+fn fit_single_line_tail(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let plain = strip_ansi(s).replace('\t', " ");
+    if rendered_text_width(plain.as_str()) <= max_width {
+        return plain;
+    }
+
+    const ELLIPSIS: char = '…';
+    let ellipsis_width = UnicodeWidthChar::width(ELLIPSIS).unwrap_or(1);
+    if max_width <= ellipsis_width {
+        return ELLIPSIS.to_string();
+    }
+    let budget = max_width - ellipsis_width;
+
+    let mut kept_rev: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for ch in plain.chars().rev() {
+        if ch == '\r' || ch == '\n' || ch.is_control() {
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w == 0 {
+            continue;
+        }
+        if used + w > budget {
+            break;
+        }
+        kept_rev.push(ch);
+        used += w;
+    }
+
+    kept_rev.reverse();
+    let mut out = String::new();
+    out.push(ELLIPSIS);
+    out.extend(kept_rev);
+    out
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 struct App {
     messages: Vec<Message>,
@@ -319,7 +362,7 @@ fn format_event(event: &Event) -> Vec<String> {
                 first.to_string()
             };
             vec![
-                format!("  ⚠ {} — {}", cmd_display, reason)
+                format!("  ⚠ {}：{}", reason, cmd_display)
                     .yellow()
                     .to_string(),
             ]
@@ -342,6 +385,35 @@ fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
     v.iter().enumerate().map(|(i, l)| f(i, l)).collect()
 }
 
+fn format_event_live(event: &Event) -> Vec<String> {
+    match event {
+        Event::UserTask { .. } | Event::Final { .. } => format_event(event),
+        Event::Thinking { text } => {
+            let line = first_non_empty_line(text).unwrap_or("");
+            vec![
+                format!("  {}", shorten_text(line, 110))
+                    .dark_grey()
+                    .to_string(),
+            ]
+        }
+        Event::ToolCall { label, command } => {
+            let first = command.lines().next().unwrap_or(command.as_str());
+            vec![
+                format!("  ⏺ {}", label).cyan().to_string(),
+                format!("    {}", shorten_text(first, 120))
+                    .dark_grey()
+                    .to_string(),
+            ]
+        }
+        Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
+        Event::NeedsConfirmation { .. } => format_event(event),
+    }
+}
+
+fn emit_live_event(screen: &mut Screen, event: &Event) {
+    screen.emit(&format_event_live(event));
+}
+
 #[derive(Default)]
 struct FsChangeSummary {
     created: Vec<String>,
@@ -357,7 +429,7 @@ fn format_event_compact(event: &Event) -> Vec<String> {
         Event::NeedsConfirmation { command, reason } => {
             let first = command.lines().next().unwrap_or(command.as_str());
             vec![
-                format!("    ⚠ confirm needed: {} — {}", shorten_text(first, 72), reason)
+                format!("    ⚠ {}：{}", reason, shorten_text(first, 72))
                     .yellow()
                     .to_string(),
             ]
@@ -439,7 +511,7 @@ fn summarize_paths(paths: &[String]) -> String {
     let mut out = paths
         .iter()
         .take(MAX_SHOWN)
-        .map(String::as_str)
+        .map(|p| absolutize_path_for_display(p))
         .collect::<Vec<_>>()
         .join(", ");
     if paths.len() > MAX_SHOWN {
@@ -450,6 +522,18 @@ fn summarize_paths(paths: &[String]) -> String {
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn absolutize_path_for_display(path: &str) -> String {
+    let p = Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    abs.to_string_lossy().replace('\\', "/")
 }
 
 fn shorten_text(s: &str, max_chars: usize) -> String {
@@ -563,7 +647,7 @@ async fn run_loop(
             app.needs_agent_step = false;
             app.llm_calling = true;
             app.llm_stream_preview.clear();
-            screen.status = "⏳ Thinking...".dim().to_string();
+            screen.status = "⏳ Thinking...".to_string();
             screen.refresh();
 
             let tx_done = tx.clone();
@@ -614,7 +698,7 @@ fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
     if preview.is_empty() {
         return;
     }
-    screen.status = format!("⏳ {}", preview).dim().to_string();
+    screen.status = format!("⏳ {}", preview);
     screen.refresh();
 }
 
@@ -630,7 +714,7 @@ fn extract_live_preview(raw: &str) -> String {
 
     let no_tags = strip_xml_tags(s);
     let collapsed = no_tags.split_whitespace().collect::<Vec<_>>().join(" ");
-    tail_chars(&collapsed, 56)
+    fit_single_line_tail(&collapsed, 48)
 }
 
 fn strip_xml_tags(s: &str) -> String {
@@ -645,15 +729,6 @@ fn strip_xml_tags(s: &str) -> String {
         }
     }
     out
-}
-
-fn tail_chars(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.trim().to_string();
-    }
-    let tail: String = chars[chars.len() - max..].iter().collect();
-    format!("…{}", tail.trim())
 }
 
 // ── Key handling ──────────────────────────────────────────────────────────────
@@ -709,12 +784,13 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                             return false;
                         };
                         let msg = format!("User chose to skip this command: {cmd}");
-                        app.messages.push(Message::user(format!("Tool result:\n{msg}")));
+                        app.messages
+                            .push(Message::user(format!("Tool result:\n{msg}")));
                         let ev = Event::ToolResult {
                             exit_code: 0,
                             output: msg,
                         };
-                        screen.emit(&format_event(&ev));
+                        emit_live_event(screen, &ev);
                         app.task_events.push(ev);
                         app.needs_agent_step = true;
                     }
@@ -750,7 +826,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                 let ev = Event::Thinking {
                     text: format!("User note: {note}"),
                 };
-                screen.emit(&format_event(&ev));
+                emit_live_event(screen, &ev);
                 app.task_events.push(ev);
 
                 app.pending_confirm = None;
@@ -892,7 +968,7 @@ fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.task_collapsed = false;
     app.messages.push(Message::user(task.clone()));
 
-    screen.emit(&format_event(&Event::UserTask { text: task }));
+    emit_live_event(screen, &Event::UserTask { text: task });
 }
 
 fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result<String>) {
@@ -912,7 +988,7 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
             let ev = Event::Thinking {
                 text: format!("[LLM error] {e}"),
             };
-            screen.emit(&format_event(&ev));
+            emit_live_event(screen, &ev);
             app.task_events.push(ev);
             app.running = false;
             return;
@@ -942,7 +1018,7 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
 
     if !thought.is_empty() {
         let ev = Event::Thinking { text: thought };
-        screen.emit(&format_event(&ev));
+        emit_live_event(screen, &ev);
         app.task_events.push(ev);
     }
     app.messages.push(Message::assistant(response));
@@ -960,7 +1036,7 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
                         command: command.clone(),
                         reason,
                     };
-                    screen.emit(&format_event(&ev));
+                    emit_live_event(screen, &ev);
                     app.task_events.push(ev);
                     app.pending_confirm = Some(command);
                     app.pending_confirm_note = false;
@@ -976,7 +1052,7 @@ fn process_llm_result(app: &mut App, screen: &mut Screen, result: anyhow::Result
                         exit_code: -1,
                         output: msg.to_string(),
                     };
-                    screen.emit(&format_event(&ev));
+                    emit_live_event(screen, &ev);
                     app.task_events.push(ev);
                     app.needs_agent_step = true;
                 }
@@ -994,7 +1070,7 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
         label: intent.label(),
         command: cmd.to_string(),
     };
-    screen.emit(&format_event(&call_ev));
+    emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
     match tools::shell::run_command(cmd) {
@@ -1007,7 +1083,7 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
                 exit_code: out.exit_code,
                 output: out.output,
             };
-            screen.emit(&format_event(&ev));
+            emit_live_event(screen, &ev);
             app.task_events.push(ev);
         }
         Err(e) => {
@@ -1018,7 +1094,7 @@ fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
                 exit_code: -1,
                 output: err,
             };
-            screen.emit(&format_event(&ev));
+            emit_live_event(screen, &ev);
             app.task_events.push(ev);
         }
     }

@@ -217,10 +217,7 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
         return Err(anyhow!("API error {status}: {text}"));
     }
 
-    let parsed: ApiResponse = resp
-        .json()
-        .await
-        .context("failed to parse API response")?;
+    let parsed: ApiResponse = resp.json().await.context("failed to parse API response")?;
     let text: String = parsed
         .content
         .iter()

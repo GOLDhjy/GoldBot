@@ -10,7 +10,7 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
 
     // Always block obvious shell bomb patterns.
     if lower.contains(":(){") {
-        return (RiskLevel::Block, "Blocked: system-critical command".into());
+        return (RiskLevel::Block, "已拦截：系统关键命令".into());
     }
 
     let mut should_confirm = contains_unquoted_redirection(command);
@@ -23,7 +23,7 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
 
         // Hard blocks
         if matches!(cmd.as_str(), "sudo" | "format" | "diskpart") {
-            return (RiskLevel::Block, "Blocked: system-critical command".into());
+            return (RiskLevel::Block, "已拦截：系统关键命令".into());
         }
 
         if is_confirm_command(&cmd, &tokens, cmd_index) {
@@ -34,18 +34,22 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
     if should_confirm {
         (
             RiskLevel::Confirm,
-            "Potentially destructive or mutating operation".into(),
+            "需要确认：该命令可能会修改文件或系统状态".into(),
         )
     } else {
-        (RiskLevel::Safe, "Read-only / low-risk".into())
+        (RiskLevel::Safe, "低风险只读命令".into())
     }
 }
 
 fn is_confirm_command(cmd: &str, tokens: &[String], cmd_index: usize) -> bool {
+    if cmd == "sed" {
+        // `sed -n ...` is read-only; only in-place edits need confirmation.
+        return sed_in_place_edit(tokens, cmd_index);
+    }
+
     if matches!(
         cmd,
-        "rm"
-            | "del"
+        "rm" | "del"
             | "rmdir"
             | "mv"
             | "ren"
@@ -53,7 +57,6 @@ fn is_confirm_command(cmd: &str, tokens: &[String], cmd_index: usize) -> bool {
             | "mkdir"
             | "chmod"
             | "chown"
-            | "sed"
             | "perl"
             | "touch"
             | "tee"
@@ -92,6 +95,13 @@ fn is_confirm_command(cmd: &str, tokens: &[String], cmd_index: usize) -> bool {
     }
 
     false
+}
+
+fn sed_in_place_edit(tokens: &[String], cmd_index: usize) -> bool {
+    tokens
+        .iter()
+        .skip(cmd_index + 1)
+        .any(|t| t == "-i" || t.starts_with("-i"))
 }
 
 fn primary_command(tokens: &[String]) -> Option<(usize, String)> {
@@ -306,7 +316,8 @@ mod tests {
 
     #[test]
     fn echo_with_risky_words_in_quotes_is_safe() {
-        let cmd = "echo \"- File operations (ls, cat, mkdir, etc.)\" && echo \"- System information\"";
+        let cmd =
+            "echo \"- File operations (ls, cat, mkdir, etc.)\" && echo \"- System information\"";
         let (risk, _) = assess_command(cmd);
         assert_eq!(risk, RiskLevel::Safe);
     }
@@ -314,6 +325,18 @@ mod tests {
     #[test]
     fn git_add_requires_confirmation() {
         let (risk, _) = assess_command("git add src/main.rs");
+        assert_eq!(risk, RiskLevel::Confirm);
+    }
+
+    #[test]
+    fn sed_print_mode_is_safe() {
+        let (risk, _) = assess_command("sed -n '738,920p' src/main.rs");
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn sed_in_place_requires_confirmation() {
+        let (risk, _) = assess_command("sed -i '' 's/foo/bar/g' src/main.rs");
         assert_eq!(risk, RiskLevel::Confirm);
     }
 }
