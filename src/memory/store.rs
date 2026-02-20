@@ -124,7 +124,10 @@ impl MemoryStore {
     }
 
     pub fn build_system_prompt(&self, base_prompt: &str) -> String {
-        let long_term = fs::read_to_string(self.long_term_path())
+        let long_term_path = self.long_term_path();
+        let _ = ensure_long_term_template(&long_term_path);
+
+        let long_term = fs::read_to_string(&long_term_path)
             .ok()
             .map(|s| curated_long_term_for_prompt(&s))
             .unwrap_or_default();
@@ -688,6 +691,31 @@ mod tests {
 
         let long = fs::read_to_string(base.join("MEMORY.md")).expect("read long");
         assert!(long.contains("以后默认用中文回答"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn build_system_prompt_migrates_legacy_long_term_file() {
+        let base = unique_base();
+        fs::create_dir_all(&base).expect("mkdir");
+        fs::write(
+            base.join("MEMORY.md"),
+            "- 以后默认使用中文回答。\n- 默认展示 compact 视图。\n",
+        )
+        .expect("write legacy");
+
+        let store = MemoryStore { base: base.clone() };
+        let prompt = store.build_system_prompt("BASE");
+
+        let content = fs::read_to_string(base.join("MEMORY.md")).expect("read migrated");
+        assert!(content.starts_with("# Long-term Memory"));
+        assert!(content.contains("## Bot Capabilities"));
+        assert!(content.contains(LT_SECTION_MEM_ZH));
+        assert!(content.contains("- 以后默认使用中文回答。"));
+        assert!(content.contains("- 默认展示 compact 视图。"));
+        assert!(prompt.contains("### Long-term Memory"));
+        assert!(prompt.contains("- 以后默认使用中文回答。"));
 
         let _ = fs::remove_dir_all(base);
     }
