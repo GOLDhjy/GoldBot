@@ -87,6 +87,26 @@ impl Screen {
                 Print(format!("{}\r\n", line.cyan().bold()))
             )?;
         }
+
+        let cols = crossterm::terminal::size()
+            .map(|(c, _)| c.max(1) as usize)
+            .unwrap_or(80);
+        let subtitle_budget = cols.saturating_sub(rendered_text_width("  "));
+        for (i, line) in startup_subtitle_lines().iter().enumerate() {
+            let line = fit_single_line_tail(line, subtitle_budget);
+            let styled = match i {
+                0 => line.bold().to_string(),
+                1 => line.dark_grey().to_string(),
+                _ => line.dark_grey().to_string(),
+            };
+            execute!(
+                s.stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                Print(format!("  {}\r\n", styled))
+            )?;
+        }
+
         execute!(
             s.stdout,
             cursor::MoveToColumn(0),
@@ -218,6 +238,34 @@ impl Screen {
             self.task_rendered.push(line.clone());
         }
         self.draw_managed();
+    }
+}
+
+fn startup_subtitle_lines() -> Vec<String> {
+    let version = env!("CARGO_PKG_VERSION");
+    let model =
+        std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
+    let base_url = std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/anthropic".to_string());
+    let provider = extract_host_from_url(&base_url).unwrap_or(base_url);
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| ".".to_string());
+
+    vec![
+        format!("GoldBot v{version}"),
+        format!("{model} · {provider}"),
+        cwd,
+    ]
+}
+
+fn extract_host_from_url(url: &str) -> Option<String> {
+    let no_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = no_scheme.split('/').next().unwrap_or(no_scheme).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
     }
 }
 
@@ -443,13 +491,7 @@ fn format_event(event: &Event) -> Vec<String> {
             }
             lines
         }
-        Event::Final { summary } => lines_with(summary, |i, line| {
-            if i == 0 {
-                format!("  ✓ {}", line).green().bold().to_string()
-            } else {
-                format!("    {}", line).green().to_string()
-            }
-        }),
+        Event::Final { summary } => format_final_lines(summary),
     }
 }
 
@@ -461,24 +503,226 @@ fn lines_with(text: &str, f: impl Fn(usize, &str) -> String) -> Vec<String> {
     v.iter().enumerate().map(|(i, l)| f(i, l)).collect()
 }
 
+fn format_final_lines(summary: &str) -> Vec<String> {
+    let lines: Vec<&str> = summary.lines().collect();
+    if lines.is_empty() {
+        return vec!["  ✓ Done".green().bold().to_string()];
+    }
+
+    let has_diff = looks_like_diff_block(&lines);
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let trimmed = line.trim_start();
+            if i == 0 {
+                return format!(
+                    "  {} {}",
+                    "✓".green().bold(),
+                    render_inline_markdown(trimmed).bold()
+                );
+            }
+
+            let rendered = format!("    {}", line);
+
+            if has_diff {
+                if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+                    return rendered.green().to_string();
+                }
+                if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+                    return rendered.red().to_string();
+                }
+                if trimmed.starts_with("@@")
+                    || trimmed.starts_with("diff --git")
+                    || trimmed.starts_with("index ")
+                    || trimmed.starts_with("--- ")
+                    || trimmed.starts_with("+++ ")
+                {
+                    return rendered.dark_yellow().to_string();
+                }
+            }
+
+            if is_markdown_rule(trimmed) {
+                return "    ─────────────────────────────".dark_grey().to_string();
+            }
+            if let Some((level, heading)) = parse_markdown_heading(trimmed) {
+                let rendered = format!("    {}", render_inline_markdown(heading));
+                return match level {
+                    1 => rendered.bold().green().to_string(),
+                    2 => rendered.bold().yellow().to_string(),
+                    _ => rendered.bold().dark_yellow().to_string(),
+                };
+            }
+            if let Some(item) = parse_markdown_list_item(trimmed) {
+                return format_bullet_line(item);
+            }
+            if let Some(rest) = trimmed.strip_prefix("> ") {
+                return format!("    {}", render_inline_markdown(rest))
+                    .dark_grey()
+                    .to_string();
+            }
+            if let Some(section) = split_trailing_section_title(trimmed) {
+                return format!("    {}", render_inline_markdown(section))
+                    .bold()
+                    .yellow()
+                    .to_string();
+            }
+            if let Some((key, sep, value)) = split_key_value_parts(trimmed) {
+                let key = render_inline_markdown(key);
+                let value = render_inline_markdown(value);
+                return format!("    {}{} {}", key.bold().yellow(), sep, value);
+            }
+
+            format!("    {}", render_inline_markdown(trimmed))
+        })
+        .collect()
+}
+
+fn looks_like_diff_block(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("diff --git")
+            || t.starts_with("@@")
+            || t.starts_with("--- ")
+            || t.starts_with("+++ ")
+            || t.starts_with("index ")
+    })
+}
+
+fn is_markdown_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_'))
+}
+
+fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let t = line.trim_start();
+    let bytes = t.as_bytes();
+    let mut level = 0usize;
+    while level < bytes.len() && bytes[level] == b'#' {
+        level += 1;
+    }
+    if level == 0 || level > 6 || level >= bytes.len() || bytes[level] != b' ' {
+        return None;
+    }
+    Some((level, t[level + 1..].trim()))
+}
+
+fn parse_markdown_list_item(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("• ") {
+        return Some(rest.trim());
+    }
+    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return Some(rest.trim());
+    }
+    strip_ordered_marker(line).map(str::trim)
+}
+
+fn split_trailing_section_title(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(section) = t.strip_suffix(':').or_else(|| t.strip_suffix('：')) {
+        let section = section.trim();
+        if !section.is_empty() {
+            return Some(section);
+        }
+    }
+    None
+}
+
+fn split_key_value_parts(line: &str) -> Option<(&str, char, &str)> {
+    let t = line.trim();
+    for (idx, ch) in t.char_indices() {
+        if ch != ':' && ch != '：' {
+            continue;
+        }
+        let key = t[..idx].trim_end();
+        let value = t[idx + ch.len_utf8()..].trim_start();
+        if key.is_empty() || value.is_empty() {
+            return None;
+        }
+        if key.contains("://") || value.starts_with("//") || key.len() > 40 {
+            return None;
+        }
+        return Some((key, ch, value));
+    }
+    None
+}
+
+fn format_bullet_line(item: &str) -> String {
+    if let Some((key, sep, value)) = split_key_value_parts(item) {
+        let key = render_inline_markdown(key);
+        let value = render_inline_markdown(value);
+        return format!(
+            "    {} {}{} {}",
+            "•".dark_grey(),
+            key.bold().yellow(),
+            sep,
+            value
+        );
+    }
+    format!("    {} {}", "•".dark_grey(), render_inline_markdown(item))
+}
+
+fn render_inline_markdown(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+            let mut j = i + 2;
+            while j + 1 < chars.len() {
+                if chars[j] == '*' && chars[j + 1] == '*' {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 1 < chars.len() {
+                let segment: String = chars[i + 2..j].iter().collect();
+                out.push_str(&segment.bold().to_string());
+                i = j + 2;
+                continue;
+            }
+        }
+
+        if chars[i] == '`' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '`' {
+                j += 1;
+            }
+            if j < chars.len() {
+                let segment: String = chars[i + 1..j].iter().collect();
+                out.push_str(&segment.cyan().to_string());
+                i = j + 1;
+                continue;
+            }
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
 fn sanitize_final_summary_for_tui(text: &str) -> String {
     let mut out = Vec::<String>::new();
     let mut in_code_fence = false;
 
     for raw in text.lines() {
-        let trimmed = raw.trim();
-        if trimmed.starts_with("```") {
+        let fence_probe = raw.trim_start();
+        if fence_probe.starts_with("```") {
             in_code_fence = !in_code_fence;
             continue;
         }
 
-        let mut line = if in_code_fence {
-            trimmed.to_string()
+        let line = if in_code_fence {
+            raw.trim_end().to_string()
         } else {
-            markdown_line_to_plain(trimmed)
+            raw.trim().to_string()
         };
-        line = strip_inline_markdown(&line);
-        line = line.trim().to_string();
         out.push(line);
     }
 
@@ -501,37 +745,6 @@ fn sanitize_final_summary_for_tui(text: &str) -> String {
     compact.join("\n")
 }
 
-fn markdown_line_to_plain(line: &str) -> String {
-    if line.is_empty() {
-        return String::new();
-    }
-    if let Some(stripped) = strip_markdown_heading(line) {
-        return stripped;
-    }
-    if let Some(rest) = line.strip_prefix("> ") {
-        return rest.trim().to_string();
-    }
-    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        return format!("• {}", rest.trim());
-    }
-    if let Some(rest) = strip_ordered_marker(line) {
-        return format!("• {}", rest.trim());
-    }
-    line.to_string()
-}
-
-fn strip_markdown_heading(line: &str) -> Option<String> {
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() && bytes[i] == b'#' {
-        i += 1;
-    }
-    if i == 0 || i >= bytes.len() || bytes[i] != b' ' {
-        return None;
-    }
-    Some(line[i + 1..].trim().to_string())
-}
-
 fn strip_ordered_marker(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
     let mut i = 0usize;
@@ -542,14 +755,6 @@ fn strip_ordered_marker(line: &str) -> Option<&str> {
         return Some(&line[i + 2..]);
     }
     None
-}
-
-fn strip_inline_markdown(s: &str) -> String {
-    s.replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-        .replace('*', "")
-        .replace('_', "")
 }
 
 fn format_event_live(event: &Event) -> Vec<String> {
@@ -644,6 +849,82 @@ fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_tool_label(label: &str) -> (&str, Option<&str>) {
+    let Some(open) = label.find('(') else {
+        return (label, None);
+    };
+    if !label.ends_with(')') || open == 0 || open + 1 >= label.len() {
+        return (label, None);
+    }
+    let kind = &label[..open];
+    let target = &label[open + 1..label.len() - 1];
+    (kind, Some(target))
+}
+
+fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut i = 0usize;
+
+    while i < events.len() {
+        if let Event::ToolCall { label, .. } = &events[i] {
+            let (kind, target) = parse_tool_label(label);
+            if kind == "Read" {
+                let mut count = 1usize;
+                let mut j = i + 1;
+                let mut had_error = false;
+                let mut last_target = target.map(str::to_string);
+
+                while j < events.len() {
+                    match &events[j] {
+                        Event::ToolResult { exit_code, .. } => {
+                            had_error |= *exit_code != 0;
+                            j += 1;
+                        }
+                        Event::ToolCall { label, .. } => {
+                            let (next_kind, next_target) = parse_tool_label(label);
+                            if next_kind != "Read" {
+                                break;
+                            }
+                            count += 1;
+                            if let Some(target) = next_target {
+                                last_target = Some(target.to_string());
+                            }
+                            j += 1;
+                        }
+                        Event::Thinking { .. } => j += 1,
+                        Event::NeedsConfirmation { .. }
+                        | Event::Final { .. }
+                        | Event::UserTask { .. } => break,
+                    }
+                }
+
+                if count >= 2 {
+                    let summary = format!("  • Reading {count} files... (Ctrl+d 查看详情)");
+                    if had_error {
+                        lines.push(summary.red().to_string());
+                    } else {
+                        lines.push(summary.cyan().to_string());
+                    }
+                    if let Some(target) = last_target {
+                        lines.push(
+                            format!("    └ {}", shorten_text(&target, 110))
+                                .dark_grey()
+                                .to_string(),
+                        );
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
+
+        lines.extend(format_event_compact(&events[i]));
+        i += 1;
+    }
+
+    lines
+}
+
 fn parse_fs_changes(output: &str) -> Option<FsChangeSummary> {
     let mut in_section = false;
     let mut fs = FsChangeSummary::default();
@@ -731,9 +1012,7 @@ fn collapsed_lines(app: &App) -> Vec<String> {
         text: app.task.clone(),
     });
     lines.push(String::new());
-    for ev in &app.task_events {
-        lines.extend(format_event_compact(ev));
-    }
+    lines.extend(collapsed_task_event_lines(&app.task_events));
     if !app.task_events.is_empty() {
         lines.push(String::new());
     }
@@ -1453,18 +1732,80 @@ fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_final_summary_for_tui;
+    use super::{collapsed_task_event_lines, format_final_lines, sanitize_final_summary_for_tui};
+    use crate::types::Event;
 
     #[test]
-    fn sanitize_final_strips_markdown() {
+    fn sanitize_final_keeps_markdown_structure_but_drops_fences() {
         let raw = "## Title\n- **a**\n- `b`\n```bash\nls -la\n```\n1. item";
         let got = sanitize_final_summary_for_tui(raw);
-        assert!(got.contains("Title"));
-        assert!(got.contains("• a"));
-        assert!(got.contains("• b"));
+        assert!(got.contains("## Title"));
+        assert!(got.contains("- **a**"));
+        assert!(got.contains("- `b`"));
         assert!(got.contains("ls -la"));
-        assert!(got.contains("• item"));
-        assert!(!got.contains("##"));
+        assert!(got.contains("1. item"));
         assert!(!got.contains("```"));
+    }
+
+    #[test]
+    fn final_diff_has_red_green_semantics() {
+        let lines = format_final_lines(
+            "变更摘要\ndiff --git a/foo b/foo\n@@ -1,2 +1,2 @@\n-old line\n+new line",
+        );
+        assert!(lines.iter().any(|l| l.contains("-old line")));
+        assert!(lines.iter().any(|l| l.contains("+new line")));
+    }
+
+    #[test]
+    fn collapsed_groups_consecutive_reads() {
+        let events = vec![
+            Event::ToolCall {
+                label: "Read(/tmp/a.rs)".to_string(),
+                command: "cat /tmp/a.rs".to_string(),
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output: "Read 10 lines".to_string(),
+            },
+            Event::ToolCall {
+                label: "Read(/tmp/b.rs)".to_string(),
+                command: "cat /tmp/b.rs".to_string(),
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output: "Read 20 lines".to_string(),
+            },
+            Event::ToolCall {
+                label: "Read(/tmp/c.rs)".to_string(),
+                command: "cat /tmp/c.rs".to_string(),
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output: "Read 30 lines".to_string(),
+            },
+        ];
+
+        let lines = collapsed_task_event_lines(&events).join("\n");
+        assert!(lines.contains("Reading 3 files"));
+        assert!(lines.contains("/tmp/c.rs"));
+        assert!(!lines.contains("Read(/tmp/a.rs)"));
+    }
+
+    #[test]
+    fn collapsed_keeps_single_read_detail() {
+        let events = vec![
+            Event::ToolCall {
+                label: "Read(/tmp/only.rs)".to_string(),
+                command: "cat /tmp/only.rs".to_string(),
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output: "Read 8 lines".to_string(),
+            },
+        ];
+
+        let lines = collapsed_task_event_lines(&events).join("\n");
+        assert!(lines.contains("Read(/tmp/only.rs)"));
+        assert!(!lines.contains("Reading 1 files"));
     }
 }
