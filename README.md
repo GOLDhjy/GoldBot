@@ -173,6 +173,25 @@ BIGMODEL_MODEL=GLM-4.7
 goldbot
 ```
 
+### GE 监督模式（聊天触发）
+
+在输入框里用 `GE` 开头可进入持续监督模式：
+
+- `GE <目标描述>`：进入 GE 模式（若无 `CONSENSUS.md`，会进入固定三问并自动生成）
+- `GE`：进入 GE 模式（已有 `CONSENSUS.md` 时直接接管）
+- `GE 退出` / `GE exit`：退出 GE 模式
+- `GE 细化todo` / `GE replan`：基于当前 Purpose/Rules/Scope 重新生成更细粒度 Todo
+
+GE 模式下：
+
+- 执行链路固定为：Claude 执行 -> Codex 检查优化 -> GoldBot 只读验收
+- 三问完成后 Todo 由 LLM 生成（目标 8-12 个细粒度步骤）
+- 每个 Todo 验收通过后，GoldBot 会执行自审并在本地创建 git commit
+- 自动 commit 会排除 `GE_LOG.jsonl`，避免日志污染代码提交
+- 共识文件路径：项目根 `CONSENSUS.md`
+- 审计日志路径：项目根 `GE_LOG.jsonl`（JSONL，单文件持续追加）
+- 任务触发：每个 Todo 完成后立即重读 + 每 30 分钟周期重读
+
 ## MCP 接入（对齐 OpenCode 风格）
 
 默认从记忆目录读取配置文件：

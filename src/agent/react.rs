@@ -67,7 +67,6 @@ pub fn build_system_prompt() -> String {
         .replace("{SKILLS_DIR}", &skills_dir.to_string_lossy())
 }
 
-
 /// Parse the raw text returned by the LLM into a thought + action pair.
 pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
     let thought = extract_last_tag(text, "thought").unwrap_or_default();
@@ -81,8 +80,8 @@ pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
     }
 
     if let Some(raw) = extract_last_tag(text, "create_mcp") {
-        let config: Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow!("invalid <create_mcp> JSON: {e}"))?;
+        let config: Value =
+            serde_json::from_str(&raw).map_err(|e| anyhow!("invalid <create_mcp> JSON: {e}"))?;
         if !config.is_object() {
             return Err(anyhow!("<create_mcp> must be a JSON object"));
         }

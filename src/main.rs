@@ -1,4 +1,5 @@
 mod agent;
+mod consensus;
 mod memory;
 mod tools;
 mod types;
@@ -26,9 +27,9 @@ use crossterm::{
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
-use types::Event;
+use types::{Event, Mode};
 use ui::format::{emit_live_event, toggle_collapse};
-use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
+use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line, strip_ansi};
 
 pub(crate) const MAX_MESSAGES_BEFORE_COMPACTION: usize = 48;
 pub(crate) const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
@@ -61,6 +62,8 @@ pub(crate) struct App {
     /// Base system prompt = SYSTEM_PROMPT + skills section.
     /// Used as the foundation when rebuilding the full prompt after MCP discovery.
     pub base_prompt: String,
+    pub mode: Mode,
+    pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +110,8 @@ impl App {
             mcp_discovery_rx: None,
             skills,
             base_prompt,
+            mode: Mode::Normal,
+            ge_agent: None,
         }
     }
 }
@@ -208,6 +213,8 @@ async fn run_loop(
             }
         }
 
+        drain_ge_events(app, screen);
+
         if app.running && app.pending_confirm.is_none() && app.needs_agent_step && !app.llm_calling
         {
             maybe_flush_and_compact_before_call(app, screen);
@@ -266,6 +273,27 @@ async fn run_loop(
 fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) -> bool {
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
+    }
+    if is_ge_mode(app.mode)
+        && modifiers.is_empty()
+        && screen.input.trim().is_empty()
+        && matches!(key, KeyCode::Char('q') | KeyCode::Char('Q'))
+    {
+        if let Some(agent) = app.ge_agent.as_ref() {
+            if agent.hard_exit() {
+                screen.emit(&[
+                    "  GE hard exit requested (q). Stopping current executor...".to_string()
+                ]);
+            } else {
+                app.ge_agent = None;
+                app.mode = Mode::Normal;
+                screen.emit(&["  GE channel disconnected.".to_string()]);
+            }
+        } else {
+            app.mode = Mode::Normal;
+            screen.emit(&["  GE is already disabled.".to_string()]);
+        }
+        return false;
     }
     if key == KeyCode::Char('d')
         && modifiers.contains(KeyModifiers::CONTROL)
@@ -403,7 +431,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     let task = expand_input_text(app, &screen.input).trim().to_string();
                     if !task.is_empty() {
                         clear_input_buffer(app, screen);
-                        start_task(app, screen, task);
+                        submit_user_input(app, screen, task);
                     }
                 }
                 KeyCode::Esc if modifiers.is_empty() => {
@@ -457,6 +485,276 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     }
 
     false
+}
+
+fn submit_user_input(app: &mut App, screen: &mut Screen, task: String) {
+    match try_submit_user_input(app, screen, &task) {
+        Ok(()) => {}
+        Err(e) => {
+            screen.emit(&[format!(
+                "  {}",
+                crossterm::style::Stylize::red(format!("GE error: {e}"))
+            )]);
+        }
+    }
+}
+
+fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyhow::Result<()> {
+    if let Some(rest) = parse_ge_command(task) {
+        let rest = rest.trim();
+        if rest == "退出" || rest.eq_ignore_ascii_case("exit") {
+            if let Some(agent) = app.ge_agent.as_ref() {
+                if agent.hard_exit() {
+                    screen.emit(&[
+                        "  GE hard exit requested. Stopping current executor...".to_string()
+                    ]);
+                } else {
+                    app.ge_agent = None;
+                    app.mode = Mode::Normal;
+                    screen.emit(&["  GE channel disconnected.".to_string()]);
+                }
+            } else {
+                app.mode = Mode::Normal;
+                screen.emit(&["  GE is already disabled.".to_string()]);
+            }
+            return Ok(());
+        }
+        if rest == "细化todo" || rest.eq_ignore_ascii_case("replan") {
+            if let Some(agent) = app.ge_agent.as_ref() {
+                if !agent.send(crate::consensus::subagent::GeAgentCommand::ReplanTodos) {
+                    app.ge_agent = None;
+                    app.mode = Mode::Normal;
+                    screen.emit(&["  GE channel disconnected.".to_string()]);
+                }
+            } else {
+                screen.emit(&["  GE is not active. Start with `GE <goal>` first.".to_string()]);
+            }
+            return Ok(());
+        }
+
+        if app.running {
+            finish(
+                app,
+                screen,
+                "Stopped current task to enter GE mode.".to_string(),
+            );
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        if app.ge_agent.is_none() {
+            let agent = crate::consensus::subagent::GeSubagent::start(cwd, rest)?;
+            app.ge_agent = Some(agent);
+            drain_ge_events(app, screen);
+            screen.emit(&["  GE controls: press `q` for hard exit.".to_string()]);
+        } else {
+            screen.emit(&["  GE already active. Use `GE 退出` to leave this mode.".to_string()]);
+        }
+        return Ok(());
+    }
+
+    if app.mode == Mode::GeInterview {
+        if let Some(agent) = app.ge_agent.as_ref() {
+            screen.emit(&["  GE: input received.".to_string()]);
+            if !agent.send(crate::consensus::subagent::GeAgentCommand::InterviewReply(
+                task.to_string(),
+            )) {
+                app.ge_agent = None;
+                app.mode = Mode::Normal;
+                screen.emit(&["  GE channel disconnected.".to_string()]);
+            } else {
+                screen.status = "GE: processing interview input...".to_string();
+                screen.refresh();
+                drain_ge_events(app, screen);
+            }
+        } else {
+            app.mode = Mode::Normal;
+            screen.emit(&["  GE session not found. Start again with `GE`.".to_string()]);
+        }
+        return Ok(());
+    }
+
+    if app.mode == Mode::GeRun || app.mode == Mode::GeIdle {
+        screen.emit(&["  GE mode is active. Use `GE 退出` to return to normal mode.".to_string()]);
+        return Ok(());
+    }
+
+    start_task(app, screen, task.to_string());
+    Ok(())
+}
+
+fn parse_ge_command(task: &str) -> Option<&str> {
+    let trimmed = task.trim();
+    if trimmed.len() < 2 {
+        return None;
+    }
+    let mut chars = trimmed.chars();
+    let (Some(c1), Some(c2)) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if !c1.eq_ignore_ascii_case(&'g') || !c2.eq_ignore_ascii_case(&'e') {
+        return None;
+    }
+    let rest = chars.as_str();
+    if let Some(first) = rest.chars().next()
+        && first.is_ascii_alphabetic()
+    {
+        return None;
+    }
+    Some(rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{3000}'))
+}
+
+fn drain_ge_events(app: &mut App, screen: &mut Screen) {
+    let mut drop_agent = false;
+    let mut disable_screen_status = false;
+    let mut disconnected = false;
+
+    loop {
+        let Some(agent) = app.ge_agent.as_ref() else {
+            break;
+        };
+        match agent.try_recv() {
+            Ok(crate::consensus::subagent::GeAgentEvent::OutputLines(lines)) => {
+                if !lines.is_empty() {
+                    if strip_ansi(&screen.status).starts_with("GE: processing interview input") {
+                        screen.status.clear();
+                    }
+                    let styled = stylize_ge_lines(&lines);
+                    screen.emit(&styled);
+                }
+            }
+            Ok(crate::consensus::subagent::GeAgentEvent::ModeChanged(mode)) => {
+                app.mode = mode;
+                if app.mode != Mode::GeInterview
+                    && strip_ansi(&screen.status).starts_with("GE: processing interview input")
+                {
+                    screen.status.clear();
+                }
+            }
+            Ok(crate::consensus::subagent::GeAgentEvent::Exited) => {
+                drop_agent = true;
+                app.mode = Mode::Normal;
+                disable_screen_status = true;
+                break;
+            }
+            Ok(crate::consensus::subagent::GeAgentEvent::Error(err)) => {
+                screen.emit(&[format!(
+                    "  {}",
+                    crossterm::style::Stylize::red(format!("GE error: {err}"))
+                )]);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                drop_agent = true;
+                app.mode = Mode::Normal;
+                disconnected = true;
+                break;
+            }
+        }
+    }
+
+    if drop_agent {
+        app.ge_agent = None;
+        if disconnected {
+            screen.emit(&["  GE subagent disconnected.".to_string()]);
+        }
+    }
+    if disable_screen_status {
+        app.running = false;
+        app.needs_agent_step = false;
+        app.pending_confirm = None;
+        app.pending_confirm_note = false;
+        screen.status.clear();
+        screen.refresh();
+    }
+}
+
+fn is_ge_mode(mode: Mode) -> bool {
+    matches!(mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle)
+}
+
+fn stylize_ge_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|line| stylize_ge_line(line)).collect()
+}
+
+fn stylize_ge_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(text) = line.strip_prefix("    1) ") {
+        return format!("    {}) {}", "1".cyan().bold(), text);
+    }
+    if let Some(text) = line.strip_prefix("    2) ") {
+        return format!("    {}) {}", "2".cyan().bold(), text);
+    }
+    if let Some(text) = line.strip_prefix("    3) ") {
+        return format!("    {}) {}", "3".cyan().bold(), text);
+    }
+    if trimmed.starts_with("GE Q") || trimmed.starts_with("GE Clarify") {
+        return line.cyan().bold().to_string();
+    }
+    if trimmed.starts_with("Reply with 1, 2, or 3.") || trimmed.starts_with("Reply with 1/2/3") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE controls:") || trimmed.starts_with("Audit log:") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed == "GE: input received." {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE: Planning") {
+        return line.dark_yellow().bold().to_string();
+    }
+    if trimmed.starts_with("GE: Working on current todo")
+        || trimmed.starts_with("GE: still running current step")
+    {
+        return line.dark_yellow().to_string();
+    }
+    if trimmed.starts_with("GE ->") && trimmed.contains("prompt:") {
+        return line.cyan().to_string();
+    }
+    if trimmed.starts_with("GE <-") && trimmed.contains("result:") {
+        if trimmed.contains("status=success") {
+            return line.green().to_string();
+        }
+        return line.dark_yellow().to_string();
+    }
+    if trimmed.starts_with('T') && trimmed.contains("->") && trimmed.contains("prompt:") {
+        return line.cyan().to_string();
+    }
+    if trimmed.starts_with('T') && trimmed.contains("<-") && trimmed.contains("result:") {
+        if trimmed.contains("status=success") {
+            return line.green().to_string();
+        }
+        return line.dark_yellow().to_string();
+    }
+    if trimmed.starts_with("...(truncated in console view;") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE: clarification complete.")
+        || trimmed.starts_with("GE interview complete;")
+        || trimmed.ends_with(" checked.")
+    {
+        return line.green().bold().to_string();
+    }
+    if trimmed.starts_with("GE running ") {
+        return line.cyan().bold().to_string();
+    }
+    if trimmed.starts_with('T') && trimmed.contains(" started.") {
+        return line.cyan().to_string();
+    }
+    if trimmed.starts_with('T') && trimmed.contains(" deferred:") {
+        return line.dark_yellow().to_string();
+    }
+    if trimmed.starts_with('T') && trimmed.contains(" cancelled.") {
+        return line.dark_yellow().bold().to_string();
+    }
+    if trimmed.starts_with("GE mode disabled.")
+        || trimmed.starts_with("GE disabled.")
+        || trimmed.starts_with("GE subagent disconnected.")
+    {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE:") {
+        return line.dark_yellow().to_string();
+    }
+    line.to_string()
 }
 
 fn handle_paste(app: &mut App, screen: &mut Screen, pasted: &str) {
@@ -597,4 +895,22 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
         screen.input_focused = true;
     }
     screen.refresh();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ge_command;
+
+    #[test]
+    fn parse_ge_command_supports_exit_variants() {
+        assert_eq!(parse_ge_command("GE 退出"), Some("退出"));
+        assert_eq!(parse_ge_command("ge exit"), Some("exit"));
+        assert_eq!(parse_ge_command("GE退出"), Some("退出"));
+    }
+
+    #[test]
+    fn parse_ge_command_rejects_regular_words() {
+        assert_eq!(parse_ge_command("get status"), None);
+        assert_eq!(parse_ge_command("general"), None);
+    }
 }

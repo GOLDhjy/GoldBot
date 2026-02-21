@@ -5,7 +5,7 @@ use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::store::MemoryStore;
 use crate::tools::safety::{RiskLevel, assess_command};
-use crate::types::{Event, LlmAction};
+use crate::types::{Event, LlmAction, Mode};
 use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
 };
@@ -105,17 +105,27 @@ pub(crate) fn process_llm_result(
                     app.needs_agent_step = true;
                 }
                 RiskLevel::Confirm => {
-                    let ev = Event::NeedsConfirmation {
-                        command: command.clone(),
-                        reason,
-                    };
-                    emit_live_event(screen, &ev);
-                    app.task_events.push(ev);
-                    app.pending_confirm = Some(command);
-                    app.pending_confirm_note = false;
-                    screen.confirm_selected = Some(0);
-                    screen.input_focused = false;
-                    screen.refresh();
+                    if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle) {
+                        let ev = Event::Thinking {
+                            text: format!("GE auto-approved confirm command: {command}"),
+                        };
+                        emit_live_event(screen, &ev);
+                        app.task_events.push(ev);
+                        execute_command(app, screen, &command);
+                        app.needs_agent_step = true;
+                    } else {
+                        let ev = Event::NeedsConfirmation {
+                            command: command.clone(),
+                            reason,
+                        };
+                        emit_live_event(screen, &ev);
+                        app.task_events.push(ev);
+                        app.pending_confirm = Some(command);
+                        app.pending_confirm_note = false;
+                        screen.confirm_selected = Some(0);
+                        screen.input_focused = false;
+                        screen.refresh();
+                    }
                 }
                 RiskLevel::Block => {
                     let msg = "Command blocked by safety policy";
@@ -263,7 +273,10 @@ pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json
         Err(e) => (1, format!("Failed to create MCP server: {e}")),
     };
 
-    let ev = Event::ToolResult { exit_code, output: result_msg.clone() };
+    let ev = Event::ToolResult {
+        exit_code,
+        output: result_msg.clone(),
+    };
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
     app.messages

@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -85,9 +84,7 @@ pub fn skills_system_prompt(skills: &[Skill]) -> String {
 
 /// Strip surrounding single or double quotes from a YAML scalar value.
 fn strip_yaml_quotes(s: &str) -> String {
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()

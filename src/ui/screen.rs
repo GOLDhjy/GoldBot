@@ -400,7 +400,11 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     }
 
     let sep_styled = sep.dark_grey().to_string();
-    Some(format!("  {}{}", prefix.dark_grey(), shown.join(&sep_styled)))
+    Some(format!(
+        "  {}{}",
+        prefix.dark_grey(),
+        shown.join(&sep_styled)
+    ))
 }
 
 /// Format the MCP discovery result as a single styled line for `Screen::emit()`.

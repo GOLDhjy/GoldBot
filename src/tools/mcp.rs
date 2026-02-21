@@ -30,16 +30,11 @@ const GLOBAL_MCP_CONFIG_FILES: &[&str] = &[
 ];
 
 // Global TOML config files relative to $HOME (each parsed separately).
-const GLOBAL_TOML_CONFIG_FILES: &[&str] = &[
-    ".codex/config.toml",
-];
+const GLOBAL_TOML_CONFIG_FILES: &[&str] = &[".codex/config.toml"];
 
 // Project-local MCP config files (searched from cwd up to git root).
-const LOCAL_MCP_CONFIG_FILES: &[&str] = &[
-    ".kiro/settings/mcp.json",
-    "mcp.json",
-    "mcp_servers.json",
-];
+const LOCAL_MCP_CONFIG_FILES: &[&str] =
+    &[".kiro/settings/mcp.json", "mcp.json", "mcp_servers.json"];
 // Keep this aligned with https://modelcontextprotocol.io/specification/versioning
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_OUTPUT_CHARS: usize = 12_000;
@@ -177,10 +172,7 @@ impl McpRegistry {
                     }
                     Ok(_) => return (Self::default(), warnings),
                     Err(e) => {
-                        warnings.push(format!(
-                            "failed to read MCP config `{}`: {e}",
-                            p.display()
-                        ));
+                        warnings.push(format!("failed to read MCP config `{}`: {e}", p.display()));
                         return (Self::default(), warnings);
                     }
                 }
@@ -499,8 +491,7 @@ impl McpRegistry {
 fn parse_toml_mcp_servers(
     text: &str,
 ) -> std::result::Result<BTreeMap<String, RawServerEntry>, String> {
-    let doc: toml::Value =
-        toml::from_str(text).map_err(|e| format!("not valid TOML: {e}"))?;
+    let doc: toml::Value = toml::from_str(text).map_err(|e| format!("not valid TOML: {e}"))?;
 
     let Some(mcp_servers) = doc.get("mcp_servers").and_then(|v| v.as_table()) else {
         return Ok(BTreeMap::new());
@@ -518,9 +509,7 @@ fn parse_toml_mcp_servers(
         }
 
         let command = match table.get("command").and_then(|v| v.as_str()) {
-            Some(s) if !s.trim().is_empty() => {
-                Some(RawCommand::String(s.trim().to_string()))
-            }
+            Some(s) if !s.trim().is_empty() => Some(RawCommand::String(s.trim().to_string())),
             _ => None,
         };
         let mut args: Vec<String> = table
@@ -661,7 +650,7 @@ pub fn mcp_servers_file_path() -> PathBuf {
 /// `config` must be a JSON object with at minimum a `command` field.
 /// Returns the path of the config file that was written.
 pub fn create_mcp_server(name: &str, config: &serde_json::Value) -> anyhow::Result<PathBuf> {
-    use anyhow::{bail, Context};
+    use anyhow::{Context, bail};
 
     if name.trim().is_empty() {
         bail!("MCP server name must not be empty");
@@ -676,17 +665,19 @@ pub fn create_mcp_server(name: &str, config: &serde_json::Value) -> anyhow::Resu
     let path = mcp_servers_file_path();
 
     // Read existing config, or start fresh.
-    let mut root: serde_json::Map<String, serde_json::Value> =
-        match fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty()) {
-            Some(text) => match serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-            {
-                Some(obj) => obj,
-                None => serde_json::Map::new(),
-            },
+    let mut root: serde_json::Map<String, serde_json::Value> = match fs::read_to_string(&path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+        {
+            Some(obj) => obj,
             None => serde_json::Map::new(),
-        };
+        },
+        None => serde_json::Map::new(),
+    };
 
     // Normalise into canonical format: command array, explicit type + enabled.
     let mut spec = config.as_object().cloned().unwrap_or_default();
@@ -705,10 +696,7 @@ pub fn create_mcp_server(name: &str, config: &serde_json::Value) -> anyhow::Resu
     if let Some(serde_json::Value::Array(extra)) = args_val {
         cmd_parts.extend(extra);
     }
-    spec.insert(
-        "command".to_string(),
-        serde_json::Value::Array(cmd_parts),
-    );
+    spec.insert("command".to_string(), serde_json::Value::Array(cmd_parts));
 
     // Always write type and enabled explicitly.
     spec.insert(
@@ -731,10 +719,7 @@ pub fn create_mcp_server(name: &str, config: &serde_json::Value) -> anyhow::Resu
     let spec_value = serde_json::Value::Object(spec);
 
     // Insert server at the right level (handle mcpServers/mcp wrappers).
-    if let Some(inner) = root
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    {
+    if let Some(inner) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
         inner.insert(name.to_string(), spec_value);
     } else if let Some(inner) = root.get_mut("mcp").and_then(|v| v.as_object_mut()) {
         inner.insert(name.to_string(), spec_value);
