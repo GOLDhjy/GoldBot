@@ -19,6 +19,27 @@ const ENV_MCP_DISCOVERY_TIMEOUT_MS: &str = "GOLDBOT_MCP_DISCOVERY_TIMEOUT_MS";
 const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
 const DEFAULT_MCP_SERVERS_FILENAME: &str = "mcp_servers.json";
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 3000;
+
+// Global MCP config files relative to $HOME. GoldBot's own file is checked first.
+const GLOBAL_MCP_CONFIG_FILES: &[&str] = &[
+    ".goldbot/mcp_servers.json",
+    ".kiro/settings/mcp.json",
+    ".config/opencode/opencode.json",
+    ".gemini/settings.json",
+    ".claude/claude_desktop_config.json",
+];
+
+// Global TOML config files relative to $HOME (each parsed separately).
+const GLOBAL_TOML_CONFIG_FILES: &[&str] = &[
+    ".codex/config.toml",
+];
+
+// Project-local MCP config files (searched from cwd up to git root).
+const LOCAL_MCP_CONFIG_FILES: &[&str] = &[
+    ".kiro/settings/mcp.json",
+    "mcp.json",
+    "mcp_servers.json",
+];
 // Keep this aligned with https://modelcontextprotocol.io/specification/versioning
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_OUTPUT_CHARS: usize = 12_000;
@@ -120,31 +141,134 @@ impl McpRegistry {
     pub fn from_env() -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
 
-        let raw = match std::env::var(ENV_MCP_SERVERS) {
-            Ok(v) if !v.trim().is_empty() => v,
-            Ok(_) | Err(_) => match read_mcp_servers_file() {
-                Ok(Some(text)) => text,
-                Ok(None) => return (Self::default(), warnings),
-                Err(e) => {
-                    warnings.push(e);
-                    return (Self::default(), warnings);
+        // Explicit env override: inline JSON string.
+        if let Ok(v) = std::env::var(ENV_MCP_SERVERS) {
+            if !v.trim().is_empty() {
+                let mut registry = Self::default();
+                match parse_server_entries(&v) {
+                    Ok(entries) => {
+                        Self::populate_from_entries(&mut registry, entries, &mut warnings)
+                    }
+                    Err(e) => warnings.push(format!(
+                        "MCP config is invalid: {e}. MCP tools are disabled."
+                    )),
                 }
-            },
-        };
-
-        let parsed: BTreeMap<String, RawServerEntry> = match parse_server_entries(&raw) {
-            Ok(v) => v,
-            Err(e) => {
-                warnings.push(format!(
-                    "MCP config is invalid: {e}. MCP tools are disabled."
-                ));
-                return (Self::default(), warnings);
+                return (registry, warnings);
             }
-        };
+        }
+
+        // Explicit env override: single file path.
+        if let Some(path) = std::env::var_os(ENV_MCP_SERVERS_FILE) {
+            let p = PathBuf::from(path);
+            if !p.as_os_str().is_empty() {
+                match fs::read_to_string(&p) {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let mut registry = Self::default();
+                        match parse_server_entries(&text) {
+                            Ok(entries) => {
+                                Self::populate_from_entries(&mut registry, entries, &mut warnings)
+                            }
+                            Err(e) => warnings.push(format!(
+                                "MCP config `{}` is invalid: {e}. MCP tools are disabled.",
+                                p.display()
+                            )),
+                        }
+                        return (registry, warnings);
+                    }
+                    Ok(_) => return (Self::default(), warnings),
+                    Err(e) => {
+                        warnings.push(format!(
+                            "failed to read MCP config `{}`: {e}",
+                            p.display()
+                        ));
+                        return (Self::default(), warnings);
+                    }
+                }
+            }
+        }
+
+        // Multi-file discovery: merge all found entries, first-server-name-wins.
+        let mut merged: BTreeMap<String, RawServerEntry> = BTreeMap::new();
+
+        // Project-local: walk from cwd up to git root.
+        if let Ok(cwd) = std::env::current_dir() {
+            for dir in walk_to_git_root_mcp(&cwd) {
+                for &sub in LOCAL_MCP_CONFIG_FILES {
+                    let path = dir.join(sub);
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        if !text.trim().is_empty() {
+                            match parse_server_entries(&text) {
+                                Ok(entries) => {
+                                    for (k, v) in entries {
+                                        merged.entry(k).or_insert(v);
+                                    }
+                                }
+                                Err(e) => warnings.push(format!(
+                                    "MCP config `{}` is invalid: {e}. Skipped.",
+                                    path.display()
+                                )),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Global: under $HOME.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            for &sub in GLOBAL_MCP_CONFIG_FILES {
+                let path = home.join(sub);
+                if let Ok(text) = fs::read_to_string(&path) {
+                    if !text.trim().is_empty() {
+                        match parse_server_entries(&text) {
+                            Ok(entries) => {
+                                for (k, v) in entries {
+                                    merged.entry(k).or_insert(v);
+                                }
+                            }
+                            Err(e) => warnings.push(format!(
+                                "MCP config `{}` is invalid: {e}. Skipped.",
+                                path.display()
+                            )),
+                        }
+                    }
+                }
+            }
+            for &sub in GLOBAL_TOML_CONFIG_FILES {
+                let path = home.join(sub);
+                if let Ok(text) = fs::read_to_string(&path) {
+                    if !text.trim().is_empty() {
+                        match parse_toml_mcp_servers(&text) {
+                            Ok(entries) => {
+                                for (k, v) in entries {
+                                    merged.entry(k).or_insert(v);
+                                }
+                            }
+                            Err(e) => warnings.push(format!(
+                                "MCP config `{}` is invalid: {e}. Skipped.",
+                                path.display()
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+
+        if merged.is_empty() {
+            return (Self::default(), warnings);
+        }
 
         let mut registry = Self::default();
+        Self::populate_from_entries(&mut registry, merged, &mut warnings);
+        (registry, warnings)
+    }
 
-        for (server_name, entry) in parsed {
+    fn populate_from_entries(
+        registry: &mut Self,
+        entries: BTreeMap<String, RawServerEntry>,
+        warnings: &mut Vec<String>,
+    ) {
+        for (server_name, entry) in entries {
             match entry {
                 RawServerEntry::Disabled(false) => {}
                 RawServerEntry::Disabled(true) => warnings.push(format!(
@@ -191,8 +315,6 @@ impl McpRegistry {
                 }
             }
         }
-
-        (registry, warnings)
     }
 
     /// Whether any MCP servers are configured (discovery not yet run).
@@ -372,22 +494,101 @@ impl McpRegistry {
     }
 }
 
-fn read_mcp_servers_file() -> std::result::Result<Option<String>, String> {
-    let path = resolve_mcp_servers_file_path();
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            if content.trim().is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(content))
-            }
+/// Parse MCP server entries from a Codex-style TOML config.
+/// Reads the `[mcp_servers.<name>]` tables and converts them to our internal entry map.
+fn parse_toml_mcp_servers(
+    text: &str,
+) -> std::result::Result<BTreeMap<String, RawServerEntry>, String> {
+    let doc: toml::Value =
+        toml::from_str(text).map_err(|e| format!("not valid TOML: {e}"))?;
+
+    let Some(mcp_servers) = doc.get("mcp_servers").and_then(|v| v.as_table()) else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut out = BTreeMap::new();
+    for (name, val) in mcp_servers {
+        let Some(table) = val.as_table() else {
+            continue;
+        };
+
+        // Skip remote servers (have `url` but no `command`).
+        if table.contains_key("url") && !table.contains_key("command") {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "failed to read MCP config file `{}`: {e}",
-            path.display()
-        )),
+
+        let command = match table.get("command").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => {
+                Some(RawCommand::String(s.trim().to_string()))
+            }
+            _ => None,
+        };
+        let mut args: Vec<String> = table
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Codex configs often omit -y; add it so npx doesn't hang waiting for input.
+        if matches!(&command, Some(RawCommand::String(s)) if s == "npx")
+            && !args.iter().any(|a| a == "-y")
+        {
+            args.insert(0, "-y".to_string());
+        }
+        let env: HashMap<String, String> = table
+            .get("env")
+            .and_then(|v| v.as_table())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd: Option<String> = table
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let enabled = table
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        out.insert(
+            name.clone(),
+            RawServerEntry::Config(RawServerConfig {
+                r#type: "local".to_string(),
+                command,
+                args,
+                env,
+                headers: HashMap::new(),
+                cwd,
+                enabled,
+                transport: None,
+                url: None,
+            }),
+        );
     }
+    Ok(out)
+}
+
+fn walk_to_git_root_mcp(start: &std::path::Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut cur = start.to_path_buf();
+    loop {
+        dirs.push(cur.clone());
+        if cur.join(".git").exists() {
+            break;
+        }
+        match cur.parent() {
+            Some(p) if p != cur => cur = p.to_path_buf(),
+            _ => break,
+        }
+    }
+    dirs
 }
 
 fn parse_server_entries(

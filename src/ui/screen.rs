@@ -371,12 +371,36 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    let sep = " · ".dark_grey().to_string();
-    let parts: Vec<String> = names
-        .iter()
-        .map(|n| n.as_str().green().to_string())
-        .collect();
-    Some(format!("  {}{}", "Skills  ".dark_grey(), parts.join(&sep)))
+    let cols = crossterm::terminal::size()
+        .map(|(c, _)| c.max(1) as usize)
+        .unwrap_or(80);
+    let prefix = "  Skills  ";
+    let sep = " · ";
+    let mut budget = cols.saturating_sub(rendered_text_width(prefix));
+
+    let mut shown: Vec<String> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let needed = if i == 0 { 0 } else { rendered_text_width(sep) };
+        let name_w = rendered_text_width(name);
+        let remaining = names.len() - i;
+        // Reserve space for "+N more" if we can't fit all remaining.
+        let more_w = if remaining > 1 {
+            rendered_text_width(sep) + rendered_text_width(&format!("+{}", remaining - 1))
+        } else {
+            0
+        };
+        if needed + name_w + more_w <= budget {
+            budget = budget.saturating_sub(needed + name_w);
+            shown.push(name.as_str().green().to_string());
+        } else {
+            let more = names.len() - shown.len();
+            shown.push(format!("+{more}").dark_grey().to_string());
+            break;
+        }
+    }
+
+    let sep_styled = sep.dark_grey().to_string();
+    Some(format!("  {}{}", prefix.dark_grey(), shown.join(&sep_styled)))
 }
 
 /// Format the MCP discovery result as a single styled line for `Screen::emit()`.

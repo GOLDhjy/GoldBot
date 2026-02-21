@@ -13,10 +13,16 @@ pub struct Skill {
 }
 
 // Project-local skill directories (searched from cwd up to git root).
-const LOCAL_SUBDIRS: &[&str] = &[".claude/skills", ".agents/skills", ".opencode/skills"];
+const LOCAL_SUBDIRS: &[&str] = &[
+    ".codex/skills",
+    ".claude/skills",
+    ".agents/skills",
+    ".opencode/skills",
+];
 
-// Global skill directories. GoldBot's own dir (~/.goldbot/skills) is checked first.
+// Global skill directories under $HOME. GoldBot's own dir (~/.goldbot/skills) is checked first.
 const GLOBAL_SUBDIRS: &[&str] = &[
+    ".codex/skills",
     ".config/opencode/skills",
     ".claude/skills",
     ".agents/skills",
@@ -76,6 +82,17 @@ pub fn skills_system_prompt(skills: &[Skill]) -> String {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Strip surrounding single or double quotes from a YAML scalar value.
+fn strip_yaml_quotes(s: &str) -> String {
+    if (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
 
 fn walk_to_git_root(start: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -155,7 +172,7 @@ fn parse_frontmatter(content: &str) -> Option<(HashMap<String, String>, String)>
         if in_body {
             body_lines.push(line);
         } else if let Some((k, v)) = line.split_once(':') {
-            meta.insert(k.trim().to_string(), v.trim().to_string());
+            meta.insert(k.trim().to_string(), strip_yaml_quotes(v.trim()));
         }
     }
     if !in_body {
