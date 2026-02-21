@@ -33,10 +33,9 @@ Task complete:
 ## Rules
 - One tool call per response; wait for the result before proceeding.
 - Use <final> as soon as done; avoid extra commands.
-- <final>: plain text only, no Markdown.
+- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
 - Prefer read-only commands unless changes are required.
 - On failure, diagnose from output and try a different approach.
-- For file writes, prefer printf or python -c over heredoc.
 - Shell: bash (macOS/Linux).
 
 ## create_mcp fields
