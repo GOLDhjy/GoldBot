@@ -7,10 +7,39 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 
 ## Response format
 
+重要：遵循以下决策顺序：
+1. 任务信息不足或有歧义 → 先用 question 工具向用户提问，获取足够信息后再规划
+2. 信息充足但任务复杂 → 用 plan 工具输出完整计划，等用户确认后再执行
+3. 任务简单且信息明确 → 直接执行，无需 plan
+
+Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须立即用 question 工具询问用户是否确认）：
+<thought>reasoning</thought>
+<tool>plan</tool>
+<plan>## 计划
+1. 第一步：...
+2. 第二步：...
+</plan>
+
+向用户提问（需要澄清或让用户做选择时）：
+- 必须提供 3 个预设选项 + 1 个自定义输入选项
+- question 标签内写问题，每个 option 是一个选项
+<thought>reasoning</thought>
+<tool>question</tool>
+<question>问题内容</question>
+<option>选项A</option>
+<option>选项B</option>
+<option>选项C</option>
+<option><user_input></option>
+
 Shell command:
 <thought>reasoning</thought>
 <tool>shell</tool>
 <command>bash command</command>
+
+Web search (use when you need up-to-date or online information):
+<thought>reasoning</thought>
+<tool>web_search</tool>
+<query>search query</query>
 
 MCP tool (only if listed later in this prompt):
 <thought>reasoning</thought>
@@ -95,6 +124,38 @@ pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
             return Ok((thought, LlmAction::Shell { command }));
         }
 
+        if tool == "web_search" {
+            let query = extract_last_tag(text, "query")
+                .ok_or_else(|| anyhow!("missing <query> for web_search tool call"))?;
+            return Ok((thought, LlmAction::WebSearch { query }));
+        }
+
+        if tool == "plan" {
+            let content = extract_last_tag(text, "plan")
+                .ok_or_else(|| anyhow!("missing <plan> for plan tool call"))?;
+            return Ok((thought, LlmAction::Plan { content: strip_xml_tags(&content) }));
+        }
+
+        if tool == "question" {
+            let text_q = extract_last_tag(text, "question")
+                .ok_or_else(|| anyhow!("missing <question> for question tool call"))?;
+            let options: Vec<String> = extract_all_tags(text, "option")
+                .into_iter()
+                .map(|o| {
+                    // Normalize any <user_input> tag variant to the canonical sentinel.
+                    if o.trim().starts_with("<user_input") {
+                        "<user_input>".to_string()
+                    } else {
+                        o
+                    }
+                })
+                .collect();
+            if options.is_empty() {
+                return Err(anyhow!("missing <option> for question tool call"));
+            }
+            return Ok((thought, LlmAction::Question { text: strip_xml_tags(&text_q), options }));
+        }
+
         if tool.starts_with("mcp_") {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)
@@ -116,6 +177,37 @@ pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
     Err(anyhow!(
         "cannot parse LLM response — expected shell call, MCP call, or <final>...</final>"
     ))
+}
+
+fn strip_xml_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while let Some(start) = text[pos..].find(&open) {
+        let abs_start = pos + start + open.len();
+        if let Some(end) = text[abs_start..].find(&close) {
+            results.push(text[abs_start..abs_start + end].trim().to_string());
+            pos = abs_start + end + close.len();
+        } else {
+            break;
+        }
+    }
+    results
 }
 
 fn extract_last_tag(text: &str, tag: &str) -> Option<String> {

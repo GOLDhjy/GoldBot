@@ -79,7 +79,7 @@ pub(crate) fn process_llm_result(
                     .to_string(),
             ));
             screen.status = format!("↻ Retrying invalid response format: {e}")
-                .dark_grey()
+                .grey()
                 .to_string();
             screen.refresh();
             app.needs_agent_step = true;
@@ -140,6 +140,59 @@ pub(crate) fn process_llm_result(
                     app.needs_agent_step = true;
                 }
             }
+        }
+        LlmAction::WebSearch { query } => {
+            execute_web_search(app, screen, &query);
+            app.needs_agent_step = true;
+        }
+        LlmAction::Plan { content } => {
+            // Render plan content with simple markdown-style formatting.
+            let mut lines = vec![String::new()];
+            for line in content.lines() {
+                let styled = if line.starts_with("## ") {
+                    format!("  {}", line[3..].bold())
+                } else if line.starts_with("# ") {
+                    format!("  {}", line[2..].bold())
+                } else if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
+                    format!("  {}", line).grey().to_string()
+                } else if line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+                    format!("  {}", line).white().to_string()
+                } else {
+                    format!("  {line}")
+                };
+                lines.push(styled);
+            }
+            lines.push(String::new());
+            screen.emit(&lines);
+
+            // Plan is displayed; let the LLM continue and use the question tool to ask for confirmation.
+            app.messages.push(crate::agent::provider::Message::user(
+                "[plan shown]".to_string(),
+            ));
+            app.needs_agent_step = true;
+        }
+        LlmAction::Question { text, options } => {
+            let ev = Event::Thinking {
+                text: format!("❓ {text}"),
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+            // Build display labels for the selection menu.
+            screen.question_labels = options
+                .iter()
+                .map(|o| {
+                    if o == "<user_input>" {
+                        "自定义输入".to_string()
+                    } else {
+                        o.clone()
+                    }
+                })
+                .collect();
+            screen.confirm_selected = Some(0);
+            screen.input_focused = false;
+            app.pending_question = Some((text, options));
+            app.running = false;
+            screen.refresh();
         }
         LlmAction::Mcp { tool, arguments } => {
             execute_mcp_tool(app, screen, &tool, &arguments);
@@ -231,6 +284,41 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
     }
 }
 
+pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {
+    let call_ev = Event::ToolCall {
+        label: format!("WebSearch({query})"),
+        command: query.to_string(),
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    match crate::tools::web_search::search(query) {
+        Ok(result) => {
+            app.messages.push(Message::user(format!(
+                "Tool result (exit=0):\n{}",
+                result.output
+            )));
+            let ev = Event::ToolResult {
+                exit_code: 0,
+                output: result.output,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+        Err(e) => {
+            let err = format!("web search failed: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            let ev = Event::ToolResult {
+                exit_code: -1,
+                output: err,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+    }
+}
+
 pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
     let call_ev = Event::ToolCall {
         label: format!("Skill({name})"),
@@ -304,7 +392,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.input_focused = true;
-    screen.status = "[Ctrl+d] full details".dark_grey().to_string();
+    screen.status = "[Ctrl+d] full details".grey().to_string();
     screen.refresh();
 }
 
@@ -496,10 +584,10 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
 
     screen.status = if flushed > 0 {
         format!("🧠 pre-compaction flush: {flushed} long-term notes")
-            .dark_grey()
+            .grey()
             .to_string()
     } else {
-        "🧠 context compacted".dark_grey().to_string()
+        "🧠 context compacted".grey().to_string()
     };
     screen.refresh();
 }

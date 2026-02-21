@@ -55,6 +55,10 @@ pub(crate) struct App {
     pub show_thinking: bool,
     pub paste_counter: usize,
     pub paste_chunks: Vec<PasteChunk>,
+    /// Pending question from LLM: (question text, raw options vec).
+    pub pending_question: Option<(String, Vec<String>)>,
+    /// True when user is typing a free-text answer to a question/plan supplement.
+    pub answering_question: bool,
     pub mcp_registry: crate::tools::mcp::McpRegistry,
     pub mcp_discovery_rx:
         Option<std::sync::mpsc::Receiver<(crate::tools::mcp::McpRegistry, Vec<String>)>>,
@@ -106,6 +110,8 @@ impl App {
             show_thinking: true,
             paste_counter: 0,
             paste_chunks: Vec::new(),
+            pending_question: None,
+            answering_question: false,
             mcp_registry,
             mcp_discovery_rx: None,
             skills,
@@ -126,13 +132,28 @@ pub(crate) enum LlmWorkerEvent {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    // Create ~/.goldbot/.env from template if it doesn't exist yet.
+    ensure_dot_env();
+    let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
     let http_client = build_http_client()?;
     let mut app = App::new();
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnableBracketedPaste)?;
     let mut screen = Screen::new()?;
+
+    // Warn if required API key is missing and show .env path.
+    if std::env::var("BIGMODEL_API_KEY").is_err() {
+        let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+        screen.emit(&[
+            format!(
+                "  {} BIGMODEL_API_KEY 未配置，请编辑: {}",
+                crossterm::style::Stylize::yellow("⚠"),
+                env_path.display()
+            ),
+            String::new(),
+        ]);
+    }
 
     // Display discovered skills below the banner.
     let skill_names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();
@@ -336,9 +357,9 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     {
         app.show_thinking = !app.show_thinking;
         let label = if app.show_thinking {
-            format!("{} {}", "Thinking:".dark_grey(), "ON".green().bold())
+            format!("{} {}", "Thinking:".grey(), "ON".green().bold())
         } else {
-            format!("{} {}", "Thinking:".dark_grey(), "OFF".yellow().bold())
+            format!("{} {}", "Thinking:".grey(), "OFF".yellow().bold())
         };
         if !app.llm_calling {
             screen.status = label;
@@ -348,8 +369,52 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     }
 
     if screen.confirm_selected.is_some() {
-        // ── Confirmation mode: ↑/↓ navigate, Enter confirm, or type note ─────
         let sel = screen.confirm_selected.unwrap();
+
+        if app.pending_question.is_some() {
+            // ── Question mode: ↑/↓ navigate options, Enter to confirm ────────
+            let opt_count = screen.question_labels.len();
+            match key {
+                KeyCode::Up => {
+                    screen.confirm_selected = Some(sel.saturating_sub(1));
+                    screen.refresh();
+                }
+                KeyCode::Down => {
+                    screen.confirm_selected = Some((sel + 1).min(opt_count.saturating_sub(1)));
+                    screen.refresh();
+                }
+                KeyCode::Enter => {
+                    let (_, options) = app.pending_question.take().unwrap();
+                    let raw_opt = options.get(sel).cloned().unwrap_or_default();
+                    screen.confirm_selected = None;
+                    screen.question_labels.clear();
+                    app.running = false;
+                    screen.input_focused = true;
+                    if raw_opt == "<user_input>" {
+                        // Switch to free-text input mode.
+                        app.answering_question = true;
+                        screen.status = "✍ 请输入你的答案后按 Enter".dark_yellow().to_string();
+                        screen.refresh();
+                    } else {
+                        // Feed the preset answer directly.
+                        submit_question_answer(app, screen, raw_opt);
+                    }
+                }
+                KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                    // Typing starts free-text input for <user_input> option.
+                    app.pending_question = None;
+                    screen.confirm_selected = None;
+                    screen.question_labels.clear();
+                    screen.input_focused = true;
+                    app.answering_question = true;
+                    screen.input.push(c);
+                    screen.status = "✍ 请输入你的答案后按 Enter".dark_yellow().to_string();
+                    screen.refresh();
+                }
+                _ => {}
+            }
+        } else {
+        // ── Confirmation mode: ↑/↓ navigate, Enter confirm, or type note ─────
         match key {
             KeyCode::Up => {
                 screen.confirm_selected = Some(sel.saturating_sub(1));
@@ -408,6 +473,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
             }
             _ => {}
         }
+        }
     } else if app.pending_confirm_note {
         // ── Note mode: user adds extra instruction before executing risky cmd ──
         match key {
@@ -455,7 +521,13 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     let task = expand_input_text(app, &screen.input).trim().to_string();
                     if !task.is_empty() {
                         clear_input_buffer(app, screen);
-                        submit_user_input(app, screen, task);
+                        if app.answering_question {
+                            app.answering_question = false;
+                            screen.status.clear();
+                            submit_question_answer(app, screen, task);
+                        } else {
+                            submit_user_input(app, screen, task);
+                        }
                     }
                 }
                 KeyCode::Esc if modifiers.is_empty() => {
@@ -509,6 +581,19 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     }
 
     false
+}
+
+fn submit_question_answer(app: &mut App, screen: &mut Screen, answer: String) {
+    app.messages.push(Message::user(answer.clone()));
+    let ev = crate::types::Event::Thinking {
+        text: format!("用户回答：{answer}"),
+    };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+    app.running = true;
+    app.needs_agent_step = true;
+    screen.status.clear();
+    screen.refresh();
 }
 
 fn submit_user_input(app: &mut App, screen: &mut Screen, task: String) {
@@ -748,13 +833,13 @@ fn stylize_ge_line(line: &str) -> String {
         return line.cyan().bold().to_string();
     }
     if trimmed.starts_with("Reply with 1, 2, or 3.") || trimmed.starts_with("Reply with 1/2/3") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE controls:") || trimmed.starts_with("Audit log:") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed == "GE: input received." {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE: Planning") {
         return line.dark_yellow().bold().to_string();
@@ -765,7 +850,7 @@ fn stylize_ge_line(line: &str) -> String {
         return line.dark_yellow().to_string();
     }
     if trimmed.starts_with("================================") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE STAGE [") {
         return line.cyan().bold().to_string();
@@ -801,16 +886,16 @@ fn stylize_ge_line(line: &str) -> String {
         return line.dark_yellow().to_string();
     }
     if trimmed.starts_with("...(truncated in console view;") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("Summary:") {
         return line.white().bold().to_string();
     }
     if trimmed.starts_with("...(collapsed ") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE: use `GE 展开提示词`") {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE: clarification complete.")
         || trimmed.starts_with("GE interview complete;")
@@ -834,7 +919,7 @@ fn stylize_ge_line(line: &str) -> String {
         || trimmed.starts_with("GE disabled.")
         || trimmed.starts_with("GE subagent disconnected.")
     {
-        return line.dark_grey().to_string();
+        return line.grey().to_string();
     }
     if trimmed.starts_with("GE:") {
         return line.dark_yellow().to_string();
@@ -980,6 +1065,17 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
         screen.input_focused = true;
     }
     screen.refresh();
+}
+
+/// If `~/.goldbot/.env` doesn't exist, create it from the bundled template.
+fn ensure_dot_env() {
+    let home = crate::tools::mcp::goldbot_home_dir();
+    let env_path = home.join(".env");
+    if env_path.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&home);
+    let _ = std::fs::write(&env_path, include_str!("../.env.example"));
 }
 
 #[cfg(test)]

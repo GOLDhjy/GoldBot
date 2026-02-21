@@ -13,12 +13,9 @@ pub fn assess_command(command: &str) -> (RiskLevel, String) {
         return (RiskLevel::Block, "已拦截：系统关键命令".into());
     }
 
-    let has_heredoc = contains_unquoted_heredoc(command);
     let has_output_redirection = contains_unquoted_output_redirection(command);
-    let mut should_confirm = has_heredoc || has_output_redirection;
-    let mut confirm_reason = if has_heredoc {
-        Some("需要确认：这是 Here-doc 写入（<<EOF），会创建或覆盖文件".to_string())
-    } else if has_output_redirection {
+    let mut should_confirm = has_output_redirection;
+    let mut confirm_reason = if has_output_redirection {
         Some("需要确认：命令包含重定向（> / >>），会写入文件".to_string())
     } else {
         None
@@ -338,42 +335,6 @@ fn is_safe_redirection_target(target: &str) -> bool {
     cfg!(target_os = "windows") && target.eq_ignore_ascii_case("nul")
 }
 
-fn contains_unquoted_heredoc(command: &str) -> bool {
-    let b = command.as_bytes();
-    let mut i = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-
-    while i < b.len() {
-        let c = b[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        if c == b'\\' && !in_single {
-            escaped = true;
-            i += 1;
-            continue;
-        }
-        if c == b'\'' && !in_double {
-            in_single = !in_single;
-            i += 1;
-            continue;
-        }
-        if c == b'"' && !in_single {
-            in_double = !in_double;
-            i += 1;
-            continue;
-        }
-        if !in_single && !in_double && c == b'<' && i + 1 < b.len() && b[i + 1] == b'<' {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {
@@ -424,13 +385,16 @@ mod tests {
     }
 
     #[test]
-    fn cat_heredoc_requires_confirmation() {
+    fn cat_heredoc_alone_is_safe() {
+        let (risk, _) = assess_command("cat << 'EOF'");
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn cat_heredoc_with_redirect_requires_confirmation() {
         let (risk, reason) = assess_command("cat > README_EN.md << 'EOF'");
         assert_eq!(risk, RiskLevel::Confirm);
-        assert!(
-            reason.contains("Here-doc") || reason.contains("重定向"),
-            "unexpected reason: {reason}"
-        );
+        assert!(reason.contains("重定向"), "unexpected reason: {reason}");
     }
 
     #[test]

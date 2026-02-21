@@ -8,13 +8,17 @@ A cross-platform TUI Agent built with Rust that automatically plans and executes
 
 - **Three-Level Safety Control**: Safe/Confirm/Block
 - **Persistent Memory**: Short-term (daily) + Long-term (auto-extracted preferences), injected into every request via System Prompt
-- **ReAct Loop**: Think → Act → Observe → Think again
+- **ReAct Loop**: Think → Act → Observe → Think again — supports shell / plan / question / web_search / MCP actions
 - **Smart Command Classification**: Read/Write/Update/Search/Bash
 - **Real-time TUI**: Streamed thinking process, collapsed by default after completion
 - **Native LLM Deep Thinking**: Tab key toggles API-level `reasoning_content` stream
 - **Auto Context Compaction**: Summarizes old messages when threshold is reached
 - **Cross-Platform**: macOS/Linux (bash) / Windows (PowerShell)
 - **Optional MCP Tools**: Auto-discover and expose MCP tools as `mcp_<server>_<tool>`
+- **Web Search**: Bocha AI integration — LLM can proactively search for up-to-date information
+- **Plan Mode**: LLM outputs a rendered step-by-step plan, then follows up with a question for confirmation
+- **Question Tool**: LLM asks the user questions with numbered options and free-text fallback
+- **Skills System**: Auto-discovers skills from `~/.goldbot/skills/` and injects them into the system prompt
 
 ## Installation
 
@@ -76,7 +80,9 @@ GoldBot/
 │   ├── tools/
 │   │   ├── shell.rs      # Command execution + classification
 │   │   ├── mcp.rs        # MCP server config/discovery/invocation (stdio)
-│   │   └── safety.rs     # Risk assessment (Safe/Confirm/Block)
+│   │   ├── safety.rs     # Risk assessment (Safe/Confirm/Block)
+│   │   ├── web_search.rs # Bocha AI web search
+│   │   └── skills.rs     # Skill discovery and loading
 │   ├── memory/
 │   │   ├── store.rs      # Memory storage (short/long-term)
 │   │   └── compactor.rs  # Context compression
@@ -84,6 +90,7 @@ GoldBot/
 │   │   ├── screen.rs     # TUI screen management
 │   │   └── format.rs     # Event formatting
 │   └── types.rs
+├── .env.example          # Env template (auto-copied to ~/.goldbot/.env on first run)
 ├── Cargo.toml
 └── README.md
 ```
@@ -125,9 +132,21 @@ User enters task
   Branches:
   ├─ <tool>shell → execute_command()
   │      ├─ Safe    → Execute directly
-  │      ├─ Confirm → Popup confirmation menu
+  │      ├─ Confirm → Popup confirmation menu (Execute/Skip/Abort/Note)
   │      └─ Block   → Reject (return error to LLM)
   │           → Add result to history → needs_agent_step=true (loop)
+  │
+  ├─ <tool>web_search → execute_web_search()
+  │      → Call Bocha AI → Return summary to LLM → Continue loop
+  │
+  ├─ <tool>plan → Render plan (markdown formatting)
+  │      → Push [plan shown] → LLM continues → usually followed by question tool
+  │
+  ├─ <tool>question → Display numbered option menu
+  │      → User selects with ↑/↓/Enter or types freely
+  │      → Push answer to history → needs_agent_step=true (continue)
+  │
+  ├─ <tool>mcp_* → execute_mcp_tool() → Continue loop
   │
   └─ <final> → finish()
        → Save memory → Collapse display → running=false (exit)
@@ -137,8 +156,8 @@ User enters task
 
 ```text
 Block:   sudo, format, fork bomb (:(){:|:&};:)
-Confirm: rm, mv, cp, git commit, curl, wget, >, >>
-Safe:    ls, cat, grep, git status, read-only ops
+Confirm: rm, mv, cp, git commit, curl, wget, > file (write redirect)
+Safe:    ls, cat, grep, git status, cat << 'EOF' (heredoc without file write), read-only ops
 ```
 
 ### Memory Mechanism
@@ -160,13 +179,15 @@ Safe:    ls, cat, grep, git status, read-only ops
 | `GOLDBOT_TASK` | No | — | Task to run immediately on startup |
 | `GOLDBOT_MCP_SERVERS` | No | — | MCP server config JSON |
 | `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config file path (used only when `GOLDBOT_MCP_SERVERS` is not set) |
+| `BOCHA_API_KEY` | No | — | Bocha AI search key (required for the `web_search` tool) |
 
-Create a `.env` file in the project root (auto-loaded on startup):
+Config is stored at `~/.goldbot/.env` — auto-created from template on first run with a path hint:
 
 ```env
 BIGMODEL_API_KEY=your_api_key_here
 BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
 BIGMODEL_MODEL=GLM-4.7
+BOCHA_API_KEY=your_bocha_key_here
 ```
 
 ## Usage
@@ -313,17 +334,22 @@ export GOLDBOT_MCP_SERVERS='{
 |---|---|---|
 | `Ctrl+C` | Anywhere | Exit |
 | `Ctrl+D` | After task completes | Collapse/expand details |
-| `Tab` | Outside confirmation menu | Toggle deep thinking ON/OFF |
-| `↑/↓` | Confirmation menu | Move selection |
-| `Enter` | Confirmation menu | Confirm selection |
+| `Tab` | Outside menu | Toggle deep thinking ON/OFF |
+| `↑/↓` | Menu mode | Move selection |
+| `Enter` | Menu mode | Confirm selection |
+| Type any char | Question menu | Enter free-text input mode |
 | `Esc` | Input focused | Unfocus / return to menu |
 
-### Confirmation Menu
+### Confirmation Menu (risky commands)
 
 1. Execute - Execute command
 2. Skip - Skip command
 3. Abort - Abort task
 4. Note - Add instruction
+
+### Question Menu (LLM asks user)
+
+Shown when the LLM uses the `question` tool. Options are decided by the LLM (numbered). The last option is typically `自定义输入` — select it or just start typing to enter free-text mode.
 
 ## Tech Stack
 

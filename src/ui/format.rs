@@ -14,12 +14,12 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             }
         }),
         Event::Thinking { text } => lines_with(text, |_, line| {
-            format!("  {}", line).dark_grey().to_string()
+            format!("  {}", line).grey().to_string()
         }),
         Event::ToolCall { label, command } => {
             let mut lines = vec![format!("  ⏺ {}", label).cyan().to_string()];
             lines.extend(lines_with(command, |_, line| {
-                format!("    {}", line).dark_grey().to_string()
+                format!("    {}", line).grey().to_string()
             }));
             lines
         }
@@ -42,18 +42,10 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             } else {
                 first.to_string()
             };
-            let mut lines = vec![
+            vec![
                 "  ⚠ 需要确认".dark_yellow().to_string(),
                 format!("    {}", cmd_display).bold().cyan().to_string(),
-            ];
-            if command_contains_heredoc(command) {
-                lines.push(
-                    "    (EOF 是 Here-doc 的结束标记，表示接下来是多行写入内容)"
-                        .dark_grey()
-                        .to_string(),
-                );
-            }
-            lines
+            ]
         }
         Event::Final { summary } => format_final_lines(summary),
     }
@@ -66,7 +58,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
             let line = first_non_empty_line(text).unwrap_or("");
             vec![
                 format!("  {}", shorten_text(line, 110))
-                    .dark_grey()
+                    .grey()
                     .to_string(),
             ]
         }
@@ -75,7 +67,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
             vec![
                 format!("  ⏺ {}", label).cyan().to_string(),
                 format!("    {}", shorten_text(first, 120))
-                    .dark_grey()
+                    .grey()
                     .to_string(),
             ]
         }
@@ -95,17 +87,13 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
         Event::NeedsConfirmation { command, .. } => {
             let first = command.lines().next().unwrap_or(command.as_str());
-            let mut lines = vec![
+            vec![
                 "    ⚠ 需要确认".dark_yellow().to_string(),
                 format!("      {}", shorten_text(first, 72))
                     .bold()
                     .cyan()
                     .to_string(),
-            ];
-            if command_contains_heredoc(command) {
-                lines.push("      (EOF = Here-doc 结束标记)".dark_grey().to_string());
-            }
-            lines
+            ]
         }
         Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
     }
@@ -159,7 +147,7 @@ fn format_final_lines(summary: &str) -> Vec<String> {
             }
 
             if is_markdown_rule(trimmed) {
-                return "    ─────────────────────────────".dark_grey().to_string();
+                return "    ─────────────────────────────".grey().to_string();
             }
             if let Some((level, heading)) = parse_markdown_heading(trimmed) {
                 let rendered = format!("    {}", render_inline_markdown(heading));
@@ -174,7 +162,7 @@ fn format_final_lines(summary: &str) -> Vec<String> {
             }
             if let Some(rest) = trimmed.strip_prefix("> ") {
                 return format!("    {}", render_inline_markdown(rest))
-                    .dark_grey()
+                    .grey()
                     .to_string();
             }
             if let Some(section) = split_trailing_section_title(trimmed) {
@@ -272,13 +260,13 @@ fn format_bullet_line(item: &str) -> String {
         let value = render_inline_markdown(value);
         return format!(
             "    {} {}{} {}",
-            "•".dark_grey(),
+            "•".grey(),
             key.bold().yellow(),
             sep,
             value
         );
     }
-    format!("    {} {}", "•".dark_grey(), render_inline_markdown(item))
+    format!("    {} {}", "•".grey(), render_inline_markdown(item))
 }
 
 fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
@@ -313,7 +301,7 @@ fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
     if t == "After:" {
         return rendered.dark_green().to_string();
     }
-    rendered.dark_grey().to_string()
+    rendered.grey().to_string()
 }
 
 fn render_inline_markdown(line: &str) -> String {
@@ -440,7 +428,7 @@ fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
     raw.into_iter()
         .map(|line| {
             if exit_code == 0 {
-                line.dark_grey().to_string()
+                line.grey().to_string()
             } else {
                 line.red().to_string()
             }
@@ -513,9 +501,6 @@ pub(crate) fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-fn command_contains_heredoc(command: &str) -> bool {
-    command.contains("<<")
-}
 
 pub(crate) fn shorten_text(s: &str, max_chars: usize) -> String {
     let trimmed = s.trim();
@@ -586,7 +571,7 @@ pub(crate) fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
                     if let Some(target) = last_target {
                         lines.push(
                             format!("    └ {}", shorten_text(&target, 110))
-                                .dark_grey()
+                                .grey()
                                 .to_string(),
                         );
                     }
@@ -646,11 +631,11 @@ pub(crate) fn toggle_collapse(app: &mut crate::App, screen: &mut super::screen::
     if app.task_collapsed {
         screen.collapse_to(&expanded_lines(app));
         app.task_collapsed = false;
-        screen.status = "[Ctrl+d] compact view".dark_grey().to_string();
+        screen.status = "[Ctrl+d] compact view".grey().to_string();
     } else {
         screen.collapse_to(&collapsed_lines(app));
         app.task_collapsed = true;
-        screen.status = "[Ctrl+d] full details".dark_grey().to_string();
+        screen.status = "[Ctrl+d] full details".grey().to_string();
     }
     screen.refresh();
 }

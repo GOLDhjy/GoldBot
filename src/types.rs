@@ -135,6 +135,9 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub enum LlmAction {
     Shell { command: String },
+    WebSearch { query: String },
+    Plan { content: String },
+    Question { text: String, options: Vec<String> },
     Mcp { tool: String, arguments: Value },
     Skill { name: String },
     CreateMcp { config: Value },

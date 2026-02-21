@@ -24,6 +24,8 @@ pub(crate) struct Screen {
     pub managed_lines: usize,
     pub confirm_selected: Option<usize>,
     pub input_focused: bool,
+    /// When non-empty, the confirm menu renders these labels instead of the hardcoded Execute/Skip/Abort/Add Note.
+    pub question_labels: Vec<String>,
 }
 
 impl Screen {
@@ -37,6 +39,7 @@ impl Screen {
             managed_lines: 2,
             confirm_selected: None,
             input_focused: true,
+            question_labels: Vec::new(),
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -56,8 +59,8 @@ impl Screen {
             let line = fit_single_line_tail(line, subtitle_budget);
             let styled = match i {
                 0 => line.bold().to_string(),
-                1 => line.dark_grey().to_string(),
-                _ => line.dark_grey().to_string(),
+                1 => line.grey().to_string(),
+                _ => line.grey().to_string(),
             };
             execute!(
                 s.stdout,
@@ -93,18 +96,38 @@ impl Screen {
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
         if let Some(selected) = self.confirm_selected {
-            let labels = ["Execute", "Skip", "Abort", "Add Note"];
-            for (i, label) in labels.iter().enumerate() {
+            let (labels, hint): (&[&str], &str) = if self.question_labels.is_empty() {
+                (
+                    &["Execute", "Skip", "Abort", "Add Note"],
+                    "❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter",
+                )
+            } else {
+                (&[], "❯ ↑/↓ 选择，Enter 确认，或直接输入自定义内容")
+            };
+
+            let display_labels: Vec<String> = if self.question_labels.is_empty() {
+                labels.iter().map(|s| s.to_string()).collect()
+            } else {
+                self.question_labels.clone()
+            };
+
+            for (i, label) in display_labels.iter().enumerate() {
+                let num = format!("{}.", i + 1);
                 let line = if i == selected {
-                    format!("  {} {}\r\n", "❯".cyan().bold(), label.bold().white())
+                    format!(
+                        "  {} {} {}\r\n",
+                        "❯".cyan().bold(),
+                        num.cyan().bold(),
+                        label.clone().bold().white()
+                    )
                 } else {
-                    format!("    {}\r\n", label).dark_grey().to_string()
+                    format!("    {} {}\r\n", num, label).grey().to_string()
                 };
                 let _ = execute!(self.stdout, Print(line));
             }
-            let hint = fit_single_line_tail("❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter", cols);
+            let hint = fit_single_line_tail(hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = 5;
+            self.managed_lines = display_labels.len() + 1;
         } else {
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
             let max_status_lines = if self.status.starts_with("⏳ ") {
@@ -131,7 +154,7 @@ impl Screen {
             let prompt = if self.input_focused {
                 format!("❯ {}", shown_input)
             } else {
-                format!("❯ {}", shown_input).dark_grey().to_string()
+                format!("❯ {}", shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(prompt));
             self.managed_lines = status_rows + 1;
@@ -394,15 +417,15 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
             shown.push(name.as_str().green().to_string());
         } else {
             let more = names.len() - shown.len();
-            shown.push(format!("+{more}").dark_grey().to_string());
+            shown.push(format!("+{more}").grey().to_string());
             break;
         }
     }
 
-    let sep_styled = sep.dark_grey().to_string();
+    let sep_styled = sep.grey().to_string();
     Some(format!(
         "  {}{}",
-        prefix.dark_grey(),
+        prefix.grey(),
         shown.join(&sep_styled)
     ))
 }
@@ -413,7 +436,7 @@ pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) 
     if ok.is_empty() && failed.is_empty() {
         return None;
     }
-    let sep = " · ".dark_grey().to_string();
+    let sep = " · ".grey().to_string();
     let mut parts: Vec<String> = ok
         .iter()
         .map(|(name, _)| name.as_str().dark_cyan().to_string())
@@ -422,8 +445,8 @@ pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) 
         parts.push(format!(
             "{} {}",
             name.as_str().red(),
-            "(failed)".dark_grey()
+            "(failed)".grey()
         ));
     }
-    Some(format!("  {}{}", "MCP  ".dark_grey(), parts.join(&sep)))
+    Some(format!("  {}{}", "MCP  ".grey(), parts.join(&sep)))
 }
