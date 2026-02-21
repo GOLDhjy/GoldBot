@@ -420,7 +420,7 @@ fn long_term_template() -> String {
     format!(
         "# Long-term Memory\n\n\
          {LT_SECTION_CAPS_ZH}\n\
-         - Execute shell commands (Read/Search/Write/Update/Bash).\n\
+         - Execute tools: shell commands (Read/Search/Write/Update/Bash) and optional MCP tools.\n\
          - Risk control for mutating commands (confirm/block).\n\
          - Show tool traces and execution results.\n\
          - Maintain short-term and long-term memory.\n\n\

@@ -4,10 +4,7 @@ mod tools;
 mod types;
 mod ui;
 
-use std::{
-    io,
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use agent::{
     provider::{Message, build_http_client, chat_stream_with},
@@ -18,7 +15,10 @@ use agent::{
     },
 };
 use crossterm::{
-    event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     style::{Print, Stylize},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -51,12 +51,26 @@ pub(crate) struct App {
     pub final_summary: Option<String>,
     pub task_collapsed: bool,
     pub show_thinking: bool,
+    pub paste_counter: usize,
+    pub paste_chunks: Vec<PasteChunk>,
+    pub mcp_registry: crate::tools::mcp::McpRegistry,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PasteChunk {
+    pub placeholder: String,
+    pub content: String,
 }
 
 impl App {
     fn new() -> Self {
         let store = MemoryStore::new();
-        let system_prompt = store.build_system_prompt(SYSTEM_PROMPT);
+        let (mcp_registry, mcp_warnings) = crate::tools::mcp::McpRegistry::from_env();
+        for warning in mcp_warnings {
+            eprintln!("[mcp] {warning}");
+        }
+        let base_prompt = mcp_registry.augment_system_prompt(SYSTEM_PROMPT);
+        let system_prompt = store.build_system_prompt(&base_prompt);
         Self {
             messages: vec![Message::system(system_prompt)],
 
@@ -75,9 +89,11 @@ impl App {
             final_summary: None,
             task_collapsed: false,
             show_thinking: true,
+            paste_counter: 0,
+            paste_chunks: Vec::new(),
+            mcp_registry,
         }
     }
-
 }
 
 pub(crate) enum LlmWorkerEvent {
@@ -95,10 +111,12 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new();
 
     enable_raw_mode()?;
+    execute!(io::stdout(), EnableBracketedPaste)?;
     let mut screen = Screen::new()?;
 
     let run_result = run_loop(&mut app, &mut screen, http_client).await;
 
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), Print("\r\n"));
     run_result
@@ -156,8 +174,7 @@ async fn run_loop(
                         let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
                     },
                     |chunk| {
-                        let _ =
-                            tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
+                        let _ = tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
                     },
                 )
                 .await;
@@ -172,6 +189,7 @@ async fn run_loop(
                         break;
                     }
                 }
+                CEvent::Paste(text) => handle_paste(app, screen, &text),
                 _ => {}
             }
         }
@@ -284,7 +302,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
         // ── Note mode: user adds extra instruction before executing risky cmd ──
         match key {
             KeyCode::Enter => {
-                let note = screen.input.trim().to_string();
+                let note = expand_input_text(app, &screen.input).trim().to_string();
                 if note.is_empty() {
                     exit_confirm_note_mode(app, screen, true);
                     return false;
@@ -304,13 +322,13 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                 app.pending_confirm_note = false;
                 app.needs_agent_step = true;
                 screen.status.clear();
-                screen.input.clear();
+                clear_input_buffer(app, screen);
                 screen.input_focused = true;
                 screen.refresh();
             }
             KeyCode::Esc if modifiers.is_empty() => exit_confirm_note_mode(app, screen, true),
             KeyCode::Backspace => {
-                screen.input.pop();
+                pop_input_tail(app, screen);
                 screen.refresh();
             }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
@@ -324,9 +342,9 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
         if screen.input_focused {
             match key {
                 KeyCode::Enter => {
-                    let task = screen.input.trim().to_string();
+                    let task = expand_input_text(app, &screen.input).trim().to_string();
                     if !task.is_empty() {
-                        screen.input.clear();
+                        clear_input_buffer(app, screen);
                         start_task(app, screen, task);
                     }
                 }
@@ -339,7 +357,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
                     screen.refresh();
                 }
                 KeyCode::Backspace => {
-                    screen.input.pop();
+                    pop_input_tail(app, screen);
                     screen.refresh();
                 }
                 _ => {}
@@ -373,7 +391,7 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
             }
             KeyCode::Backspace => {
                 screen.input_focused = true;
-                screen.input.pop();
+                pop_input_tail(app, screen);
                 screen.refresh();
             }
             _ => {}
@@ -381,6 +399,113 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     }
 
     false
+}
+
+fn handle_paste(app: &mut App, screen: &mut Screen, pasted: &str) {
+    if pasted.is_empty() {
+        return;
+    }
+
+    if screen.confirm_selected.is_some() {
+        begin_confirm_note_mode(app, screen, None);
+        if !app.pending_confirm_note {
+            return;
+        }
+    }
+
+    if !screen.input_focused {
+        screen.input_focused = true;
+    }
+
+    append_paste_input(app, screen, pasted);
+    screen.refresh();
+}
+
+fn append_paste_input(app: &mut App, screen: &mut Screen, pasted: &str) {
+    let multiline = pasted.contains('\n') || pasted.contains('\r');
+    let long_text = pasted.chars().count() > 120;
+
+    if multiline || long_text {
+        app.paste_counter += 1;
+        let placeholder = build_paste_placeholder(app.paste_counter, pasted);
+        if !screen.input.is_empty() && !screen.input.ends_with(char::is_whitespace) {
+            screen.input.push(' ');
+        }
+        screen.input.push_str(&placeholder);
+        app.paste_chunks.push(PasteChunk {
+            placeholder,
+            content: pasted.to_string(),
+        });
+        return;
+    }
+
+    for ch in pasted.chars() {
+        if ch != '\r' && ch != '\n' {
+            screen.input.push(ch);
+        }
+    }
+}
+
+fn build_paste_placeholder(index: usize, pasted: &str) -> String {
+    let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+    let line_count = if normalized.is_empty() {
+        0
+    } else {
+        normalized.split('\n').count()
+    };
+    if line_count > 1 {
+        format!(
+            "[Pasted text #{} +{} lines]",
+            index,
+            line_count.saturating_sub(1)
+        )
+    } else {
+        format!(
+            "[Pasted text #{} +{} chars]",
+            index,
+            normalized.chars().count()
+        )
+    }
+}
+
+fn expand_input_text(app: &App, input: &str) -> String {
+    let mut expanded = input.to_string();
+    for chunk in &app.paste_chunks {
+        expanded = expanded.replace(&chunk.placeholder, &chunk.content);
+    }
+    expanded
+}
+
+fn clear_input_buffer(app: &mut App, screen: &mut Screen) {
+    screen.input.clear();
+    app.paste_chunks.clear();
+}
+
+fn pop_input_tail(app: &mut App, screen: &mut Screen) {
+    if screen.input.is_empty() {
+        return;
+    }
+
+    let mut matched_idx = None;
+    for (idx, chunk) in app.paste_chunks.iter().enumerate().rev() {
+        if screen.input.ends_with(&chunk.placeholder) {
+            matched_idx = Some(idx);
+            break;
+        }
+    }
+
+    if let Some(idx) = matched_idx {
+        let placeholder_len = app.paste_chunks[idx].placeholder.len();
+        let new_len = screen.input.len().saturating_sub(placeholder_len);
+        screen.input.truncate(new_len);
+        app.paste_chunks.remove(idx);
+        if screen.input.ends_with(' ') {
+            screen.input.pop();
+        }
+        return;
+    }
+
+    screen.input.pop();
 }
 
 fn begin_confirm_note_mode(app: &mut App, screen: &mut Screen, first_char: Option<char>) {
@@ -395,7 +520,7 @@ fn begin_confirm_note_mode(app: &mut App, screen: &mut Screen, first_char: Optio
     screen.status = "✍ 输入补充说明后按 Enter；Esc 返回确认菜单"
         .dark_yellow()
         .to_string();
-    screen.input.clear();
+    clear_input_buffer(app, screen);
     if let Some(c) = first_char {
         screen.input.push(c);
     }
@@ -404,7 +529,7 @@ fn begin_confirm_note_mode(app: &mut App, screen: &mut Screen, first_char: Optio
 
 fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool) {
     app.pending_confirm_note = false;
-    screen.input.clear();
+    clear_input_buffer(app, screen);
     screen.status.clear();
     if back_to_menu && app.pending_confirm.is_some() {
         screen.confirm_selected = Some(0);

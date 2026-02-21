@@ -1,4 +1,5 @@
 use crossterm::style::Stylize;
+use serde_json::Value;
 
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
@@ -9,7 +10,10 @@ use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
 };
 use crate::ui::screen::Screen;
-use crate::{App, MAX_COMPACTION_SUMMARY_ITEMS, MAX_MESSAGES_BEFORE_COMPACTION, KEEP_RECENT_MESSAGES_AFTER_COMPACTION};
+use crate::{
+    App, KEEP_RECENT_MESSAGES_AFTER_COMPACTION, MAX_COMPACTION_SUMMARY_ITEMS,
+    MAX_MESSAGES_BEFORE_COMPACTION,
+};
 
 pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     if app.messages.len() > 1 {
@@ -72,6 +76,8 @@ pub(crate) fn process_llm_result(
                  Please reply with exactly:\n\
                  <thought>...</thought><tool>shell</tool><command>...</command>\n\
                  or:\n\
+                 <thought>...</thought><tool>mcp_...</tool><arguments>{\"key\":\"value\"}</arguments>\n\
+                 or:\n\
                  <thought>...</thought><final>...</final>"
                     .to_string(),
             ));
@@ -128,6 +134,10 @@ pub(crate) fn process_llm_result(
                 }
             }
         }
+        LlmAction::Mcp { tool, arguments } => {
+            execute_mcp_tool(app, screen, &tool, &arguments);
+            app.needs_agent_step = true;
+        }
         LlmAction::Final { summary } => {
             finish(app, screen, summary);
         }
@@ -158,6 +168,42 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
         }
         Err(e) => {
             let err = format!("execution failed: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            let ev = Event::ToolResult {
+                exit_code: -1,
+                output: err,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+    }
+}
+
+pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, arguments: &Value) {
+    let args_text = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string());
+    let call_ev = Event::ToolCall {
+        label: format!("MCP({tool})"),
+        command: args_text,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    match app.mcp_registry.execute_tool(tool, arguments) {
+        Ok(out) => {
+            app.messages.push(Message::user(format!(
+                "Tool result (exit={}):\n{}",
+                out.exit_code, out.output
+            )));
+            let ev = Event::ToolResult {
+                exit_code: out.exit_code,
+                output: out.output,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+        Err(e) => {
+            let err = format!("MCP execution failed: {e}");
             app.messages
                 .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
             let ev = Event::ToolResult {

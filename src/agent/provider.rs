@@ -187,9 +187,19 @@ where
 
     while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
         pending.push_str(&String::from_utf8_lossy(&chunk));
-        drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
+        drain_sse_frames(
+            &mut pending,
+            &mut merged,
+            &mut on_delta,
+            &mut on_thinking_delta,
+        );
     }
-    drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
+    drain_sse_frames(
+        &mut pending,
+        &mut merged,
+        &mut on_delta,
+        &mut on_thinking_delta,
+    );
 
     if merged.is_empty() {
         return Err(anyhow!("API returned empty content"));
@@ -262,8 +272,7 @@ fn drain_sse_frames<F, G>(
     merged: &mut String,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
-)
-where
+) where
     F: FnMut(&str),
     G: FnMut(&str),
 {
@@ -289,8 +298,7 @@ fn handle_sse_frame<F, G>(
     merged: &mut String,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
-)
-where
+) where
     F: FnMut(&str),
     G: FnMut(&str),
 {
