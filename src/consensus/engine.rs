@@ -37,7 +37,6 @@ const FILE_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_TICK_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_CLARIFY_ROUNDS: usize = 4;
 const MAX_CLARIFY_QUESTIONS_PER_BATCH: usize = 8;
-const EXECUTOR_PROMPT_PREVIEW_CHARS: usize = 2400;
 const EXECUTOR_OUTPUT_PREVIEW_CHARS: usize = 2800;
 const EXECUTOR_PREVIEW_MAX_LINES: usize = 40;
 
@@ -68,6 +67,20 @@ struct GeneratedConsensus {
 }
 
 #[derive(Debug, Clone)]
+struct PromptSnapshot {
+    todo_id: String,
+    stage: String,
+    prompt: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResultSnapshot {
+    todo_id: String,
+    stage: String,
+    output: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct GeRuntime {
     mode: Mode,
     cwd: PathBuf,
@@ -81,6 +94,8 @@ pub struct GeRuntime {
     pending_trigger: Option<ConsensusTrigger>,
     cancel_flag: Arc<AtomicBool>,
     preflight_done: bool,
+    last_prompt: Option<PromptSnapshot>,
+    last_result: Option<ResultSnapshot>,
 }
 
 impl GeRuntime {
@@ -106,6 +121,8 @@ impl GeRuntime {
             pending_trigger: Some(ConsensusTrigger::Manual),
             cancel_flag,
             preflight_done: false,
+            last_prompt: None,
+            last_result: None,
         };
 
         runtime.log(AuditRecord {
@@ -510,6 +527,42 @@ impl GeRuntime {
         vec!["  GE mode disabled.".to_string()]
     }
 
+    pub fn expand_last_prompt(&self) -> Vec<String> {
+        let Some(snapshot) = self.last_prompt.as_ref() else {
+            return vec!["  GE: no cached prompt to expand yet.".to_string()];
+        };
+        let mut lines = vec![
+            "  ================================================".to_string(),
+            format!(
+                "  GE PROMPT EXPANDED [{}] {}",
+                snapshot.todo_id, snapshot.stage
+            ),
+            "  ================================================".to_string(),
+        ];
+        for line in preview_block_lines(&snapshot.prompt, 14_000, 220) {
+            lines.push(format!("    {line}"));
+        }
+        lines
+    }
+
+    pub fn expand_last_result(&self) -> Vec<String> {
+        let Some(snapshot) = self.last_result.as_ref() else {
+            return vec!["  GE: no cached result to expand yet.".to_string()];
+        };
+        let mut lines = vec![
+            "  ================================================".to_string(),
+            format!(
+                "  GE RESULT EXPANDED [{}] {}",
+                snapshot.todo_id, snapshot.stage
+            ),
+            "  ================================================".to_string(),
+        ];
+        for line in preview_block_lines(&snapshot.output, 14_000, 260) {
+            lines.push(format!("    {line}"));
+        }
+        lines
+    }
+
     pub fn replan_todos(&mut self) -> Result<(bool, Vec<String>)> {
         let mut lines = Vec::new();
         let mut doc = load(&self.consensus_path)?;
@@ -773,9 +826,11 @@ impl GeRuntime {
             git_context.as_deref(),
         );
 
-        emit_line(emit, format!("  {} Claude execution started.", todo.id));
+        emit_stage_header(emit, &todo.id, "Claude execute");
+        self.cache_prompt(&todo.id, "Claude execute", &claude_prompt);
         emit_executor_prompt(emit, &todo.id, "Claude execute", &claude_prompt);
         let mut execution = run_claude(&self.cwd, &claude_prompt, &self.cancel_flag);
+        self.cache_result(&todo.id, "Claude execute", &execution.output);
         emit_executor_result(emit, &todo.id, "Claude execute", &execution);
         if self.cancelled() || execution.error_code.as_deref() == Some("cancelled") {
             emit_line(
@@ -811,6 +866,11 @@ impl GeRuntime {
                     todo.id, reason
                 ),
             );
+            self.cache_prompt(
+                &todo.id,
+                "Codex optimize+review (fallback execute)",
+                &codex_opt_prompt,
+            );
             emit_executor_prompt(
                 emit,
                 &todo.id,
@@ -818,6 +878,11 @@ impl GeRuntime {
                 &codex_opt_prompt,
             );
             execution = run_codex_execute(&self.cwd, &codex_opt_prompt, &self.cancel_flag);
+            self.cache_result(
+                &todo.id,
+                "Codex optimize+review (fallback execute)",
+                &execution.output,
+            );
             emit_executor_result(
                 emit,
                 &todo.id,
@@ -881,10 +946,7 @@ impl GeRuntime {
             return Ok(());
         }
 
-        emit_line(
-            emit,
-            format!("  {} Codex optimize+review started.", todo.id),
-        );
+        emit_stage_header(emit, &todo.id, "Codex optimize+review");
         let codex_opt = if let Some(run) = fallback_codex_opt.take() {
             emit_line(
                 emit,
@@ -895,8 +957,10 @@ impl GeRuntime {
             );
             run
         } else {
+            self.cache_prompt(&todo.id, "Codex optimize+review", &codex_opt_prompt);
             emit_executor_prompt(emit, &todo.id, "Codex optimize+review", &codex_opt_prompt);
             let run = run_codex_execute(&self.cwd, &codex_opt_prompt, &self.cancel_flag);
+            self.cache_result(&todo.id, "Codex optimize+review", &run.output);
             emit_executor_result(emit, &todo.id, "Codex optimize+review", &run);
             run
         };
@@ -1122,7 +1186,7 @@ impl GeRuntime {
     }
 
     fn generate_clarify_questions(
-        &self,
+        &mut self,
         purpose: &str,
         rules: &str,
         scope: &str,
@@ -1132,6 +1196,7 @@ impl GeRuntime {
             return (Vec::new(), "clarification cancelled".to_string());
         }
         let prompt = build_clarify_questions_prompt(purpose, rules, scope);
+        self.cache_prompt("GE", "Claude clarify planner", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1139,6 +1204,7 @@ impl GeRuntime {
             &prompt,
         );
         let claude = run_claude(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Claude clarify planner", &claude.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1158,6 +1224,7 @@ impl GeRuntime {
             );
         }
 
+        self.cache_prompt("GE", "Codex clarify planner (fallback)", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1165,6 +1232,7 @@ impl GeRuntime {
             &prompt,
         );
         let codex = run_codex_execute(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Codex clarify planner (fallback)", &codex.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1191,7 +1259,7 @@ impl GeRuntime {
     }
 
     fn generate_followup_clarify_questions(
-        &self,
+        &mut self,
         purpose: &str,
         rules: &str,
         scope: &str,
@@ -1204,6 +1272,7 @@ impl GeRuntime {
         }
         let prompt =
             build_followup_clarify_questions_prompt(purpose, rules, scope, clarify_answers, round);
+        self.cache_prompt("GE", "Claude follow-up planner", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1211,6 +1280,7 @@ impl GeRuntime {
             &prompt,
         );
         let claude = run_claude(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Claude follow-up planner", &claude.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1236,6 +1306,7 @@ impl GeRuntime {
             );
         }
 
+        self.cache_prompt("GE", "Codex follow-up planner (fallback)", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1243,6 +1314,7 @@ impl GeRuntime {
             &prompt,
         );
         let codex = run_codex_execute(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Codex follow-up planner (fallback)", &codex.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1275,7 +1347,7 @@ impl GeRuntime {
     }
 
     fn generate_consensus_doc(
-        &self,
+        &mut self,
         purpose: &str,
         rules: &str,
         scope: &str,
@@ -1290,6 +1362,7 @@ impl GeRuntime {
         }
 
         let prompt = build_consensus_builder_prompt(purpose, rules, scope, clarify_answers);
+        self.cache_prompt("GE", "Claude consensus planner", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1297,6 +1370,7 @@ impl GeRuntime {
             &prompt,
         );
         let claude = run_claude(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Claude consensus planner", &claude.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1319,6 +1393,7 @@ impl GeRuntime {
             );
         }
 
+        self.cache_prompt("GE", "Codex consensus planner (fallback)", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1326,6 +1401,7 @@ impl GeRuntime {
             &prompt,
         );
         let codex = run_codex_execute(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Codex consensus planner (fallback)", &codex.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1360,13 +1436,14 @@ impl GeRuntime {
     }
 
     fn generate_todos(
-        &self,
+        &mut self,
         purpose: &str,
         rules: &str,
         scope: &str,
         lines: &mut Vec<String>,
     ) -> (Vec<crate::consensus::model::TodoItem>, String) {
         let prompt = build_todo_planner_prompt(purpose, rules, scope);
+        self.cache_prompt("GE", "Claude todo planner", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1374,6 +1451,7 @@ impl GeRuntime {
             &prompt,
         );
         let claude = run_claude(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Claude todo planner", &claude.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1387,6 +1465,7 @@ impl GeRuntime {
             return (todos, "generated by claude planner".to_string());
         }
 
+        self.cache_prompt("GE", "Codex todo planner (fallback)", &prompt);
         emit_executor_prompt(
             &mut |line| lines.push(line),
             "GE",
@@ -1394,6 +1473,7 @@ impl GeRuntime {
             &prompt,
         );
         let codex = run_codex_execute(&self.cwd, &prompt, &self.cancel_flag);
+        self.cache_result("GE", "Codex todo planner (fallback)", &codex.output);
         emit_executor_result(
             &mut |line| lines.push(line),
             "GE",
@@ -1432,6 +1512,22 @@ impl GeRuntime {
         let _ = self.logger.write(rec);
     }
 
+    fn cache_prompt(&mut self, todo_id: &str, stage: &str, prompt: &str) {
+        self.last_prompt = Some(PromptSnapshot {
+            todo_id: todo_id.to_string(),
+            stage: stage.to_string(),
+            prompt: prompt.to_string(),
+        });
+    }
+
+    fn cache_result(&mut self, todo_id: &str, stage: &str, output: &str) {
+        self.last_result = Some(ResultSnapshot {
+            todo_id: todo_id.to_string(),
+            stage: stage.to_string(),
+            output: output.to_string(),
+        });
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
     }
@@ -1456,18 +1552,31 @@ where
     emit(line.into());
 }
 
+fn emit_stage_header<F>(emit: &mut F, todo_id: &str, stage: &str)
+where
+    F: FnMut(String),
+{
+    emit_line(emit, "  ================================================");
+    emit_line(emit, format!("  GE STAGE [{todo_id}] {stage}"));
+    emit_line(emit, "  ================================================");
+}
+
 fn emit_executor_prompt<F>(emit: &mut F, todo_id: &str, stage: &str, prompt: &str)
 where
     F: FnMut(String),
 {
-    emit_line(emit, format!("  {todo_id} -> {stage} prompt:"));
-    for line in preview_block_lines(
-        prompt,
-        EXECUTOR_PROMPT_PREVIEW_CHARS,
-        EXECUTOR_PREVIEW_MAX_LINES,
-    ) {
-        emit_line(emit, format!("    {line}"));
-    }
+    let line_count = prompt.lines().count().max(1);
+    let char_count = prompt.chars().count();
+    emit_line(
+        emit,
+        format!(
+            "  {todo_id} -> {stage} prompt: [collapsed, {line_count} lines, {char_count} chars]"
+        ),
+    );
+    emit_line(
+        emit,
+        "  GE: use `GE 展开提示词` (or `GE expand prompt`) to expand.",
+    );
 }
 
 fn emit_executor_result<F>(emit: &mut F, todo_id: &str, stage: &str, run: &ExecutorRun)
@@ -1475,22 +1584,123 @@ where
     F: FnMut(String),
 {
     let error = run.error_code.as_deref().unwrap_or("none");
+    let verdict = extract_executor_verdict(&run.output);
+    let verdict_suffix = verdict
+        .as_deref()
+        .map(|v| format!(" verdict={v}"))
+        .unwrap_or_default();
     emit_line(
         emit,
         format!(
-            "  {todo_id} <- {stage} result: status={} exit={} error={}",
+            "  {todo_id} <- {stage} result: status={} exit={} error={}{}",
             run.outcome.as_status(),
             run.exit_code,
-            error
+            error,
+            verdict_suffix
         ),
     );
-    for line in preview_block_lines(
+
+    let (summary_lines, hidden_line_count) = summarize_executor_output_for_console(
         &run.output,
         EXECUTOR_OUTPUT_PREVIEW_CHARS,
         EXECUTOR_PREVIEW_MAX_LINES,
-    ) {
-        emit_line(emit, format!("    {line}"));
+    );
+    if summary_lines.is_empty() {
+        emit_line(emit, "    (no concise output)");
+    } else {
+        emit_line(emit, "    Summary:");
+        for line in summary_lines {
+            emit_line(emit, format!("    • {}", line));
+        }
     }
+    if hidden_line_count > 0 {
+        emit_line(
+            emit,
+            format!(
+                "    ...(collapsed {} lines; use `GE 展开结果` or `GE expand result` to view full output)",
+                hidden_line_count
+            ),
+        );
+    }
+}
+
+fn extract_executor_verdict(output: &str) -> Option<String> {
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("GE_REVIEW_VERDICT:") {
+            return Some(rest.trim().to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("GE_EXEC_VERDICT:") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+fn summarize_executor_output_for_console(
+    output: &str,
+    max_chars: usize,
+    max_lines: usize,
+) -> (Vec<String>, usize) {
+    if max_chars == 0 || max_lines == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let body = strip_executor_trailer(output);
+    let line_max = max_chars.clamp(80, 220);
+    let summary_limit = max_lines.min(10);
+    let mut total_kept = 0usize;
+    let mut shown = Vec::new();
+    for raw in body.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || is_executor_noise_line(trimmed) {
+            continue;
+        }
+        if trimmed.starts_with("GE_REVIEW_VERDICT:") || trimmed.starts_with("GE_EXEC_VERDICT:") {
+            continue;
+        }
+        total_kept += 1;
+        if shown.len() >= summary_limit {
+            continue;
+        }
+        shown.push(truncate_text(trimmed, line_max));
+    }
+
+    let hidden = total_kept.saturating_sub(shown.len());
+    (shown, hidden)
+}
+
+fn strip_executor_trailer(output: &str) -> &str {
+    let mut cut = output.len();
+    for marker in [
+        "\nOpenAI Codex v",
+        "\nOpenAI Claude",
+        "\nuser\n",
+        "\ntokens used",
+    ] {
+        if let Some(idx) = output.find(marker) {
+            cut = cut.min(idx);
+        }
+    }
+    if output.starts_with("OpenAI Codex v") || output.starts_with("OpenAI Claude") {
+        cut = 0;
+    }
+    &output[..cut]
+}
+
+fn is_executor_noise_line(line: &str) -> bool {
+    let t = line.trim();
+    t == "--------"
+        || t.starts_with("workdir:")
+        || t.starts_with("model:")
+        || t.starts_with("provider:")
+        || t.starts_with("approval:")
+        || t.starts_with("sandbox:")
+        || t.starts_with("reasoning effort:")
+        || t.starts_with("reasoning summaries:")
+        || t.starts_with("session id:")
+        || t.starts_with("mcp:")
+        || t.eq_ignore_ascii_case("thinking")
 }
 
 fn preview_block_lines(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {

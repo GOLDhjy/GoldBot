@@ -325,14 +325,16 @@ pub fn build_codex_optimize_prompt(
         fixed_execution_context(purpose, rules, todo_id, todo_text, done_when, git_context);
     format!(
         "You are Codex reviewer+optimizer.\n\
+         Primary objective: ensure the current Todo is functionally complete and correct.\n\
          Workflow (strict):\n\
-         1) Review first and detect blockers.\n\
-         2) If no blocker and no meaningful improvement, DO NOT change files.\n\
-         3) Only when there is clear value, apply minimal optimization.\n\
-         4) Run only essential verification for this Todo.\n\
+         1) Review first and detect blockers / correctness gaps.\n\
+         2) If no meaningful issue is found, DO NOT change files and return PASS directly.\n\
+         3) If issues exist, apply minimal necessary fixes/optimizations.\n\
+         4) Run essential verification for this Todo; only then return PASS.\n\
+         5) If still not correct after your attempt, return BLOCKED with short reason.\n\
          Fixed instruction: strictly follow Purpose and Rules. \
          Operate ONLY on the current Todo. Prioritize correctness and tests.\n\
-         Keep output minimal (no long explanations). If no issue, return quickly.\n\
+         Keep output minimal to save tokens (no long explanations).\n\
          At the very end, output exactly one verdict line:\n\
          GE_REVIEW_VERDICT: PASS\n\
          or\n\

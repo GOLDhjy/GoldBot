@@ -21,6 +21,8 @@ const HEARTBEAT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 pub enum GeAgentCommand {
     InterviewReply(String),
     ReplanTodos,
+    ExpandLastPrompt,
+    ExpandLastResult,
     Exit,
 }
 
@@ -108,6 +110,14 @@ fn run_worker(
                         let _ = evt_tx.send(GeAgentEvent::Error(format!("GE replan failed: {e}")));
                     }
                 },
+                GeAgentCommand::ExpandLastPrompt => {
+                    let lines = runtime.expand_last_prompt();
+                    send_lines(&evt_tx, lines);
+                }
+                GeAgentCommand::ExpandLastResult => {
+                    let lines = runtime.expand_last_result();
+                    send_lines(&evt_tx, lines);
+                }
                 GeAgentCommand::Exit => {
                     let lines = runtime.exit();
                     send_lines(&evt_tx, lines);

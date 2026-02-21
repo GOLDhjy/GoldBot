@@ -274,6 +274,30 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
+    if is_ge_mode(app.mode) && screen.input.trim().is_empty() {
+        let expand_prompt_hotkey = matches!(key, KeyCode::Char('p') | KeyCode::Char('P'))
+            && modifiers.contains(KeyModifiers::CONTROL);
+        let expand_result_hotkey = matches!(key, KeyCode::Char('r') | KeyCode::Char('R'))
+            && modifiers.contains(KeyModifiers::CONTROL);
+        if expand_prompt_hotkey || expand_result_hotkey {
+            let cmd = if expand_prompt_hotkey {
+                crate::consensus::subagent::GeAgentCommand::ExpandLastPrompt
+            } else {
+                crate::consensus::subagent::GeAgentCommand::ExpandLastResult
+            };
+            if let Some(agent) = app.ge_agent.as_ref() {
+                if !agent.send(cmd) {
+                    app.ge_agent = None;
+                    app.mode = Mode::Normal;
+                    screen.emit(&["  GE channel disconnected.".to_string()]);
+                }
+            } else {
+                app.mode = Mode::Normal;
+                screen.emit(&["  GE is already disabled.".to_string()]);
+            }
+            return false;
+        }
+    }
     if is_ge_mode(app.mode)
         && modifiers.is_empty()
         && screen.input.trim().is_empty()
@@ -531,6 +555,38 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
             }
             return Ok(());
         }
+        if rest == "展开提示词"
+            || rest == "展开prompt"
+            || rest.eq_ignore_ascii_case("expand prompt")
+            || rest.eq_ignore_ascii_case("expand")
+        {
+            if let Some(agent) = app.ge_agent.as_ref() {
+                if !agent.send(crate::consensus::subagent::GeAgentCommand::ExpandLastPrompt) {
+                    app.ge_agent = None;
+                    app.mode = Mode::Normal;
+                    screen.emit(&["  GE channel disconnected.".to_string()]);
+                }
+            } else {
+                screen.emit(&["  GE is not active. Start with `GE <goal>` first.".to_string()]);
+            }
+            return Ok(());
+        }
+        if rest == "展开结果"
+            || rest == "展开输出"
+            || rest.eq_ignore_ascii_case("expand result")
+            || rest.eq_ignore_ascii_case("expand output")
+        {
+            if let Some(agent) = app.ge_agent.as_ref() {
+                if !agent.send(crate::consensus::subagent::GeAgentCommand::ExpandLastResult) {
+                    app.ge_agent = None;
+                    app.mode = Mode::Normal;
+                    screen.emit(&["  GE channel disconnected.".to_string()]);
+                }
+            } else {
+                screen.emit(&["  GE is not active. Start with `GE <goal>` first.".to_string()]);
+            }
+            return Ok(());
+        }
 
         if app.running {
             finish(
@@ -544,7 +600,9 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
             let agent = crate::consensus::subagent::GeSubagent::start(cwd, rest)?;
             app.ge_agent = Some(agent);
             drain_ge_events(app, screen);
-            screen.emit(&["  GE controls: press `q` for hard exit.".to_string()]);
+            screen.emit(&[String::from(
+                "  GE controls: `q` hard exit | Ctrl+P expand prompt | Ctrl+R expand result.",
+            )]);
         } else {
             screen.emit(&["  GE already active. Use `GE 退出` to leave this mode.".to_string()]);
         }
@@ -706,7 +764,22 @@ fn stylize_ge_line(line: &str) -> String {
     {
         return line.dark_yellow().to_string();
     }
+    if trimmed.starts_with("================================") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE STAGE [") {
+        return line.cyan().bold().to_string();
+    }
+    if trimmed.starts_with("GE PROMPT EXPANDED [") {
+        return line.yellow().bold().to_string();
+    }
+    if trimmed.starts_with("GE RESULT EXPANDED [") {
+        return line.yellow().bold().to_string();
+    }
     if trimmed.starts_with("GE ->") && trimmed.contains("prompt:") {
+        if trimmed.contains("[collapsed,") {
+            return line.dark_cyan().to_string();
+        }
         return line.cyan().to_string();
     }
     if trimmed.starts_with("GE <-") && trimmed.contains("result:") {
@@ -716,6 +789,9 @@ fn stylize_ge_line(line: &str) -> String {
         return line.dark_yellow().to_string();
     }
     if trimmed.starts_with('T') && trimmed.contains("->") && trimmed.contains("prompt:") {
+        if trimmed.contains("[collapsed,") {
+            return line.dark_cyan().to_string();
+        }
         return line.cyan().to_string();
     }
     if trimmed.starts_with('T') && trimmed.contains("<-") && trimmed.contains("result:") {
@@ -725,6 +801,15 @@ fn stylize_ge_line(line: &str) -> String {
         return line.dark_yellow().to_string();
     }
     if trimmed.starts_with("...(truncated in console view;") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("Summary:") {
+        return line.white().bold().to_string();
+    }
+    if trimmed.starts_with("...(collapsed ") {
+        return line.dark_grey().to_string();
+    }
+    if trimmed.starts_with("GE: use `GE 展开提示词`") {
         return line.dark_grey().to_string();
     }
     if trimmed.starts_with("GE: clarification complete.")
