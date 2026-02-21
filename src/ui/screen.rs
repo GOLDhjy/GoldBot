@@ -27,7 +27,7 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(mcp_ok: &[(String, usize)], _mcp_failed: &[String]) -> io::Result<Self> {
         let mut s = Self {
             stdout: io::stdout(),
             status: String::new(),
@@ -64,6 +64,23 @@ impl Screen {
                 cursor::MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
                 Print(format!("  {}\r\n", styled))
+            )?;
+        }
+
+        if !mcp_ok.is_empty() {
+            let sep = " · ".dark_grey().to_string();
+            let mut parts: Vec<String> = mcp_ok
+                .iter()
+                .map(|(name, _)| name.as_str().dark_cyan().to_string())
+                .collect();
+            parts.sort();
+            parts.dedup();
+            let label = "MCP  ".dark_grey().to_string();
+            execute!(
+                s.stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                Print(format!("  {}{}\r\n", label, parts.join(&sep)))
             )?;
         }
 

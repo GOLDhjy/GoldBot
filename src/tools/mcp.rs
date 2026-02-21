@@ -4,6 +4,9 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -12,8 +15,10 @@ use serde_json::{Value, json};
 
 const ENV_MCP_SERVERS: &str = "GOLDBOT_MCP_SERVERS";
 const ENV_MCP_SERVERS_FILE: &str = "GOLDBOT_MCP_SERVERS_FILE";
+const ENV_MCP_DISCOVERY_TIMEOUT_MS: &str = "GOLDBOT_MCP_DISCOVERY_TIMEOUT_MS";
 const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
 const DEFAULT_MCP_SERVERS_FILENAME: &str = "mcp_servers.json";
+const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 2500;
 // Keep this aligned with https://modelcontextprotocol.io/specification/versioning
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_OUTPUT_CHARS: usize = 12_000;
@@ -26,6 +31,13 @@ const MAX_DESC_CHARS: usize = 140;
 pub struct McpRegistry {
     servers: BTreeMap<String, LocalServerSpec>,
     tools: BTreeMap<String, McpToolSpec>,
+    failed: Vec<String>,
+}
+
+pub struct McpStartupStatus {
+    /// (server_name, tool_count)
+    pub ok: Vec<(String, usize)>,
+    pub failed: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,8 +191,25 @@ impl McpRegistry {
             return (registry, warnings);
         }
 
-        warnings.extend(registry.discover_tools());
+        warnings.extend(registry.discover_tools(mcp_discovery_timeout()));
         (registry, warnings)
+    }
+
+    pub fn startup_status(&self) -> McpStartupStatus {
+        let mut tool_counts: HashMap<&str, usize> = HashMap::new();
+        for tool in self.tools.values() {
+            *tool_counts.entry(tool.server_name.as_str()).or_insert(0) += 1;
+        }
+        let ok = self
+            .servers
+            .keys()
+            .filter(|name| !self.failed.contains(*name))
+            .map(|name| (name.clone(), *tool_counts.get(name.as_str()).unwrap_or(&0)))
+            .collect();
+        McpStartupStatus {
+            ok,
+            failed: self.failed.clone(),
+        }
     }
 
     pub fn augment_system_prompt(&self, base_prompt: &str) -> String {
@@ -205,13 +234,20 @@ impl McpRegistry {
             } else {
                 "read/write"
             };
+            let extra = if tool.server_name == "context7" && tool.tool_name == "resolve-library-id"
+            {
+                " | note: provide BOTH `libraryName` and `query`"
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "- {} => server=`{}` tool=`{}` ({ro}), args: {}, desc: {}\n",
+                "- {} => server=`{}` tool=`{}` ({ro}), args: {}, desc: {}{}\n",
                 tool.action_name,
                 tool.server_name,
                 tool.tool_name,
                 args,
-                fallback_if_empty(&desc, "(no description)")
+                fallback_if_empty(&desc, "(no description)"),
+                extra
             ));
         }
 
@@ -249,7 +285,8 @@ impl McpRegistry {
             );
         };
 
-        call_tool_once(server, &tool.tool_name, arguments)
+        let normalized_arguments = normalize_arguments_for_tool(tool, arguments);
+        call_tool_once(server, &tool.tool_name, &normalized_arguments)
     }
 
     fn resolve_tool_spec(&self, action_name: &str) -> Option<&McpToolSpec> {
@@ -285,12 +322,12 @@ impl McpRegistry {
         out
     }
 
-    fn discover_tools(&mut self) -> Vec<String> {
+    fn discover_tools(&mut self, timeout: Duration) -> Vec<String> {
         let mut warnings = Vec::new();
         let mut used_names = BTreeSet::new();
 
         for (server_name, server) in &self.servers {
-            match list_tools_once(server) {
+            match list_tools_with_timeout(server, timeout) {
                 Ok(tools) => {
                     for tool in tools {
                         let action_name =
@@ -308,9 +345,12 @@ impl McpRegistry {
                         );
                     }
                 }
-                Err(e) => warnings.push(format!(
-                    "Failed to load MCP tools from `{server_name}`: {e}. Server skipped."
-                )),
+                Err(e) => {
+                    self.failed.push(server_name.clone());
+                    warnings.push(format!(
+                        "Failed to load MCP tools from `{server_name}`: {e}. Server skipped."
+                    ));
+                }
             }
         }
 
@@ -403,6 +443,15 @@ fn resolve_mcp_servers_file_path() -> PathBuf {
     default_memory_base_dir().join(DEFAULT_MCP_SERVERS_FILENAME)
 }
 
+fn mcp_discovery_timeout() -> Duration {
+    let ms = std::env::var(ENV_MCP_DISCOVERY_TIMEOUT_MS)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MCP_DISCOVERY_TIMEOUT_MS);
+    Duration::from_millis(ms)
+}
+
 fn default_memory_base_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(ENV_MEMORY_DIR) {
         let p = PathBuf::from(dir);
@@ -473,6 +522,30 @@ fn list_tools_once(spec: &LocalServerSpec) -> Result<Vec<DiscoveredTool>> {
     }
 
     Ok(discovered)
+}
+
+fn list_tools_with_timeout(
+    spec: &LocalServerSpec,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredTool>> {
+    let spec = spec.clone();
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let _ = tx.send(list_tools_once(&spec));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => bail!(
+            "discovery timed out after {}ms (set {} to increase)",
+            timeout.as_millis(),
+            ENV_MCP_DISCOVERY_TIMEOUT_MS
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("discovery worker terminated unexpectedly")
+        }
+    }
 }
 
 fn call_tool_once(
@@ -558,10 +631,18 @@ struct StdioMcpSession {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    wire_format: StdioWireFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdioWireFormat {
+    Framed,
+    LineDelimited,
 }
 
 impl StdioMcpSession {
     fn spawn(spec: &LocalServerSpec) -> Result<Self> {
+        let wire_format = detect_stdio_wire_format(spec);
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
@@ -590,6 +671,7 @@ impl StdioMcpSession {
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
+            wire_format,
         })
     }
 
@@ -641,14 +723,30 @@ impl StdioMcpSession {
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
-        let payload = serde_json::to_vec(message)?;
-        write!(self.stdin, "Content-Length: {}\r\n\r\n", payload.len())?;
-        self.stdin.write_all(&payload)?;
+        match self.wire_format {
+            StdioWireFormat::Framed => {
+                let payload = serde_json::to_vec(message)?;
+                write!(self.stdin, "Content-Length: {}\r\n\r\n", payload.len())?;
+                self.stdin.write_all(&payload)?;
+            }
+            StdioWireFormat::LineDelimited => {
+                let payload = serde_json::to_string(message)?;
+                self.stdin.write_all(payload.as_bytes())?;
+                self.stdin.write_all(b"\n")?;
+            }
+        }
         self.stdin.flush()?;
         Ok(())
     }
 
     fn read(&mut self) -> Result<Value> {
+        match self.wire_format {
+            StdioWireFormat::Framed => self.read_framed(),
+            StdioWireFormat::LineDelimited => self.read_line_delimited(),
+        }
+    }
+
+    fn read_framed(&mut self) -> Result<Value> {
         let mut content_length: Option<usize> = None;
         let mut line = String::new();
 
@@ -675,6 +773,27 @@ impl StdioMcpSession {
         let mut body = vec![0u8; len];
         self.stdout.read_exact(&mut body)?;
         serde_json::from_slice::<Value>(&body).context("invalid JSON-RPC payload")
+    }
+
+    fn read_line_delimited(&mut self) -> Result<Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = self.stdout.read_line(&mut line)?;
+            if n == 0 {
+                bail!("MCP server closed output stream");
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                return Ok(v);
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                return Ok(v);
+            }
+        }
     }
 }
 
@@ -827,11 +946,51 @@ fn command_line_for_log(command: &str, args: &[String]) -> String {
     format!("{command} {}", args.join(" "))
 }
 
+fn detect_stdio_wire_format(spec: &LocalServerSpec) -> StdioWireFormat {
+    let mut haystack = spec.command.to_ascii_lowercase();
+    for arg in &spec.args {
+        haystack.push(' ');
+        haystack.push_str(&arg.to_ascii_lowercase());
+    }
+
+    if haystack.contains("context7-mcp") {
+        StdioWireFormat::LineDelimited
+    } else {
+        StdioWireFormat::Framed
+    }
+}
+
+fn normalize_arguments_for_tool(tool: &McpToolSpec, arguments: &Value) -> Value {
+    let Some(obj) = arguments.as_object() else {
+        return arguments.clone();
+    };
+
+    let mut normalized = obj.clone();
+
+    // Context7 `resolve-library-id` requires both `libraryName` and `query`.
+    // When the model only provides `libraryName`, mirror it into `query`
+    // to avoid a noisy first-call validation failure.
+    if tool.server_name == "context7"
+        && tool.tool_name == "resolve-library-id"
+        && !normalized.contains_key("query")
+        && let Some(library_name) = normalized
+            .get("libraryName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        normalized.insert("query".to_string(), Value::String(library_name.to_string()));
+    }
+
+    Value::Object(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RawServerEntry, extract_local_command_and_args, normalize_action_name_for_lookup,
-        parse_server_entries, sanitize_token, summarize_input_schema, unique_action_name,
+        McpToolSpec, RawServerEntry, extract_local_command_and_args,
+        normalize_action_name_for_lookup, normalize_arguments_for_tool, parse_server_entries,
+        sanitize_token, summarize_input_schema, unique_action_name,
     };
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -904,5 +1063,20 @@ mod tests {
             normalize_action_name_for_lookup("mcp__context7__get_repository").as_deref(),
             Some("mcp_context7_get_repository")
         );
+    }
+
+    #[test]
+    fn context7_resolve_library_id_autofills_query() {
+        let spec = McpToolSpec {
+            action_name: "mcp_context7_resolve_library_id".to_string(),
+            server_name: "context7".to_string(),
+            tool_name: "resolve-library-id".to_string(),
+            description: String::new(),
+            read_only_hint: true,
+            input_schema: json!({}),
+        };
+        let args = json!({ "libraryName": "tokio" });
+        let normalized = normalize_arguments_for_tool(&spec, &args);
+        assert_eq!(normalized, json!({"libraryName":"tokio","query":"tokio"}));
     }
 }

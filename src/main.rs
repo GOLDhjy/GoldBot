@@ -112,7 +112,8 @@ async fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnableBracketedPaste)?;
-    let mut screen = Screen::new()?;
+    let mcp_status = app.mcp_registry.startup_status();
+    let mut screen = Screen::new(&mcp_status.ok, &mcp_status.failed)?;
 
     let run_result = run_loop(&mut app, &mut screen, http_client).await;
 
