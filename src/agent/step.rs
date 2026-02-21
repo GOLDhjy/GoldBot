@@ -72,13 +72,10 @@ pub(crate) fn process_llm_result(
         Err(e) => {
             app.messages.push(Message::assistant(response));
             app.messages.push(Message::user(
-                "Your last response could not be parsed. \
-                 Please reply with exactly:\n\
-                 <thought>...</thought><tool>shell</tool><command>...</command>\n\
-                 or:\n\
-                 <thought>...</thought><tool>mcp_...</tool><arguments>{\"key\":\"value\"}</arguments>\n\
-                 or:\n\
-                 <thought>...</thought><final>...</final>"
+                "Your last response could not be parsed. Use one of:\n\
+                 <thought>…</thought><tool>shell</tool><command>…</command>\n\
+                 <thought>…</thought><tool>mcp_…</tool><arguments>{}</arguments>\n\
+                 <thought>…</thought><final>…</final>"
                     .to_string(),
             ));
             screen.status = format!("↻ Retrying invalid response format: {e}")

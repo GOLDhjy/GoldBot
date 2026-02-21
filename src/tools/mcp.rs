@@ -191,18 +191,10 @@ impl McpRegistry {
         let mut out = String::new();
         out.push_str(base_prompt);
         out.push_str(
-            "\n\nYou also have MCP tools discovered from local MCP servers.\n\n\
-             To call an MCP tool, respond with EXACTLY this structure (nothing else):\n\
-             <thought>your reasoning about what to do next</thought>\n\
-             <tool>mcp_<server>_<tool></tool>\n\
-             <arguments>{\"key\":\"value\"}</arguments>\n\n\
-             Rules for MCP calls:\n\
-             - The `<tool>` line above is only an example. Replace it with one exact tool name from the list below.\n\
-             - `<tool>` must be exactly one of the listed MCP tool names below.\n\
-             - `<arguments>` must be valid JSON object.\n\
-             - Output one tool call per response, then wait for the tool result.\n\
-             - Use shell when filesystem/terminal work is needed; use MCP when external context/API is needed.\n\n\
-             Available MCP tools:\n",
+            "\n\n## Available MCP tools\n\
+             Use the MCP call format above. `<tool>` must be exactly one name from this list;\
+             `<arguments>` must be a JSON object.\n\
+             Prefer shell for filesystem/terminal work; use MCP for external context or APIs.\n\n",
         );
 
         for tool in self.tools.values().take(MAX_PROMPT_TOOLS) {

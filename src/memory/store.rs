@@ -159,10 +159,8 @@ impl MemoryStore {
         }
 
         format!(
-            "{base_prompt}\n\n## Memory Hierarchy\n\
-             - Long-term memory: durable preferences and stable project facts.\n\
-             - Short-term memory: recent task logs (today/yesterday).\n\
-             - If conflicts exist, follow the latest user instruction.\n\n\
+            "{base_prompt}\n\n## Memory\n\
+             On conflict, follow the latest user instruction.\n\n\
              ### Long-term Memory\n\
              {}\n\n\
              ### Recent Short-term Memory\n\
