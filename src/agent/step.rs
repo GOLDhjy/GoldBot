@@ -135,6 +135,14 @@ pub(crate) fn process_llm_result(
             execute_mcp_tool(app, screen, &tool, &arguments);
             app.needs_agent_step = true;
         }
+        LlmAction::Skill { name } => {
+            load_skill(app, screen, &name);
+            app.needs_agent_step = true;
+        }
+        LlmAction::CreateMcp { config } => {
+            create_mcp(app, screen, &config);
+            app.needs_agent_step = true;
+        }
         LlmAction::Final { summary } => {
             finish(app, screen, summary);
         }
@@ -211,6 +219,55 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
             app.task_events.push(ev);
         }
     }
+}
+
+pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
+    let call_ev = Event::ToolCall {
+        label: format!("Skill({name})"),
+        command: String::new(),
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let msg = if let Some(skill) = app.skills.iter().find(|s| s.name == name) {
+        format!("Skill '{}' content:\n{}", name, skill.content)
+    } else {
+        format!("Skill '{}' not found.", name)
+    };
+    app.messages.push(Message::user(msg));
+}
+
+pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json::Value) {
+    let call_ev = Event::ToolCall {
+        label: "CreateMCP".to_string(),
+        command: serde_json::to_string(config).unwrap_or_default(),
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let name = config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // create_mcp_server handles spec cleanup (strips name, type, empty fields).
+    let (exit_code, result_msg) = match crate::tools::mcp::create_mcp_server(&name, config) {
+        Ok(path) => (
+            0,
+            format!(
+                "MCP server `{name}` saved to `{}`. Restart GoldBot to activate it.",
+                path.display()
+            ),
+        ),
+        Err(e) => (1, format!("Failed to create MCP server: {e}")),
+    };
+
+    let ev = Event::ToolResult { exit_code, output: result_msg.clone() };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+    app.messages
+        .push(Message::user(format!("Tool result:\n{result_msg}")));
 }
 
 pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {

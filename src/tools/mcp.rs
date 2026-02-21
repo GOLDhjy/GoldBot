@@ -18,7 +18,7 @@ const ENV_MCP_SERVERS_FILE: &str = "GOLDBOT_MCP_SERVERS_FILE";
 const ENV_MCP_DISCOVERY_TIMEOUT_MS: &str = "GOLDBOT_MCP_DISCOVERY_TIMEOUT_MS";
 const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
 const DEFAULT_MCP_SERVERS_FILENAME: &str = "mcp_servers.json";
-const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 2500;
+const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 3000;
 // Keep this aligned with https://modelcontextprotocol.io/specification/versioning
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_OUTPUT_CHARS: usize = 12_000;
@@ -62,6 +62,8 @@ struct LocalServerSpec {
     args: Vec<String>,
     env: HashMap<String, String>,
     cwd: Option<PathBuf>,
+    /// Explicitly configured wire format; `None` means auto-detect.
+    transport: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,8 @@ struct RawServerConfig {
     cwd: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
+    /// Wire format override: "line" (default) or "framed" (Content-Length/LSP style).
+    transport: Option<String>,
     #[allow(dead_code)]
     url: Option<String>,
 }
@@ -181,18 +185,28 @@ impl McpRegistry {
                             args,
                             env,
                             cwd: cfg.cwd.map(PathBuf::from),
+                            transport: cfg.transport.clone(),
                         },
                     );
                 }
             }
         }
 
-        if registry.servers.is_empty() {
-            return (registry, warnings);
-        }
-
-        warnings.extend(registry.discover_tools(mcp_discovery_timeout()));
         (registry, warnings)
+    }
+
+    /// Whether any MCP servers are configured (discovery not yet run).
+    pub fn has_servers(&self) -> bool {
+        !self.servers.is_empty()
+    }
+
+    /// Run tool discovery synchronously. Intended to be called from a background thread.
+    pub fn run_discovery(mut self) -> (Self, Vec<String>) {
+        if self.servers.is_empty() {
+            return (self, Vec::new());
+        }
+        let warnings = self.discover_tools(mcp_discovery_timeout());
+        (self, warnings)
     }
 
     pub fn startup_status(&self) -> McpStartupStatus {
@@ -430,6 +444,114 @@ fn extract_local_command_and_args(cfg: &RawServerConfig) -> Option<(String, Vec<
     );
 
     Some((command, args))
+}
+
+/// Returns GoldBot's home directory (`$GOLDBOT_MEMORY_DIR` or `~/.goldbot`).
+pub fn goldbot_home_dir() -> PathBuf {
+    default_memory_base_dir()
+}
+
+/// Returns the resolved path of the MCP servers config file.
+pub fn mcp_servers_file_path() -> PathBuf {
+    resolve_mcp_servers_file_path()
+}
+
+/// Add or overwrite a server entry in the MCP config file.
+/// `config` must be a JSON object with at minimum a `command` field.
+/// Returns the path of the config file that was written.
+pub fn create_mcp_server(name: &str, config: &serde_json::Value) -> anyhow::Result<PathBuf> {
+    use anyhow::{bail, Context};
+
+    if name.trim().is_empty() {
+        bail!("MCP server name must not be empty");
+    }
+    if !config.is_object() {
+        bail!("MCP server config must be a JSON object");
+    }
+    if config.get("command").is_none() {
+        bail!("MCP server config requires a `command` field");
+    }
+
+    let path = mcp_servers_file_path();
+
+    // Read existing config, or start fresh.
+    let mut root: serde_json::Map<String, serde_json::Value> =
+        match fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty()) {
+            Some(text) => match serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+            {
+                Some(obj) => obj,
+                None => serde_json::Map::new(),
+            },
+            None => serde_json::Map::new(),
+        };
+
+    // Normalise into canonical format: command array, explicit type + enabled.
+    let mut spec = config.as_object().cloned().unwrap_or_default();
+    spec.remove("name");
+
+    // Merge `command` (string or array) + `args` into a single command array.
+    let cmd_val = spec.remove("command");
+    let args_val = spec.remove("args");
+    let mut cmd_parts: Vec<serde_json::Value> = match &cmd_val {
+        Some(serde_json::Value::Array(arr)) => arr.clone(),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            vec![serde_json::Value::String(s.clone())]
+        }
+        _ => vec![],
+    };
+    if let Some(serde_json::Value::Array(extra)) = args_val {
+        cmd_parts.extend(extra);
+    }
+    spec.insert(
+        "command".to_string(),
+        serde_json::Value::Array(cmd_parts),
+    );
+
+    // Always write type and enabled explicitly.
+    spec.insert(
+        "type".to_string(),
+        serde_json::Value::String("local".to_string()),
+    );
+    spec.insert("enabled".to_string(), serde_json::Value::Bool(true));
+
+    // Remove empty env / headers.
+    for key in &["env", "headers"] {
+        if spec
+            .get(*key)
+            .and_then(|v| v.as_object())
+            .map_or(false, |m| m.is_empty())
+        {
+            spec.remove(*key);
+        }
+    }
+
+    let spec_value = serde_json::Value::Object(spec);
+
+    // Insert server at the right level (handle mcpServers/mcp wrappers).
+    if let Some(inner) = root
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+    {
+        inner.insert(name.to_string(), spec_value);
+    } else if let Some(inner) = root.get_mut("mcp").and_then(|v| v.as_object_mut()) {
+        inner.insert(name.to_string(), spec_value);
+    } else {
+        root.insert(name.to_string(), spec_value);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config dir `{}`", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::Value::Object(root))?,
+    )
+    .with_context(|| format!("failed to write MCP config `{}`", path.display()))?;
+
+    Ok(path)
 }
 
 fn resolve_mcp_servers_file_path() -> PathBuf {
@@ -947,17 +1069,15 @@ fn command_line_for_log(command: &str, args: &[String]) -> String {
 }
 
 fn detect_stdio_wire_format(spec: &LocalServerSpec) -> StdioWireFormat {
-    let mut haystack = spec.command.to_ascii_lowercase();
-    for arg in &spec.args {
-        haystack.push(' ');
-        haystack.push_str(&arg.to_ascii_lowercase());
+    // Explicit config takes priority.
+    if let Some(t) = &spec.transport {
+        return match t.to_ascii_lowercase().as_str() {
+            "framed" | "lsp" | "content-length" => StdioWireFormat::Framed,
+            _ => StdioWireFormat::LineDelimited,
+        };
     }
-
-    if haystack.contains("context7-mcp") {
-        StdioWireFormat::LineDelimited
-    } else {
-        StdioWireFormat::Framed
-    }
+    // MCP stdio standard is newline-delimited JSON; default to that.
+    StdioWireFormat::LineDelimited
 }
 
 fn normalize_arguments_for_tool(tool: &McpToolSpec, arguments: &Value) -> Value {

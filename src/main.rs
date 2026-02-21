@@ -8,7 +8,7 @@ use std::{io, time::Duration};
 
 use agent::{
     provider::{Message, build_http_client, chat_stream_with},
-    react::SYSTEM_PROMPT,
+    react::build_system_prompt,
     step::{
         execute_command, finish, handle_llm_stream_delta, handle_llm_thinking_delta,
         maybe_flush_and_compact_before_call, process_llm_result, start_task,
@@ -25,9 +25,10 @@ use crossterm::{
 };
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
+use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::Event;
 use ui::format::{emit_live_event, toggle_collapse};
-use ui::screen::Screen;
+use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
 
 pub(crate) const MAX_MESSAGES_BEFORE_COMPACTION: usize = 48;
 pub(crate) const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
@@ -54,6 +55,12 @@ pub(crate) struct App {
     pub paste_counter: usize,
     pub paste_chunks: Vec<PasteChunk>,
     pub mcp_registry: crate::tools::mcp::McpRegistry,
+    pub mcp_discovery_rx:
+        Option<std::sync::mpsc::Receiver<(crate::tools::mcp::McpRegistry, Vec<String>)>>,
+    pub skills: Vec<Skill>,
+    /// Base system prompt = SYSTEM_PROMPT + skills section.
+    /// Used as the foundation when rebuilding the full prompt after MCP discovery.
+    pub base_prompt: String,
 }
 
 #[derive(Clone, Debug)]
@@ -69,7 +76,12 @@ impl App {
         for warning in mcp_warnings {
             eprintln!("[mcp] {warning}");
         }
-        let base_prompt = mcp_registry.augment_system_prompt(SYSTEM_PROMPT);
+        let skills = discover_skills();
+        // base_prompt = SYSTEM_PROMPT + skills section.
+        // MCP tools are appended later after background discovery.
+        let skills_section = skills_system_prompt(&skills);
+        let base_prompt = format!("{}{skills_section}", build_system_prompt());
+        // System prompt built without MCP tools; augmented after background discovery.
         let system_prompt = store.build_system_prompt(&base_prompt);
         Self {
             messages: vec![Message::system(system_prompt)],
@@ -92,6 +104,9 @@ impl App {
             paste_counter: 0,
             paste_chunks: Vec::new(),
             mcp_registry,
+            mcp_discovery_rx: None,
+            skills,
+            base_prompt,
         }
     }
 }
@@ -112,8 +127,23 @@ async fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnableBracketedPaste)?;
-    let mcp_status = app.mcp_registry.startup_status();
-    let mut screen = Screen::new(&mcp_status.ok, &mcp_status.failed)?;
+    let mut screen = Screen::new()?;
+
+    // Display discovered skills below the banner.
+    let skill_names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();
+    if let Some(line) = format_skills_status_line(&skill_names) {
+        screen.emit(&[line]);
+    }
+
+    // Start MCP discovery in background; results arrive via channel in run_loop.
+    if app.mcp_registry.has_servers() {
+        let registry = app.mcp_registry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(registry.run_discovery());
+        });
+        app.mcp_discovery_rx = Some(rx);
+    }
 
     let run_result = run_loop(&mut app, &mut screen, http_client).await;
 
@@ -135,6 +165,33 @@ async fn run_loop(
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
 
     loop {
+        // Check if background MCP discovery has completed.
+        let mcp_result = app
+            .mcp_discovery_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        if let Some((registry, warnings)) = mcp_result {
+            for w in &warnings {
+                screen.emit(&[format!(
+                    "  {}",
+                    crossterm::style::Stylize::dark_yellow(w.as_str())
+                )]);
+            }
+            app.mcp_registry = registry;
+            // Rebuild system prompt now that tools are known.
+            let base = app.mcp_registry.augment_system_prompt(&app.base_prompt);
+            let new_prompt = MemoryStore::new().build_system_prompt(&base);
+            if let Some(sys) = app.messages.first_mut() {
+                sys.content = new_prompt;
+            }
+            // Display result below the banner.
+            let status = app.mcp_registry.startup_status();
+            if let Some(line) = format_mcp_status_line(&status.ok, &status.failed) {
+                screen.emit(&[line]);
+            }
+            app.mcp_discovery_rx = None;
+        }
+
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 LlmWorkerEvent::Delta(delta) => handle_llm_stream_delta(app, screen, &delta),

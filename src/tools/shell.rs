@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
@@ -14,6 +15,7 @@ const MAX_DIFF_PER_KIND: usize = 6;
 const MAX_PREVIEW_FILES: usize = 2;
 const MAX_PREVIEW_LINES: usize = 8;
 const MAX_PREVIEW_CHARS_PER_LINE: usize = 140;
+const MAX_COMPARE_CAPTURE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
@@ -189,6 +191,7 @@ fn extract_find_descriptor(tokens: &[String]) -> Option<String> {
 
 pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let before_compare = capture_before_compare(&cwd, cmd);
     let before = snapshot_files(&cwd);
 
     let output = if cfg!(target_os = "windows") {
@@ -200,7 +203,7 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     };
 
     let after = snapshot_files(&cwd);
-    let fs_summary = build_fs_summary(&cwd, &before, &after);
+    let fs_summary = build_fs_summary(&cwd, &before, &after, &before_compare);
 
     let mut text = String::new();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -618,6 +621,7 @@ fn build_fs_summary(
     root: &Path,
     before: &HashMap<PathBuf, FileSignature>,
     after: &HashMap<PathBuf, FileSignature>,
+    before_compare: &HashMap<PathBuf, String>,
 ) -> String {
     let before_keys: BTreeSet<&PathBuf> = before.keys().collect();
     let after_keys: BTreeSet<&PathBuf> = after.keys().collect();
@@ -643,8 +647,19 @@ fn build_fs_summary(
     let mut preview_paths: Vec<&PathBuf> = created.iter().chain(updated.iter()).copied().collect();
     preview_paths.truncate(MAX_PREVIEW_FILES);
     for p in preview_paths {
+        let path_label = display_path(p);
+        if updated.contains(&p) {
+            let before_text = before_compare.get(p.as_path());
+            let after_text = read_preview(root, p);
+            if let (Some(before_text), Some(after_text)) = (before_text, after_text) {
+                let snippet = render_before_after_snippet(before_text, &after_text);
+                lines.push(format!("Compare {}:", path_label));
+                lines.extend(snippet.lines().map(|l| format!("  {l}")));
+                continue;
+            }
+        }
         if let Some(preview) = read_preview(root, p) {
-            lines.push(format!("Preview {}:", display_path(p)));
+            lines.push(format!("Preview {}:", path_label));
             lines.extend(preview.lines().map(|l| format!("  {l}")));
         }
     }
@@ -674,7 +689,7 @@ fn display_path(path: &Path) -> String {
 
 fn read_preview(root: &Path, rel: &Path) -> Option<String> {
     let full = root.join(rel);
-    let content = fs::read_to_string(full).ok()?;
+    let content = read_text_limited(&full, MAX_COMPARE_CAPTURE_BYTES)?;
     let mut out = String::new();
     for (i, line) in content.lines().take(MAX_PREVIEW_LINES).enumerate() {
         if i > 0 {
@@ -692,6 +707,99 @@ fn read_preview(root: &Path, rel: &Path) -> Option<String> {
         out.push_str("(empty file)");
     }
     Some(out)
+}
+
+fn capture_before_compare(root: &Path, cmd: &str) -> HashMap<PathBuf, String> {
+    let mut out = HashMap::new();
+    let Some(target) = extract_target(cmd) else {
+        return out;
+    };
+    let abs = absolutize_for_runtime(root, &target);
+    let Ok(meta) = fs::metadata(&abs) else {
+        return out;
+    };
+    if !meta.is_file() {
+        return out;
+    }
+
+    let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) else {
+        return out;
+    };
+    if should_skip(&rel) {
+        return out;
+    }
+    if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
+        out.insert(rel, text);
+    }
+    out
+}
+
+fn absolutize_for_runtime(root: &Path, target: &str) -> PathBuf {
+    let path = expand_tilde(target).unwrap_or_else(|| PathBuf::from(target));
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn read_text_limited(path: &Path, limit: usize) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(limit.min(8192));
+    let mut take = file.by_ref().take(limit as u64);
+    if take.read_to_end(&mut buf).is_err() {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
+fn render_before_after_snippet(before: &str, after: &str) -> String {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+
+    let mut i = 0usize;
+    let max_eq = before_lines.len().min(after_lines.len());
+    while i < max_eq && before_lines[i] == after_lines[i] {
+        i += 1;
+    }
+
+    let start = i.saturating_sub(2);
+    let end_before = (start + MAX_PREVIEW_LINES).min(before_lines.len());
+    let end_after = (start + MAX_PREVIEW_LINES).min(after_lines.len());
+
+    let mut out = String::new();
+    out.push_str("Before:\n");
+    if start >= end_before {
+        out.push_str("  - (empty)\n");
+    } else {
+        for line in &before_lines[start..end_before] {
+            out.push_str("  - ");
+            out.push_str(&truncate_line_for_preview(line));
+            out.push('\n');
+        }
+    }
+    out.push_str("After:\n");
+    if start >= end_after {
+        out.push_str("  + (empty)");
+    } else {
+        for (idx, line) in after_lines[start..end_after].iter().enumerate() {
+            out.push_str("  + ");
+            out.push_str(&truncate_line_for_preview(line));
+            if idx + 1 < end_after - start {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+fn truncate_line_for_preview(line: &str) -> String {
+    if line.chars().count() > MAX_PREVIEW_CHARS_PER_LINE {
+        let truncated: String = line.chars().take(MAX_PREVIEW_CHARS_PER_LINE).collect();
+        format!("{truncated}...")
+    } else {
+        line.to_string()
+    }
 }
 
 #[cfg(test)]

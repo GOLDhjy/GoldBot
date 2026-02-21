@@ -28,10 +28,10 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             lines_with(output, |i, line| {
                 let pfx = if i == 0 { "  ⎿ " } else { "    " };
                 let s = format!("{}{}", pfx, line);
-                if ok {
-                    s.dark_grey().to_string()
-                } else {
+                if !ok {
                     s.red().to_string()
+                } else {
+                    style_tool_result_line(line, s)
                 }
             })
         }
@@ -279,6 +279,41 @@ fn format_bullet_line(item: &str) -> String {
         );
     }
     format!("    {} {}", "•".dark_grey(), render_inline_markdown(item))
+}
+
+fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
+    let t = raw_line.trim_start();
+    if t.starts_with('+') {
+        return rendered.green().to_string();
+    }
+    if t.starts_with('-') {
+        return rendered.red().to_string();
+    }
+    if t.starts_with('~') {
+        return rendered.cyan().to_string();
+    }
+    if t == "Filesystem changes:" {
+        return rendered.dark_yellow().bold().to_string();
+    }
+    if t.starts_with("created (") {
+        return rendered.green().to_string();
+    }
+    if t.starts_with("updated (") {
+        return rendered.cyan().to_string();
+    }
+    if t.starts_with("deleted (") {
+        return rendered.red().to_string();
+    }
+    if t.starts_with("Compare ") || t.starts_with("Preview ") {
+        return rendered.dark_yellow().to_string();
+    }
+    if t == "Before:" {
+        return rendered.dark_red().to_string();
+    }
+    if t == "After:" {
+        return rendered.dark_green().to_string();
+    }
+    rendered.dark_grey().to_string()
 }
 
 fn render_inline_markdown(line: &str) -> String {

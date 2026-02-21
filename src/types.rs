@@ -31,5 +31,7 @@ pub enum Event {
 pub enum LlmAction {
     Shell { command: String },
     Mcp { tool: String, arguments: Value },
+    Skill { name: String },
+    CreateMcp { config: Value },
     Final { summary: String },
 }

@@ -27,7 +27,7 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
-    pub(crate) fn new(mcp_ok: &[(String, usize)], _mcp_failed: &[String]) -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         let mut s = Self {
             stdout: io::stdout(),
             status: String::new(),
@@ -64,23 +64,6 @@ impl Screen {
                 cursor::MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
                 Print(format!("  {}\r\n", styled))
-            )?;
-        }
-
-        if !mcp_ok.is_empty() {
-            let sep = " · ".dark_grey().to_string();
-            let mut parts: Vec<String> = mcp_ok
-                .iter()
-                .map(|(name, _)| name.as_str().dark_cyan().to_string())
-                .collect();
-            parts.sort();
-            parts.dedup();
-            let label = "MCP  ".dark_grey().to_string();
-            execute!(
-                s.stdout,
-                cursor::MoveToColumn(0),
-                Clear(ClearType::CurrentLine),
-                Print(format!("  {}{}\r\n", label, parts.join(&sep)))
             )?;
         }
 
@@ -380,4 +363,39 @@ pub(crate) fn split_tail_lines_by_width(
         *first = fit_single_line_tail(&format!("…{}", plain), max_width);
     }
     tail
+}
+
+/// Format discovered skills as a single styled line for `Screen::emit()`.
+/// Returns `None` if no skills were found.
+pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let sep = " · ".dark_grey().to_string();
+    let parts: Vec<String> = names
+        .iter()
+        .map(|n| n.as_str().green().to_string())
+        .collect();
+    Some(format!("  {}{}", "Skills  ".dark_grey(), parts.join(&sep)))
+}
+
+/// Format the MCP discovery result as a single styled line for `Screen::emit()`.
+/// Returns `None` if there are no servers at all.
+pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) -> Option<String> {
+    if ok.is_empty() && failed.is_empty() {
+        return None;
+    }
+    let sep = " · ".dark_grey().to_string();
+    let mut parts: Vec<String> = ok
+        .iter()
+        .map(|(name, _)| name.as_str().dark_cyan().to_string())
+        .collect();
+    for name in failed {
+        parts.push(format!(
+            "{} {}",
+            name.as_str().red(),
+            "(failed)".dark_grey()
+        ));
+    }
+    Some(format!("  {}{}", "MCP  ".dark_grey(), parts.join(&sep)))
 }
