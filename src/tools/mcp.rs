@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -10,7 +11,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const ENV_MCP_SERVERS: &str = "GOLDBOT_MCP_SERVERS";
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const ENV_MCP_SERVERS_FILE: &str = "GOLDBOT_MCP_SERVERS_FILE";
+const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
+const DEFAULT_MCP_SERVERS_FILENAME: &str = "mcp_servers.json";
+// Keep this aligned with https://modelcontextprotocol.io/specification/versioning
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_OUTPUT_CHARS: usize = 12_000;
 const MAX_PROMPT_TOOLS: usize = 64;
 const MAX_SCHEMA_FIELDS: usize = 8;
@@ -66,16 +71,25 @@ enum RawServerEntry {
 struct RawServerConfig {
     #[serde(default = "default_server_type")]
     r#type: String,
-    command: Option<String>,
+    command: Option<RawCommand>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
     cwd: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
     #[allow(dead_code)]
     url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawCommand {
+    String(String),
+    Array(Vec<String>),
 }
 
 fn default_server_type() -> String {
@@ -88,27 +102,30 @@ fn default_enabled() -> bool {
 
 impl McpRegistry {
     pub fn from_env() -> (Self, Vec<String>) {
-        let Some(raw) = std::env::var(ENV_MCP_SERVERS).ok() else {
-            return (Self::default(), Vec::new());
+        let mut warnings = Vec::new();
+
+        let raw = match std::env::var(ENV_MCP_SERVERS) {
+            Ok(v) if !v.trim().is_empty() => v,
+            Ok(_) | Err(_) => match read_mcp_servers_file() {
+                Ok(Some(text)) => text,
+                Ok(None) => return (Self::default(), warnings),
+                Err(e) => {
+                    warnings.push(e);
+                    return (Self::default(), warnings);
+                }
+            },
         };
 
-        if raw.trim().is_empty() {
-            return (Self::default(), Vec::new());
-        }
-
-        let parsed: BTreeMap<String, RawServerEntry> = match serde_json::from_str(&raw) {
+        let parsed: BTreeMap<String, RawServerEntry> = match parse_server_entries(&raw) {
             Ok(v) => v,
             Err(e) => {
-                return (
-                    Self::default(),
-                    vec![format!(
-                        "{ENV_MCP_SERVERS} is not valid JSON: {e}. MCP tools are disabled."
-                    )],
-                );
+                warnings.push(format!(
+                    "MCP config is invalid: {e}. MCP tools are disabled."
+                ));
+                return (Self::default(), warnings);
             }
         };
 
-        let mut warnings = Vec::new();
         let mut registry = Self::default();
 
         for (server_name, entry) in parsed {
@@ -123,24 +140,34 @@ impl McpRegistry {
                     }
                     let ty = cfg.r#type.to_lowercase();
                     if ty != "local" {
-                        warnings.push(format!(
-                            "MCP server `{server_name}` type `{ty}` is not supported yet (local stdio only). Skipped."
-                        ));
+                        if ty == "remote" {
+                            warnings.push(format!(
+                                "MCP server `{server_name}` type `remote` is not supported yet (GoldBot currently supports local stdio only). Skipped."
+                            ));
+                        } else {
+                            warnings.push(format!(
+                                "MCP server `{server_name}` type `{ty}` is not supported yet (local stdio only). Skipped."
+                            ));
+                        }
                         continue;
                     }
-                    let Some(command) = cfg.command.filter(|c| !c.trim().is_empty()) else {
+                    let Some((command, args)) = extract_local_command_and_args(&cfg) else {
                         warnings.push(format!(
-                            "MCP server `{server_name}` is missing a non-empty `command`. Skipped."
+                            "MCP server `{server_name}` is missing a valid command. Use either `\"command\":\"npx\"` or `\"command\":[\"npx\",\"-y\",...]`. Skipped."
                         ));
                         continue;
                     };
+                    let mut env = cfg.env.clone();
+                    for (k, v) in &cfg.headers {
+                        env.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
 
                     registry.servers.insert(
                         server_name,
                         LocalServerSpec {
                             command,
-                            args: cfg.args,
-                            env: cfg.env,
+                            args,
+                            env,
                             cwd: cfg.cwd.map(PathBuf::from),
                         },
                     );
@@ -167,9 +194,10 @@ impl McpRegistry {
             "\n\nYou also have MCP tools discovered from local MCP servers.\n\n\
              To call an MCP tool, respond with EXACTLY this structure (nothing else):\n\
              <thought>your reasoning about what to do next</thought>\n\
-             <tool>mcp_server_tool</tool>\n\
+             <tool>mcp_<server>_<tool></tool>\n\
              <arguments>{\"key\":\"value\"}</arguments>\n\n\
              Rules for MCP calls:\n\
+             - The `<tool>` line above is only an example. Replace it with one exact tool name from the list below.\n\
              - `<tool>` must be exactly one of the listed MCP tool names below.\n\
              - `<arguments>` must be valid JSON object.\n\
              - Output one tool call per response, then wait for the tool result.\n\
@@ -206,8 +234,15 @@ impl McpRegistry {
     }
 
     pub fn execute_tool(&self, action_name: &str, arguments: &Value) -> Result<McpCallResult> {
-        let Some(tool) = self.tools.get(action_name) else {
-            bail!("unknown MCP tool `{action_name}`");
+        let Some(tool) = self.resolve_tool_spec(action_name) else {
+            let suggestions = self.suggest_tool_names(action_name, 5);
+            if suggestions.is_empty() {
+                bail!("unknown MCP tool `{action_name}`");
+            }
+            bail!(
+                "unknown MCP tool `{action_name}`. Try one of: {}",
+                suggestions.join(", ")
+            );
         };
 
         if !arguments.is_object() {
@@ -223,6 +258,39 @@ impl McpRegistry {
         };
 
         call_tool_once(server, &tool.tool_name, arguments)
+    }
+
+    fn resolve_tool_spec(&self, action_name: &str) -> Option<&McpToolSpec> {
+        if let Some(spec) = self.tools.get(action_name) {
+            return Some(spec);
+        }
+
+        let normalized = normalize_action_name_for_lookup(action_name)?;
+        self.tools.get(&normalized)
+    }
+
+    fn suggest_tool_names(&self, action_name: &str, limit: usize) -> Vec<String> {
+        let normalized = normalize_action_name_for_lookup(action_name).unwrap_or_default();
+        let needle = normalized.strip_prefix("mcp_").unwrap_or(&normalized);
+
+        let mut out: Vec<String> = self
+            .tools
+            .keys()
+            .filter(|name| {
+                let hay = name.as_str();
+                if needle.is_empty() {
+                    return false;
+                }
+                hay.contains(needle) || needle.contains(hay.trim_start_matches("mcp_"))
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+
+        if out.is_empty() {
+            out.extend(self.tools.keys().take(limit).cloned());
+        }
+        out
     }
 
     fn discover_tools(&mut self) -> Vec<String> {
@@ -256,6 +324,112 @@ impl McpRegistry {
 
         warnings
     }
+}
+
+fn read_mcp_servers_file() -> std::result::Result<Option<String>, String> {
+    let path = resolve_mcp_servers_file_path();
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(content))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "failed to read MCP config file `{}`: {e}",
+            path.display()
+        )),
+    }
+}
+
+fn parse_server_entries(
+    raw: &str,
+) -> std::result::Result<BTreeMap<String, RawServerEntry>, String> {
+    let value: Value = serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
+    let normalized = normalize_server_root(value)?;
+    serde_json::from_value(normalized).map_err(|e| format!("unsupported config shape: {e}"))
+}
+
+fn normalize_server_root(value: Value) -> std::result::Result<Value, String> {
+    let Some(root) = value.as_object() else {
+        return Err("top-level JSON must be an object".to_string());
+    };
+
+    if let Some(inner) = root.get("mcp").and_then(Value::as_object) {
+        return Ok(Value::Object(inner.clone()));
+    }
+    if let Some(inner) = root.get("mcpServers").and_then(Value::as_object) {
+        return Ok(Value::Object(inner.clone()));
+    }
+
+    Ok(value)
+}
+
+fn extract_local_command_and_args(cfg: &RawServerConfig) -> Option<(String, Vec<String>)> {
+    let mut args = Vec::new();
+    let command = match cfg.command.as_ref()? {
+        RawCommand::String(cmd) => {
+            let trimmed = cmd.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            trimmed.to_string()
+        }
+        RawCommand::Array(parts) => {
+            let mut iter = parts
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string);
+            let command = iter.next()?;
+            args.extend(iter);
+            command
+        }
+    };
+
+    args.extend(
+        cfg.args
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+    );
+
+    Some((command, args))
+}
+
+fn resolve_mcp_servers_file_path() -> PathBuf {
+    if let Some(path) = std::env::var_os(ENV_MCP_SERVERS_FILE) {
+        let p = PathBuf::from(path);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+
+    default_memory_base_dir().join(DEFAULT_MCP_SERVERS_FILENAME)
+}
+
+fn default_memory_base_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(ENV_MEMORY_DIR) {
+        let p = PathBuf::from(dir);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+
+    if cfg!(target_os = "windows")
+        && let Some(appdata) = std::env::var_os("APPDATA")
+    {
+        return PathBuf::from(appdata).join("GoldBot");
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".goldbot");
+    }
+
+    PathBuf::from(".goldbot")
 }
 
 fn list_tools_once(spec: &LocalServerSpec) -> Result<Vec<DiscoveredTool>> {
@@ -579,6 +753,20 @@ fn sanitize_token(input: &str) -> String {
     }
 }
 
+fn normalize_action_name_for_lookup(action_name: &str) -> Option<String> {
+    let trimmed = action_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = sanitize_token(trimmed);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
 fn summarize_input_schema(schema: &Value) -> String {
     let required: BTreeSet<&str> = schema
         .get("required")
@@ -649,7 +837,10 @@ fn command_line_for_log(command: &str, args: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_token, summarize_input_schema, unique_action_name};
+    use super::{
+        RawServerEntry, extract_local_command_and_args, normalize_action_name_for_lookup,
+        parse_server_entries, sanitize_token, summarize_input_schema, unique_action_name,
+    };
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -682,5 +873,44 @@ mod tests {
         let summary = summarize_input_schema(&schema);
         assert!(summary.contains("libraryName:string*"));
         assert!(summary.contains("tokens:integer"));
+    }
+
+    #[test]
+    fn parse_server_entries_accepts_mcp_wrapper() {
+        let raw = r#"{
+            "mcp": {
+                "context7": { "type": "local", "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }
+            }
+        }"#;
+        let parsed = parse_server_entries(raw).expect("parse should succeed");
+        assert!(matches!(
+            parsed.get("context7"),
+            Some(RawServerEntry::Config(_))
+        ));
+    }
+
+    #[test]
+    fn command_array_is_supported() {
+        let raw = r#"{
+            "context7": {
+                "type": "local",
+                "command": ["npx", "-y", "@upstash/context7-mcp", "--api-key", "k"]
+            }
+        }"#;
+        let parsed = parse_server_entries(raw).expect("parse should succeed");
+        let RawServerEntry::Config(cfg) = parsed.get("context7").expect("missing config") else {
+            panic!("expected config entry");
+        };
+        let (cmd, args) = extract_local_command_and_args(cfg).expect("command should parse");
+        assert_eq!(cmd, "npx");
+        assert_eq!(args, vec!["-y", "@upstash/context7-mcp", "--api-key", "k"]);
+    }
+
+    #[test]
+    fn normalize_action_name_handles_double_underscore() {
+        assert_eq!(
+            normalize_action_name_for_lookup("mcp__context7__get_repository").as_deref(),
+            Some("mcp_context7_get_repository")
+        );
     }
 }

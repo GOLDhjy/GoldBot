@@ -159,6 +159,7 @@ Safe:    ls, cat, grep, git status, read-only ops
 | `API_TIMEOUT_MS` | No | — | Request timeout in milliseconds |
 | `GOLDBOT_TASK` | No | — | Task to run immediately on startup |
 | `GOLDBOT_MCP_SERVERS` | No | — | MCP server config JSON |
+| `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config file path (used only when `GOLDBOT_MCP_SERVERS` is not set) |
 
 Create a `.env` file in the project root (auto-loaded on startup):
 
@@ -176,7 +177,31 @@ goldbot
 
 ## MCP Integration (OpenCode-style)
 
-Set `GOLDBOT_MCP_SERVERS` as JSON (`server_name -> config`):
+By default, GoldBot loads MCP config from the memory directory:
+
+- macOS / Linux: `~/.goldbot/mcp_servers.json`
+- If `GOLDBOT_MEMORY_DIR` is set: `$GOLDBOT_MEMORY_DIR/mcp_servers.json`
+
+File content is JSON (`server_name -> config`):
+
+```json
+{
+  "context7": {
+    "type": "local",
+    "command": "npx",
+    "args": ["-y", "@upstash/context7-mcp"],
+    "enabled": true
+  }
+}
+```
+
+Then run:
+
+```bash
+goldbot
+```
+
+You can still override with `GOLDBOT_MCP_SERVERS`:
 
 ```bash
 export GOLDBOT_MCP_SERVERS='{
@@ -221,7 +246,7 @@ export GOLDBOT_MCP_SERVERS='{
   "filesystem": {
     "type": "local",
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Volumes/2T/Projects/GoldBot"],
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/project"],
     "enabled": true
   }
 }'

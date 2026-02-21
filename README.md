@@ -157,6 +157,7 @@ Safe:    ls, cat, grep, git status, 只读操作
 | `API_TIMEOUT_MS` | 否 | — | 请求超时（毫秒） |
 | `GOLDBOT_TASK` | 否 | — | 启动时直接执行的任务 |
 | `GOLDBOT_MCP_SERVERS` | 否 | — | MCP 服务器配置 JSON |
+| `GOLDBOT_MCP_SERVERS_FILE` | 否 | `~/.goldbot/mcp_servers.json` | MCP 配置文件路径（仅在未设置 `GOLDBOT_MCP_SERVERS` 时生效） |
 
 推荐在项目根目录创建 `.env` 文件（启动时自动加载）：
 
@@ -174,7 +175,31 @@ goldbot
 
 ## MCP 接入（对齐 OpenCode 风格）
 
-通过环境变量 `GOLDBOT_MCP_SERVERS` 传入 JSON（`server_name -> config`）：
+默认从记忆目录读取配置文件：
+
+- macOS / Linux: `~/.goldbot/mcp_servers.json`
+- 若设置 `GOLDBOT_MEMORY_DIR`，则读取 `$GOLDBOT_MEMORY_DIR/mcp_servers.json`
+
+文件内容为 JSON（`server_name -> config`）：
+
+```json
+{
+  "context7": {
+    "type": "local",
+    "command": "npx",
+    "args": ["-y", "@upstash/context7-mcp"],
+    "enabled": true
+  }
+}
+```
+
+然后直接启动：
+
+```bash
+goldbot
+```
+
+也可以用环境变量 `GOLDBOT_MCP_SERVERS` 临时覆盖：
 
 ```bash
 export GOLDBOT_MCP_SERVERS='{
@@ -219,7 +244,7 @@ export GOLDBOT_MCP_SERVERS='{
   "filesystem": {
     "type": "local",
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Volumes/2T/Projects/GoldBot"],
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/project"],
     "enabled": true
   }
 }'
