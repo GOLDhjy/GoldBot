@@ -110,6 +110,10 @@ pub(crate) fn process_llm_result(
         && !actions.iter().any(|a| matches!(a, LlmAction::Question { .. }));
 
     let mut plan_shown_without_followup = false;
+    // Track whether we only saw non-blocking actions (Plan/Todo) without a
+    // follow-up that sets needs_agent_step or breaks the loop.  When true
+    // we must kick the next LLM call ourselves.
+    let mut had_non_blocking_only = false;
 
     'actions: for action in actions {
         match action {
@@ -126,6 +130,7 @@ pub(crate) fn process_llm_result(
             }
             LlmAction::Shell { command } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 let (risk, _reason) = assess_command(&command);
                 match risk {
                     RiskLevel::Safe => {
@@ -173,12 +178,14 @@ pub(crate) fn process_llm_result(
             }
             LlmAction::WebSearch { query } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 execute_web_search(app, screen, &query);
                 app.needs_agent_step = true;
                 break 'actions;
             }
             LlmAction::Question { text, options } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 let ev = Event::Thinking {
                     text: format!("❓ {text}"),
                 };
@@ -203,18 +210,21 @@ pub(crate) fn process_llm_result(
             }
             LlmAction::Mcp { tool, arguments } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 execute_mcp_tool(app, screen, &tool, &arguments);
                 app.needs_agent_step = true;
                 break 'actions;
             }
             LlmAction::Skill { name } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 load_skill(app, screen, &name);
                 app.needs_agent_step = true;
                 break 'actions;
             }
             LlmAction::CreateMcp { config } => {
                 plan_shown_without_followup = false;
+                had_non_blocking_only = false;
                 create_mcp(app, screen, &config);
                 app.needs_agent_step = true;
                 break 'actions;
@@ -226,6 +236,7 @@ pub(crate) fn process_llm_result(
                 screen.refresh();
                 app.messages.push(Message::user("[todo updated]".to_string()));
                 // Don't break — continue to next action (todo is non-blocking).
+                had_non_blocking_only = true;
             }
             LlmAction::Final { summary } => {
                 // Clear the todo panel when task finishes.
@@ -237,9 +248,9 @@ pub(crate) fn process_llm_result(
         }
     }
 
-    // Plan was shown but no follow-up action in this response.
-    // [plan shown] was already pushed inside the Plan arm; just trigger the next LLM call.
-    if plan_shown_without_followup {
+    // Plan/Todo were shown but no follow-up action in this response.
+    // Trigger the next LLM call so the agent continues working.
+    if plan_shown_without_followup || had_non_blocking_only {
         app.needs_agent_step = true;
     }
 }

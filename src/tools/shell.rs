@@ -3,13 +3,17 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    time::UNIX_EPOCH,
+    process::{Command, Stdio},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 
 const MAX_OUTPUT_CHARS: usize = 10_000;
+/// Maximum time (in seconds) a shell command is allowed to run before being
+/// killed.  Can be overridden with the `GOLDBOT_CMD_TIMEOUT` environment
+/// variable.
+const DEFAULT_CMD_TIMEOUT_SECS: u64 = 120;
 const MAX_SNAPSHOT_FILES: usize = 20_000;
 const MAX_DIFF_PER_KIND: usize = 6;
 const MAX_PREVIEW_FILES: usize = 2;
@@ -194,20 +198,82 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let before_compare = capture_before_compare(&cwd, cmd);
     let before = snapshot_files(&cwd);
 
-    let output = if cfg!(target_os = "windows") {
+    let timeout_secs: u64 = std::env::var("GOLDBOT_CMD_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_CMD_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(timeout_secs);
+
+    let mut child = if cfg!(target_os = "windows") {
         Command::new("powershell")
             .args(["-NoProfile", "-Command", cmd])
-            .output()?
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?
     } else {
-        Command::new("bash").args(["-lc", cmd]).output()?
+        Command::new("bash")
+            .args(["-lc", cmd])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?
+    };
+
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(200);
+    let mut timed_out = false;
+
+    // Poll until child exits or timeout.
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap zombie
+                    break;
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Read whatever output is available.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout_buf);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_end(&mut stderr_buf);
+    }
+
+    let exit_code = if timed_out {
+        -1
+    } else {
+        child
+            .wait()
+            .ok()
+            .and_then(|s| s.code())
+            .unwrap_or(-1)
     };
 
     let after = snapshot_files(&cwd);
     let fs_summary = build_fs_summary(&cwd, &before, &after, &before_compare);
 
     let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.push_str(&String::from_utf8_lossy(&stdout_buf));
+    text.push_str(&String::from_utf8_lossy(&stderr_buf));
+
+    if timed_out {
+        if !text.trim_end().is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "[command timed out after {timeout_secs}s and was killed]"
+        ));
+    }
 
     if !fs_summary.is_empty() {
         if !text.trim_end().is_empty() {
@@ -231,7 +297,7 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     }
 
     Ok(CommandResult {
-        exit_code: output.status.code().unwrap_or(-1),
+        exit_code,
         output: text,
     })
 }
