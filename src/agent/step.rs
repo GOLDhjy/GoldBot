@@ -46,14 +46,6 @@ pub(crate) fn process_llm_result(
     screen: &mut Screen,
     result: anyhow::Result<String>,
 ) {
-    if app.steps_taken >= app.max_steps {
-        finish(
-            app,
-            screen,
-            format!("Reached max steps ({}).", app.max_steps),
-        );
-        return;
-    }
     app.steps_taken += 1;
 
     let response = match result {

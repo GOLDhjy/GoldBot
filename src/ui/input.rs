@@ -277,7 +277,9 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.input_focused = false;
                 screen.refresh();
             }
-            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+            {
                 screen.input.push(c);
                 screen.refresh();
             }
@@ -296,7 +298,9 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             KeyCode::Esc if modifiers.is_empty() => {
                 app.quit = true;
             }
-            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+            {
                 screen.input_focused = true;
                 screen.input.push(c);
                 screen.refresh();
@@ -317,7 +321,9 @@ fn handle_running_mode(
     modifiers: KeyModifiers,
 ) {
     match key {
-        KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+        KeyCode::Char(c)
+            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+        {
             screen.input_focused = true;
             screen.input.push(c);
             screen.refresh();

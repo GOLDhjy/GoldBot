@@ -40,7 +40,6 @@ pub(crate) struct App {
     pub messages: Vec<Message>,
     pub task: String,
     pub steps_taken: usize,
-    pub max_steps: usize,
     pub llm_calling: bool,
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
@@ -96,7 +95,6 @@ impl App {
 
             task: String::new(),
             steps_taken: 0,
-            max_steps: 30,
             llm_calling: false,
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
@@ -271,14 +269,23 @@ async fn run_loop(
         }
 
         if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                CEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    if handle_key(app, screen, key.code, key.modifiers) {
-                        break;
+            // Drain all immediately-available events.
+            let mut events = vec![event::read()?];
+            while event::poll(Duration::ZERO)? {
+                events.push(event::read()?);
+            }
+
+            for ev in events {
+                match ev {
+                    CEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                        if handle_key(app, screen, k.code, k.modifiers) {
+                            app.quit = true;
+                            break;
+                        }
                     }
+                    CEvent::Paste(text) => handle_paste(app, screen, &text),
+                    _ => {}
                 }
-                CEvent::Paste(text) => handle_paste(app, screen, &text),
-                _ => {}
             }
         }
 
