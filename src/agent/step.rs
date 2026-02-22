@@ -240,18 +240,51 @@ pub(crate) fn process_llm_result(
 }
 
 fn render_plan(screen: &mut Screen, content: &str) {
+    use crate::ui::format::{is_markdown_rule_pub, render_inline_markdown_pub, split_key_value_parts_pub, strip_ordered_marker_pub};
     let mut lines = vec![String::new()];
     for line in content.lines() {
-        let styled = if line.starts_with("## ") {
-            format!("  {}", line[3..].bold())
-        } else if line.starts_with("# ") {
-            format!("  {}", line[2..].bold())
-        } else if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
-            format!("  {}", line).grey().to_string()
-        } else if line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
-            format!("  {}", line).white().to_string()
+        let trimmed = line.trim_start();
+        // Count leading '#' to support all heading levels (1-6)
+        let heading_level = {
+            let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+            if hashes > 0 && hashes <= 6 && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+                Some((hashes, trimmed[hashes + 1..].trim()))
+            } else {
+                None
+            }
+        };
+        let styled = if let Some((level, rest)) = heading_level {
+            let text = render_inline_markdown_pub(rest);
+            match level {
+                1 => format!("  {}", text.bold().green()),
+                2 => format!("  {}", text.bold().yellow()),
+                _ => format!("  {}", text.bold().dark_yellow()),
+            }
+        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            // Checkbox
+            if let Some(rest) = item.strip_prefix("[ ] ") {
+                format!("    {} {}", "\u{2610}".grey(), render_inline_markdown_pub(rest))
+            } else if let Some(rest) = item.strip_prefix("[x] ").or_else(|| item.strip_prefix("[X] ")) {
+                format!("    {} {}", "\u{2611}".green(), render_inline_markdown_pub(rest))
+            } else if let Some((key, sep, value)) = split_key_value_parts_pub(item) {
+                let key = render_inline_markdown_pub(key);
+                let value = render_inline_markdown_pub(value);
+                format!("    {} {}{} {}", "\u{2022}".grey(), key.bold().yellow(), sep, value)
+            } else {
+                format!("    {} {}", "\u{2022}".grey(), render_inline_markdown_pub(item))
+            }
+        } else if let Some(rest) = strip_ordered_marker_pub(trimmed) {
+            format!("  {}", render_inline_markdown_pub(rest)).white().to_string()
+        } else if is_markdown_rule_pub(trimmed) {
+            "    \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".grey().to_string()
+        } else if crate::ui::format::is_markdown_table_separator(trimmed) {
+            "    \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".grey().to_string()
+        } else if crate::ui::format::is_markdown_table_row(trimmed) {
+            crate::ui::format::format_table_row_pub(trimmed)
+        } else if trimmed.is_empty() {
+            String::new()
         } else {
-            format!("  {line}")
+            format!("  {}", render_inline_markdown_pub(trimmed))
         };
         lines.push(styled);
     }

@@ -56,7 +56,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
     match event {
         Event::UserTask { .. } | Event::Final { .. } => format_event(event),
         Event::Thinking { text } => {
-            let line = first_non_empty_line(text).unwrap_or("");
+            let line = first_meaningful_line(text).unwrap_or("");
             vec![
                 format!("  {}", shorten_text(line, 110))
                     .grey()
@@ -164,6 +164,12 @@ fn format_final_lines(summary: &str) -> Vec<String> {
             if let Some(item) = parse_markdown_list_item(trimmed) {
                 return format_bullet_line(item);
             }
+            if is_markdown_table_separator(trimmed) {
+                return "    ─────────────────────────────".grey().to_string();
+            }
+            if is_markdown_table_row(trimmed) {
+                return format_table_row(trimmed);
+            }
             if let Some(rest) = trimmed.strip_prefix("> ") {
                 return format!("    {}", render_inline_markdown(rest))
                     .grey()
@@ -197,9 +203,47 @@ fn looks_like_diff_block(lines: &[&str]) -> bool {
     })
 }
 
+pub(crate) fn is_markdown_rule_pub(line: &str) -> bool {
+    is_markdown_rule(line)
+}
+
 fn is_markdown_rule(line: &str) -> bool {
     let t = line.trim();
     t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_'))
+}
+
+/// `|------|------|` separator row
+pub(crate) fn is_markdown_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') || !t.ends_with('|') {
+        return false;
+    }
+    t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// Any `| col | col |` table data row
+pub(crate) fn is_markdown_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.contains(" | ")
+}
+
+pub(crate) fn format_table_row_pub(line: &str) -> String {
+    format_table_row(line)
+}
+
+fn format_table_row(line: &str) -> String {
+    let cells: Vec<&str> = line
+        .trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect();
+    let parts: Vec<String> = cells
+        .iter()
+        .map(|c| render_inline_markdown(c))
+        .collect();
+    format!("    {}", parts.join("  │  "))
 }
 
 fn parse_markdown_heading(line: &str) -> Option<(usize, &str)> {
@@ -239,6 +283,10 @@ fn split_trailing_section_title(line: &str) -> Option<&str> {
     None
 }
 
+pub(crate) fn split_key_value_parts_pub(line: &str) -> Option<(&str, char, &str)> {
+    split_key_value_parts(line)
+}
+
 fn split_key_value_parts(line: &str) -> Option<(&str, char, &str)> {
     let t = line.trim();
     for (idx, ch) in t.char_indices() {
@@ -259,6 +307,13 @@ fn split_key_value_parts(line: &str) -> Option<(&str, char, &str)> {
 }
 
 fn format_bullet_line(item: &str) -> String {
+    // Checkbox: - [ ] or - [x]
+    if let Some(rest) = item.strip_prefix("[ ] ") {
+        return format!("    {} {}", "☐".grey(), render_inline_markdown(rest));
+    }
+    if let Some(rest) = item.strip_prefix("[x] ").or_else(|| item.strip_prefix("[X] ")) {
+        return format!("    {} {}", "☑".green(), render_inline_markdown(rest).green().to_string().as_str());
+    }
     if let Some((key, sep, value)) = split_key_value_parts(item) {
         let key = render_inline_markdown(key);
         let value = render_inline_markdown(value);
@@ -308,6 +363,10 @@ fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
     rendered.grey().to_string()
 }
 
+pub(crate) fn render_inline_markdown_pub(line: &str) -> String {
+    render_inline_markdown(line)
+}
+
 fn render_inline_markdown(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::new();
@@ -343,6 +402,20 @@ fn render_inline_markdown(line: &str) -> String {
             }
         }
 
+        // Single-star italic: *text* — strip the markers, keep plain text
+        if chars[i] == '*' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '*' && chars[j] != '\n' {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '*' && j > i + 1 {
+                let segment: String = chars[i + 1..j].iter().collect();
+                out.push_str(&segment);
+                i = j + 1;
+                continue;
+            }
+        }
+
         out.push(chars[i]);
         i += 1;
     }
@@ -364,7 +437,7 @@ pub(crate) fn sanitize_final_summary_for_tui(text: &str) -> String {
         let line = if in_code_fence {
             raw.trim_end().to_string()
         } else {
-            raw.trim().to_string()
+            normalize_emoji_spacing(raw.trim())
         };
         out.push(line);
     }
@@ -386,6 +459,10 @@ pub(crate) fn sanitize_final_summary_for_tui(text: &str) -> String {
         compact.pop();
     }
     compact.join("\n")
+}
+
+pub(crate) fn strip_ordered_marker_pub(line: &str) -> Option<&str> {
+    strip_ordered_marker(line)
 }
 
 fn strip_ordered_marker(line: &str) -> Option<&str> {
@@ -503,6 +580,55 @@ fn absolutize_path_for_display(path: &str) -> String {
 
 pub(crate) fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+/// Like `first_non_empty_line` but skips lines that contain only emoji /
+/// punctuation and no CJK / Latin letters — avoids showing a lone emoji as
+/// the entire live-thinking preview.
+fn first_meaningful_line(output: &str) -> Option<&str> {
+    output.lines().map(str::trim).find(|line| {
+        if line.is_empty() {
+            return false;
+        }
+        // Accept the line only if it has at least one letter or CJK character.
+        line.chars().any(|c| c.is_alphabetic())
+    })
+}
+
+/// Ensure every emoji is followed by at least one space so that wide-character
+/// glyphs don't bleed into the next character in terminals that count them as
+/// two columns wide.
+fn normalize_emoji_spacing(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if is_emoji(ch) {
+            // Skip any variation selectors / zero-width joiners that follow.
+            while let Some(&next) = chars.peek() {
+                if matches!(next, '\u{FE00}'..='\u{FE0F}' | '\u{200D}' | '\u{20E3}') {
+                    out.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            // Add a space if there isn't one already.
+            if chars.peek().is_some_and(|&c| c != ' ') {
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+fn is_emoji(c: char) -> bool {
+    matches!(c,
+        '\u{1F300}'..='\u{1FAFF}' // Misc Symbols and Pictographs, Emoticons, etc.
+        | '\u{2600}'..='\u{27BF}'  // Misc Symbols, Dingbats
+        | '\u{2B00}'..='\u{2BFF}'  // Misc Symbols and Arrows
+        | '\u{FE00}'..='\u{FE0F}'  // Variation Selectors (treat as part of emoji run)
+    )
 }
 
 
