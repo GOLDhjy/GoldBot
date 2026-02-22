@@ -236,10 +236,9 @@ pub(crate) fn process_llm_result(
                 // Don't break — continue to next action (todo is non-blocking).
             }
             LlmAction::Final { summary } => {
-                // Clear the todo panel when finishing.
+                // Clear the todo panel when task finishes.
                 app.todo_items.clear();
                 screen.todo_items.clear();
-                screen.refresh();
                 finish(app, screen, summary);
                 return;
             }
@@ -728,13 +727,8 @@ fn extract_last_tag_text(text: &str, tag: &str) -> Option<String> {
 }
 
 // ── Todo progress tracking ────────────────────────────────────────────────────
-
-/// Sync todo items from app to screen (used after LLM sends a Todo action).
-#[allow(dead_code)]
-fn sync_todos(app: &App, screen: &mut Screen) {
-    screen.todo_items = app.todo_items.clone();
-    screen.refresh();
-}
+// All todo progress is driven by the LLM via <tool>todo</tool>.
+// GoldBot only renders what the LLM sends — no automatic advancement.
 
 #[cfg(test)]
 mod tests {

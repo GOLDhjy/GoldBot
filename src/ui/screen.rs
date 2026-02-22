@@ -101,7 +101,7 @@ impl Screen {
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
 
-        // ── Todo progress panel ──
+        // ── Todo panel (topmost in managed area) ──
         let todo_rows = self.draw_todo_panel(cols);
 
         if let Some(selected) = self.confirm_selected {
@@ -136,7 +136,7 @@ impl Screen {
             }
             let hint = fit_single_line_tail(hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = display_labels.len() + 1 + todo_rows;
+            self.managed_lines = todo_rows + display_labels.len() + 1;
         } else {
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
             let max_status_lines = if self.status.starts_with("⏳ ") {
@@ -166,7 +166,7 @@ impl Screen {
                 format!("❯ {}", shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(prompt));
-            self.managed_lines = status_rows + 1 + todo_rows;
+            self.managed_lines = todo_rows + status_rows + 1;
         }
         let _ = self.stdout.flush();
     }

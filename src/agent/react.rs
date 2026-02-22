@@ -59,12 +59,18 @@ Todo progress panel (shows a live checklist in the terminal):
 <thought>reasoning</thought>
 <tool>todo</tool>
 <todo>[{\"label\":\"Analyze code\",\"status\":\"done\"},{\"label\":\"Write tests\",\"status\":\"running\"},{\"label\":\"Run CI\",\"status\":\"pending\"}]</todo>
-Todo rules (IMPORTANT — follow strictly):\n\
-- status must be one of: pending / running / done\n\
-- todo is NON-BLOCKING: you may include <tool>todo</tool> in the SAME response as another tool call (shell, plan, etc.). It does not count toward the one-tool-per-response limit.\n\
-- For ANY task with ≥2 steps, you MUST emit a todo panel in your FIRST response. List all planned steps with the first as \\\"running\\\" and the rest as \\\"pending\\\".\n\
-- Before each subsequent tool call, emit an updated todo (mark completed steps as \\\"done\\\", the current step as \\\"running\\\").\n\
-- Before emitting <final>, mark ALL items as \\\"done\\\" in a final todo update.
+Todo rules (CRITICAL — you MUST follow these):
+- status must be one of: pending / running / done
+- todo is NON-BLOCKING: you can include <tool>todo</tool> alongside another tool call in the same response. It does NOT count toward the one-tool-per-response limit.
+- For ANY task requiring 2 or more steps, you MUST emit a <tool>todo</tool> in your FIRST response, listing all planned steps (first step = running, rest = pending).
+- YOU are responsible for advancing todo progress. After a tool returns its result, you MUST emit an updated <tool>todo</tool> that: (1) marks the completed step as done, (2) marks the next step as running, and (3) keeps future steps as pending.
+- Before <final>, emit a final <tool>todo</tool> with ALL items set to done.
+- Never skip todo updates between steps. Every response that contains a tool call MUST also contain an updated <tool>todo</tool>.
+Example of a 3-step task progression:
+  Response 1: [{\"label\":\"Read file\",\"status\":\"running\"},{\"label\":\"Fix bug\",\"status\":\"pending\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
+  Response 2: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"running\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
+  Response 3: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"running\"}] + <tool>shell</tool>
+  Response 4: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"done\"}] + <final>
 
 Task complete:
 <thought>reasoning</thought>
