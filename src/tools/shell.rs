@@ -422,10 +422,10 @@ fn absolutize_target_for_display(target: &str) -> String {
 
 fn expand_tilde(target: &str) -> Option<PathBuf> {
     if target == "~" {
-        return std::env::var_os("HOME").map(PathBuf::from);
+        return crate::tools::home_dir();
     }
     if let Some(rest) = target.strip_prefix("~/") {
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+        return crate::tools::home_dir().map(|home| home.join(rest));
     }
     None
 }

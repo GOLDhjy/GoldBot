@@ -50,8 +50,8 @@ pub fn discover_skills() -> Vec<Skill> {
     // GoldBot's own skills directory.
     scan_dir(&goldbot_skills_dir(), &mut skills, &mut seen);
 
-    // Other global dirs under $HOME.
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    // Other global dirs under home directory.
+    if let Some(home) = crate::tools::home_dir() {
         for sub in GLOBAL_SUBDIRS {
             scan_dir(&home.join(sub), &mut skills, &mut seen);
         }

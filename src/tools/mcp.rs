@@ -206,8 +206,8 @@ impl McpRegistry {
             }
         }
 
-        // Global: under $HOME.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        // Global: under home directory.
+        if let Some(home) = crate::tools::home_dir() {
             for &sub in GLOBAL_MCP_CONFIG_FILES {
                 let path = home.join(sub);
                 if let Ok(text) = fs::read_to_string(&path) {
@@ -768,14 +768,8 @@ fn default_memory_base_dir() -> PathBuf {
         }
     }
 
-    if cfg!(target_os = "windows")
-        && let Some(appdata) = std::env::var_os("APPDATA")
-    {
-        return PathBuf::from(appdata).join("GoldBot");
-    }
-
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".goldbot");
+    if let Some(home) = crate::tools::home_dir() {
+        return home.join(".goldbot");
     }
 
     PathBuf::from(".goldbot")

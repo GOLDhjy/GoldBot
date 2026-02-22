@@ -568,14 +568,8 @@ fn default_memory_base_dir() -> PathBuf {
         }
     }
 
-    if cfg!(target_os = "windows") {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("GoldBot");
-        }
-    }
-
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".goldbot");
+    if let Some(home) = crate::tools::home_dir() {
+        return home.join(".goldbot");
     }
 
     PathBuf::from(".goldbot")
