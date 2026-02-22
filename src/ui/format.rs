@@ -35,17 +35,18 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
                 }
             })
         }
-        Event::NeedsConfirmation { command, .. } => {
-            let first = command.lines().next().unwrap_or(command.as_str());
-            let cmd_display = if command.lines().count() > 1 {
-                format!("{} …", first)
-            } else {
-                first.to_string()
-            };
-            vec![
+        Event::NeedsConfirmation { command, reason } => {
+            let mut lines = vec![
+                format!("  ⏺ {}", reason).cyan().bold().to_string(),
                 "  ⚠ 需要确认".dark_yellow().to_string(),
-                format!("    {}", cmd_display).bold().cyan().to_string(),
-            ]
+            ];
+            for line in command.lines().take(6) {
+                lines.push(format!("    {}", line).cyan().to_string());
+            }
+            if command.lines().count() > 6 {
+                lines.push("    …".grey().to_string());
+            }
+            lines
         }
         Event::Final { summary } => format_final_lines(summary),
     }
@@ -85,15 +86,18 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
         Event::Thinking { .. } => Vec::new(),
         Event::ToolCall { label, .. } => vec![format!("  • {}", label).cyan().to_string()],
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
-        Event::NeedsConfirmation { command, .. } => {
-            let first = command.lines().next().unwrap_or(command.as_str());
-            vec![
+        Event::NeedsConfirmation { command, reason } => {
+            let mut lines = vec![
+                format!("  ⏺ {}", reason).cyan().bold().to_string(),
                 "    ⚠ 需要确认".dark_yellow().to_string(),
-                format!("      {}", shorten_text(first, 72))
-                    .bold()
-                    .cyan()
-                    .to_string(),
-            ]
+            ];
+            for line in command.lines().take(4) {
+                lines.push(format!("      {}", shorten_text(line, 72)).cyan().to_string());
+            }
+            if command.lines().count() > 4 {
+                lines.push("      …".grey().to_string());
+            }
+            lines
         }
         Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
     }

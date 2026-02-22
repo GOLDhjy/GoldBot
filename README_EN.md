@@ -358,3 +358,23 @@ Shown when the LLM uses the `question` tool. Options are decided by the LLM (num
 - crossterm (TUI)
 - reqwest (HTTP)
 - serde_json
+
+## Skills
+
+Create skill files at `~/.goldbot/skills/<name>/SKILL.md`. They are auto-discovered at startup and injected into the system prompt. You can create them directly via GoldBot conversation:
+
+```
+Help me create a skill for organizing PDF files
+```
+
+SKILL.md format:
+
+```markdown
+---
+name: pdf
+description: Organize and process PDF files
+---
+
+# Skill content (free-form Markdown)
+```
+

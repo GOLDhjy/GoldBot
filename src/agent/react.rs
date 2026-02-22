@@ -8,9 +8,10 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 ## Response format
 
 重要：遵循以下决策顺序：
-1. 任务信息不足或有歧义 → 先用 question 工具向用户提问，获取足够信息后再规划
-2. 信息充足但任务复杂 → 用 plan 工具输出完整计划，等用户确认后再执行
-3. 任务简单且信息明确 → 直接执行，无需 plan
+1. 任务信息不足或有歧义 → 用 question 工具提问（每次只问一个关键问题）；若仍有其他关键信息未确认，继续用 question 提问；收集到足够信息后再进入第 2 步
+2. 信息充足后，任务需要输出计划、方案、建议、行程等 → 用 plan 工具输出完整内容；plan 之后必须紧跟 question 询问用户是否确认
+3. 用户确认计划后 → 执行或输出 final
+4. 任务简单且信息明确（如直接查询、执行单条命令）→ 直接执行，无需 plan
 
 Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须立即用 question 工具询问用户是否确认）：
 <thought>reasoning</thought>
@@ -96,53 +97,74 @@ pub fn build_system_prompt() -> String {
         .replace("{SKILLS_DIR}", &skills_dir.to_string_lossy())
 }
 
-/// Parse the raw text returned by the LLM into a thought + action pair.
-pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
+/// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
+///
+/// The LLM may legitimately emit multiple tool calls in one response (e.g. `plan` followed
+/// immediately by `question`).  All `<tool>` tags are extracted in document order and each
+/// one is parsed into an [`LlmAction`].  The caller is responsible for executing them in
+/// sequence, stopping at the first "blocking" action (shell, question, final, …).
+pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
     let thought = extract_last_tag(text, "thought").unwrap_or_default();
 
+    // These special tags are never wrapped in <tool>; handle them first.
     if let Some(summary) = extract_last_tag(text, "final") {
-        return Ok((thought, LlmAction::Final { summary }));
+        return Ok((thought, vec![LlmAction::Final { summary }]));
     }
-
     if let Some(name) = extract_last_tag(text, "skill") {
-        return Ok((thought, LlmAction::Skill { name }));
+        return Ok((thought, vec![LlmAction::Skill { name }]));
     }
-
     if let Some(raw) = extract_last_tag(text, "create_mcp") {
         let config: Value =
             serde_json::from_str(&raw).map_err(|e| anyhow!("invalid <create_mcp> JSON: {e}"))?;
         if !config.is_object() {
             return Err(anyhow!("<create_mcp> must be a JSON object"));
         }
-        return Ok((thought, LlmAction::CreateMcp { config }));
+        return Ok((thought, vec![LlmAction::CreateMcp { config }]));
     }
 
-    if let Some(tool) = extract_last_tag(text, "tool") {
-        if tool == "shell" {
+    // Collect all <tool> tags in document order and parse each one.
+    let tools = extract_all_tags(text, "tool");
+    if !tools.is_empty() {
+        let mut actions = Vec::with_capacity(tools.len());
+        for tool in tools {
+            actions.push(parse_tool_action(text, &tool)?);
+        }
+        return Ok((thought, actions));
+    }
+
+    // Backward compatibility: bare <command> without a wrapping <tool>.
+    if let Some(command) = extract_last_tag(text, "command") {
+        return Ok((thought, vec![LlmAction::Shell { command }]));
+    }
+
+    Err(anyhow!(
+        "cannot parse LLM response — expected shell call, MCP call, or <final>...</final>"
+    ))
+}
+
+fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
+    match tool {
+        "shell" => {
             let command = extract_last_tag(text, "command")
                 .ok_or_else(|| anyhow!("missing <command> for shell tool call"))?;
-            return Ok((thought, LlmAction::Shell { command }));
+            Ok(LlmAction::Shell { command })
         }
-
-        if tool == "web_search" {
+        "web_search" => {
             let query = extract_last_tag(text, "query")
                 .ok_or_else(|| anyhow!("missing <query> for web_search tool call"))?;
-            return Ok((thought, LlmAction::WebSearch { query }));
+            Ok(LlmAction::WebSearch { query })
         }
-
-        if tool == "plan" {
+        "plan" => {
             let content = extract_last_tag(text, "plan")
                 .ok_or_else(|| anyhow!("missing <plan> for plan tool call"))?;
-            return Ok((thought, LlmAction::Plan { content: strip_xml_tags(&content) }));
+            Ok(LlmAction::Plan { content: strip_xml_tags(&content) })
         }
-
-        if tool == "question" {
+        "question" => {
             let text_q = extract_last_tag(text, "question")
                 .ok_or_else(|| anyhow!("missing <question> for question tool call"))?;
             let options: Vec<String> = extract_all_tags(text, "option")
                 .into_iter()
                 .map(|o| {
-                    // Normalize any <user_input> tag variant to the canonical sentinel.
                     if o.trim().starts_with("<user_input") {
                         "<user_input>".to_string()
                     } else {
@@ -153,30 +175,19 @@ pub fn parse_llm_response(text: &str) -> Result<(String, LlmAction)> {
             if options.is_empty() {
                 return Err(anyhow!("missing <option> for question tool call"));
             }
-            return Ok((thought, LlmAction::Question { text: strip_xml_tags(&text_q), options }));
+            Ok(LlmAction::Question { text: strip_xml_tags(&text_q), options })
         }
-
-        if tool.starts_with("mcp_") {
+        t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)
                 .map_err(|e| anyhow!("invalid <arguments> JSON for MCP tool call: {e}"))?;
             if !arguments.is_object() {
                 return Err(anyhow!("MCP <arguments> must be a JSON object"));
             }
-            return Ok((thought, LlmAction::Mcp { tool, arguments }));
+            Ok(LlmAction::Mcp { tool: t.to_string(), arguments })
         }
-
-        return Err(anyhow!("unsupported tool `{tool}`"));
+        t => Err(anyhow!("unsupported tool `{t}`")),
     }
-
-    // Backward compatibility with older prompt format that only emitted <command>.
-    if let Some(command) = extract_last_tag(text, "command") {
-        return Ok((thought, LlmAction::Shell { command }));
-    }
-
-    Err(anyhow!(
-        "cannot parse LLM response — expected shell call, MCP call, or <final>...</final>"
-    ))
 }
 
 fn strip_xml_tags(s: &str) -> String {
@@ -228,8 +239,9 @@ mod tests {
     #[test]
     fn parse_final_prefers_last_closed_tag() {
         let raw = "<thought>ok</thought><final>bad <final>good</final>";
-        let (_, action) = parse_llm_response(raw).expect("should parse final");
-        match action {
+        let (_, actions) = parse_llm_response(raw).expect("should parse final");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
             LlmAction::Final { summary } => assert_eq!(summary, "good"),
             _ => panic!("expected final action"),
         }
@@ -247,13 +259,38 @@ mod tests {
     #[test]
     fn parse_mcp_tool_call() {
         let raw = "<thought>need docs</thought><tool>mcp_context7_resolve_library</tool><arguments>{\"libraryName\":\"tokio\"}</arguments>";
-        let (_, action) = parse_llm_response(raw).expect("should parse MCP action");
-        match action {
+        let (_, actions) = parse_llm_response(raw).expect("should parse MCP action");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
             LlmAction::Mcp { tool, arguments } => {
                 assert_eq!(tool, "mcp_context7_resolve_library");
-                assert_eq!(arguments, json!({"libraryName":"tokio"}));
+                assert_eq!(*arguments, json!({"libraryName":"tokio"}));
             }
             _ => panic!("expected MCP action"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_combined_with_question_returns_both_in_order() {
+        // LLM emits plan + question in one response; both must be parsed in document order.
+        let raw = "<thought>plan first</thought>\
+            <tool>plan</tool>\
+            <plan>## 计划\n1. 第一步\n2. 第二步</plan>\
+            <tool>question</tool>\
+            <question>确认吗？</question>\
+            <option>是</option><option>否</option><option><user_input></option>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse");
+        assert_eq!(actions.len(), 2, "expected [Plan, Question]");
+        match &actions[0] {
+            LlmAction::Plan { content } => assert!(content.contains("第一步")),
+            _ => panic!("first action should be Plan"),
+        }
+        match &actions[1] {
+            LlmAction::Question { text, options } => {
+                assert!(text.contains("确认"));
+                assert_eq!(options.len(), 3);
+            }
+            _ => panic!("second action should be Question"),
         }
     }
 

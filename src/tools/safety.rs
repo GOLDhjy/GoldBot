@@ -286,7 +286,14 @@ fn contains_unquoted_output_redirection(command: &str) -> bool {
         if !in_single && !in_double {
             if c == b'>' {
                 let mut j = i + 1;
-                if j < b.len() && (b[j] == b'>' || b[j] == b'|') {
+                // >> (append) is safe — it can't destroy existing content.
+                // >| (noclobber override) is treated same as >.
+                if j < b.len() && b[j] == b'>' {
+                    // append redirect — skip and continue
+                    i = j + 1;
+                    continue;
+                }
+                if j < b.len() && b[j] == b'|' {
                     j += 1;
                 }
 
@@ -416,6 +423,18 @@ mod tests {
         let (risk, reason) = assess_command("ls > out.txt");
         assert_eq!(risk, RiskLevel::Confirm);
         assert!(reason.contains("重定向"), "unexpected reason: {reason}");
+    }
+
+    #[test]
+    fn append_redirect_is_safe() {
+        let (risk, _) = assess_command("cat >> README.md << 'EOF'");
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn echo_append_is_safe() {
+        let (risk, _) = assess_command("echo 'hello' >> notes.txt");
+        assert_eq!(risk, RiskLevel::Safe);
     }
 
     #[test]

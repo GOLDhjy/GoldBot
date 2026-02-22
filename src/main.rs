@@ -584,7 +584,11 @@ fn handle_key(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyMo
 }
 
 fn submit_question_answer(app: &mut App, screen: &mut Screen, answer: String) {
-    app.messages.push(Message::user(answer.clone()));
+    // Prefix with a role tag so the LLM understands this is a reply to its question,
+    // not a new standalone task — especially when the user types a sub-question like
+    // "这三个有什么区别" instead of directly picking an option.
+    app.messages
+        .push(Message::user(format!("[回答]: {answer}")));
     let ev = crate::types::Event::Thinking {
         text: format!("用户回答：{answer}"),
     };

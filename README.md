@@ -2,6 +2,8 @@
 
 一个基于 Rust 开发的跨平台 TUI Agent，通过 LLM 自动规划和执行 Shell 命令来完成任务。
 
+
+[English Version](README_EN.md)
 ## 特性
 
 - 三级安全控制：Safe/Confirm/Block

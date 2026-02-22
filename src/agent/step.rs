@@ -57,6 +57,14 @@ pub(crate) fn process_llm_result(
     let response = match result {
         Ok(r) => r,
         Err(e) => {
+            let msg = e.to_string();
+            // Empty-content errors are often transient; retry once automatically.
+            if msg.contains("empty content") {
+                screen.status = "⚠ API 返回空响应，自动重试…".dark_yellow().to_string();
+                screen.refresh();
+                app.needs_agent_step = true;
+                return;
+            }
             let ev = Event::Thinking {
                 text: format!("[LLM error] {e}"),
             };
@@ -67,7 +75,7 @@ pub(crate) fn process_llm_result(
         }
     };
 
-    let (thought, action) = match parse_llm_response(&response) {
+    let (thought, actions) = match parse_llm_response(&response) {
         Ok(parsed) => parsed,
         Err(e) => {
             app.messages.push(Message::assistant(response));
@@ -96,120 +104,159 @@ pub(crate) fn process_llm_result(
     }
     app.messages.push(Message::assistant(response));
 
-    match action {
-        LlmAction::Shell { command } => {
-            let (risk, reason) = assess_command(&command);
-            match risk {
-                RiskLevel::Safe => {
-                    execute_command(app, screen, &command);
-                    app.needs_agent_step = true;
+    // Execute actions in document order.
+    // - Plan: render immediately (unless it's an echo after confirmation), push [plan shown].
+    // - All other actions: execute and break (they either need LLM feedback or user input).
+    // If plan was the only action (no follow-up), set needs_agent_step so the LLM continues.
+
+    // Pre-check: if this response contains plan + final but no question, the LLM is echoing
+    // the plan back after the user confirmed.  Skip re-rendering to avoid duplication and let
+    // Final run immediately.  If there's a question too (user wants changes), always render.
+    let plan_is_echo = actions.iter().any(|a| matches!(a, LlmAction::Final { .. }))
+        && !actions.iter().any(|a| matches!(a, LlmAction::Question { .. }));
+
+    let mut plan_shown_without_followup = false;
+
+    'actions: for action in actions {
+        match action {
+            LlmAction::Plan { content } => {
+                if !plan_is_echo {
+                    render_plan(screen, &content);
+                    // Push immediately so the LLM knows the plan was shown in this turn,
+                    // even when a question follows in the same response.
+                    app.messages
+                        .push(Message::user("[plan shown]".to_string()));
                 }
-                RiskLevel::Confirm => {
-                    if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle) {
-                        let ev = Event::Thinking {
-                            text: format!("GE auto-approved confirm command: {command}"),
-                        };
-                        emit_live_event(screen, &ev);
-                        app.task_events.push(ev);
+                plan_shown_without_followup = true;
+                // Don't break — continue to next action in this response.
+            }
+            LlmAction::Shell { command } => {
+                plan_shown_without_followup = false;
+                let (risk, _reason) = assess_command(&command);
+                match risk {
+                    RiskLevel::Safe => {
                         execute_command(app, screen, &command);
                         app.needs_agent_step = true;
-                    } else {
-                        let ev = Event::NeedsConfirmation {
-                            command: command.clone(),
-                            reason,
+                    }
+                    RiskLevel::Confirm => {
+                        if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle) {
+                            let ev = Event::Thinking {
+                                text: format!("GE auto-approved confirm command: {command}"),
+                            };
+                            emit_live_event(screen, &ev);
+                            app.task_events.push(ev);
+                            execute_command(app, screen, &command);
+                            app.needs_agent_step = true;
+                        } else {
+                            let label = crate::tools::shell::classify_command(&command).label();
+                            let ev = Event::NeedsConfirmation {
+                                command: command.clone(),
+                                reason: label,
+                            };
+                            emit_live_event(screen, &ev);
+                            app.task_events.push(ev);
+                            app.pending_confirm = Some(command);
+                            app.pending_confirm_note = false;
+                            screen.confirm_selected = Some(0);
+                            screen.input_focused = false;
+                            screen.refresh();
+                        }
+                    }
+                    RiskLevel::Block => {
+                        let msg = "Command blocked by safety policy";
+                        app.messages
+                            .push(Message::user(format!("Tool result:\n{msg}")));
+                        let ev = Event::ToolResult {
+                            exit_code: -1,
+                            output: msg.to_string(),
                         };
                         emit_live_event(screen, &ev);
                         app.task_events.push(ev);
-                        app.pending_confirm = Some(command);
-                        app.pending_confirm_note = false;
-                        screen.confirm_selected = Some(0);
-                        screen.input_focused = false;
-                        screen.refresh();
+                        app.needs_agent_step = true;
                     }
                 }
-                RiskLevel::Block => {
-                    let msg = "Command blocked by safety policy";
-                    app.messages
-                        .push(Message::user(format!("Tool result:\n{msg}")));
-                    let ev = Event::ToolResult {
-                        exit_code: -1,
-                        output: msg.to_string(),
-                    };
-                    emit_live_event(screen, &ev);
-                    app.task_events.push(ev);
-                    app.needs_agent_step = true;
-                }
+                break 'actions;
             }
-        }
-        LlmAction::WebSearch { query } => {
-            execute_web_search(app, screen, &query);
-            app.needs_agent_step = true;
-        }
-        LlmAction::Plan { content } => {
-            // Render plan content with simple markdown-style formatting.
-            let mut lines = vec![String::new()];
-            for line in content.lines() {
-                let styled = if line.starts_with("## ") {
-                    format!("  {}", line[3..].bold())
-                } else if line.starts_with("# ") {
-                    format!("  {}", line[2..].bold())
-                } else if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
-                    format!("  {}", line).grey().to_string()
-                } else if line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
-                    format!("  {}", line).white().to_string()
-                } else {
-                    format!("  {line}")
+            LlmAction::WebSearch { query } => {
+                plan_shown_without_followup = false;
+                execute_web_search(app, screen, &query);
+                app.needs_agent_step = true;
+                break 'actions;
+            }
+            LlmAction::Question { text, options } => {
+                plan_shown_without_followup = false;
+                let ev = Event::Thinking {
+                    text: format!("❓ {text}"),
                 };
-                lines.push(styled);
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+                screen.question_labels = options
+                    .iter()
+                    .map(|o| {
+                        if o == "<user_input>" {
+                            "自定义输入".to_string()
+                        } else {
+                            o.clone()
+                        }
+                    })
+                    .collect();
+                screen.confirm_selected = Some(0);
+                screen.input_focused = false;
+                app.pending_question = Some((text, options));
+                app.running = false;
+                screen.refresh();
+                break 'actions;
             }
-            lines.push(String::new());
-            screen.emit(&lines);
-
-            // Plan is displayed; let the LLM continue and use the question tool to ask for confirmation.
-            app.messages.push(crate::agent::provider::Message::user(
-                "[plan shown]".to_string(),
-            ));
-            app.needs_agent_step = true;
-        }
-        LlmAction::Question { text, options } => {
-            let ev = Event::Thinking {
-                text: format!("❓ {text}"),
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
-            // Build display labels for the selection menu.
-            screen.question_labels = options
-                .iter()
-                .map(|o| {
-                    if o == "<user_input>" {
-                        "自定义输入".to_string()
-                    } else {
-                        o.clone()
-                    }
-                })
-                .collect();
-            screen.confirm_selected = Some(0);
-            screen.input_focused = false;
-            app.pending_question = Some((text, options));
-            app.running = false;
-            screen.refresh();
-        }
-        LlmAction::Mcp { tool, arguments } => {
-            execute_mcp_tool(app, screen, &tool, &arguments);
-            app.needs_agent_step = true;
-        }
-        LlmAction::Skill { name } => {
-            load_skill(app, screen, &name);
-            app.needs_agent_step = true;
-        }
-        LlmAction::CreateMcp { config } => {
-            create_mcp(app, screen, &config);
-            app.needs_agent_step = true;
-        }
-        LlmAction::Final { summary } => {
-            finish(app, screen, summary);
+            LlmAction::Mcp { tool, arguments } => {
+                plan_shown_without_followup = false;
+                execute_mcp_tool(app, screen, &tool, &arguments);
+                app.needs_agent_step = true;
+                break 'actions;
+            }
+            LlmAction::Skill { name } => {
+                plan_shown_without_followup = false;
+                load_skill(app, screen, &name);
+                app.needs_agent_step = true;
+                break 'actions;
+            }
+            LlmAction::CreateMcp { config } => {
+                plan_shown_without_followup = false;
+                create_mcp(app, screen, &config);
+                app.needs_agent_step = true;
+                break 'actions;
+            }
+            LlmAction::Final { summary } => {
+                finish(app, screen, summary);
+                return;
+            }
         }
     }
+
+    // Plan was shown but no follow-up action in this response.
+    // [plan shown] was already pushed inside the Plan arm; just trigger the next LLM call.
+    if plan_shown_without_followup {
+        app.needs_agent_step = true;
+    }
+}
+
+fn render_plan(screen: &mut Screen, content: &str) {
+    let mut lines = vec![String::new()];
+    for line in content.lines() {
+        let styled = if line.starts_with("## ") {
+            format!("  {}", line[3..].bold())
+        } else if line.starts_with("# ") {
+            format!("  {}", line[2..].bold())
+        } else if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
+            format!("  {}", line).grey().to_string()
+        } else if line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+            format!("  {}", line).white().to_string()
+        } else {
+            format!("  {line}")
+        };
+        lines.push(styled);
+    }
+    lines.push(String::new());
+    screen.emit(&lines);
 }
 
 pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
