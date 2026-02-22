@@ -68,6 +68,7 @@ pub(crate) struct App {
     pub base_prompt: String,
     pub mode: Mode,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
+    pub todo_items: Vec<crate::types::TodoItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +119,7 @@ impl App {
             base_prompt,
             mode: Mode::Normal,
             ge_agent: None,
+            todo_items: Vec::new(),
         }
     }
 }

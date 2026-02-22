@@ -7,6 +7,8 @@ use crossterm::{
 };
 use unicode_width::UnicodeWidthChar;
 
+use crate::types::{TodoItem, TodoStatus};
+
 pub(crate) const TITLE_BANNER: [&str; 5] = [
     "   ____       _     _ ____        _   ",
     "  / ___| ___ | | __| | __ )  ___ | |_ ",
@@ -26,6 +28,8 @@ pub(crate) struct Screen {
     pub input_focused: bool,
     /// When non-empty, the confirm menu renders these labels instead of the hardcoded Execute/Skip/Abort/Add Note.
     pub question_labels: Vec<String>,
+    /// Active todo progress panel items.
+    pub todo_items: Vec<TodoItem>,
 }
 
 impl Screen {
@@ -40,6 +44,7 @@ impl Screen {
             confirm_selected: None,
             input_focused: true,
             question_labels: Vec::new(),
+            todo_items: Vec::new(),
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -95,6 +100,10 @@ impl Screen {
         let cols = crossterm::terminal::size()
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
+
+        // ── Todo progress panel ──
+        let todo_rows = self.draw_todo_panel(cols);
+
         if let Some(selected) = self.confirm_selected {
             let (labels, hint): (&[&str], &str) = if self.question_labels.is_empty() {
                 (
@@ -127,7 +136,7 @@ impl Screen {
             }
             let hint = fit_single_line_tail(hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = display_labels.len() + 1;
+            self.managed_lines = display_labels.len() + 1 + todo_rows;
         } else {
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
             let max_status_lines = if self.status.starts_with("⏳ ") {
@@ -157,9 +166,51 @@ impl Screen {
                 format!("❯ {}", shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(prompt));
-            self.managed_lines = status_rows + 1;
+            self.managed_lines = status_rows + 1 + todo_rows;
         }
         let _ = self.stdout.flush();
+    }
+
+    /// Render the todo progress panel above the main status area.
+    /// Returns the number of terminal rows consumed.
+    fn draw_todo_panel(&mut self, cols: usize) -> usize {
+        if self.todo_items.is_empty() {
+            return 0;
+        }
+
+        // Count stats
+        let total = self.todo_items.len();
+        let done = self.todo_items.iter().filter(|t| t.status == TodoStatus::Done).count();
+        let header = format!("  {} Todos ({}/{})", "▼".grey(), done, total);
+        let _ = execute!(self.stdout, Print(format!("{}\r\n", header.grey())));
+
+        let budget = cols.saturating_sub(rendered_text_width("      "));
+        let mut rows = 1; // header
+        for item in &self.todo_items {
+            let (icon, styled_label) = match item.status {
+                TodoStatus::Done => (
+                    "\u{2705}".to_string(), // ✅
+                    item.label.as_str().green().to_string(),
+                ),
+                TodoStatus::Running => (
+                    "\u{25CE}".to_string(), // ◎
+                    item.label.as_str().bold().white().to_string(),
+                ),
+                TodoStatus::Pending => (
+                    "\u{25CB}".to_string(), // ○
+                    item.label.as_str().grey().to_string(),
+                ),
+            };
+            let label = fit_single_line_tail(&strip_ansi(&styled_label), budget);
+            let styled = match item.status {
+                TodoStatus::Done => label.green().to_string(),
+                TodoStatus::Running => label.bold().white().to_string(),
+                TodoStatus::Pending => label.grey().to_string(),
+            };
+            let _ = execute!(self.stdout, Print(format!("    {} {}\r\n", icon, styled)));
+            rows += 1;
+        }
+        rows
     }
 
     pub(crate) fn emit(&mut self, lines: &[String]) {

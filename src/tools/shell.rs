@@ -221,7 +221,12 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     }
 
     if text.len() > MAX_OUTPUT_CHARS {
-        text.truncate(MAX_OUTPUT_CHARS);
+        // Find a valid UTF-8 char boundary at or before MAX_OUTPUT_CHARS.
+        let mut cut = MAX_OUTPUT_CHARS;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
         text.push_str("\n...[truncated]");
     }
 

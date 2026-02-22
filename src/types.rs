@@ -1,6 +1,19 @@
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    Running,
+    Done,
+}
+
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub label: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     GeInterview,
@@ -141,5 +154,6 @@ pub enum LlmAction {
     Mcp { tool: String, arguments: Value },
     Skill { name: String },
     CreateMcp { config: Value },
+    Todo { items: Vec<TodoItem> },
     Final { summary: String },
 }

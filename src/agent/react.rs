@@ -55,18 +55,28 @@ Create a new MCP server:
 <thought>reasoning</thought>
 <create_mcp>{\"name\":\"server-name\",\"command\":[\"npx\",\"-y\",\"@scope/pkg\"]}</create_mcp>
 
+Todo progress panel (shows a live checklist in the terminal):
+<thought>reasoning</thought>
+<tool>todo</tool>
+<todo>[{\"label\":\"Analyze code\",\"status\":\"done\"},{\"label\":\"Write tests\",\"status\":\"running\"},{\"label\":\"Run CI\",\"status\":\"pending\"}]</todo>
+Todo rules (IMPORTANT — follow strictly):\n\
+- status must be one of: pending / running / done\n\
+- todo is NON-BLOCKING: you may include <tool>todo</tool> in the SAME response as another tool call (shell, plan, etc.). It does not count toward the one-tool-per-response limit.\n\
+- For ANY task with ≥2 steps, you MUST emit a todo panel in your FIRST response. List all planned steps with the first as \\\"running\\\" and the rest as \\\"pending\\\".\n\
+- Before each subsequent tool call, emit an updated todo (mark completed steps as \\\"done\\\", the current step as \\\"running\\\").\n\
+- Before emitting <final>, mark ALL items as \\\"done\\\" in a final todo update.
 
 Task complete:
 <thought>reasoning</thought>
 <final>outcome summary</final>
 
 ## Rules
-- One tool call per response; wait for the result before proceeding.
+- One tool call per response; wait for the result before proceeding. Exception: <tool>todo</tool> is non-blocking and can always be included alongside another tool call.
 - Use <final> as soon as done; avoid extra commands.
 - <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
 - Prefer read-only commands unless changes are required.
 - On failure, diagnose from output and try a different approach.
-- Shell: bash (macOS/Linux).
+- Shell: {SHELL_HINT}.
 
 ## create_mcp fields
 - `name` (required): server identifier used as the config key
@@ -86,15 +96,23 @@ Use shell commands to create a skill directory and SKILL.md file:
     ---
 
     # Markdown content (free-form)
-Use `printf` or `python3 -c` to write the file. Tell the user to restart GoldBot to load it.";
+Use shell-appropriate commands to write the file (bash: `printf`/`cat`; PowerShell: `Set-Content`/`Out-File`). Tell the user to restart GoldBot to load it.";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
 pub fn build_system_prompt() -> String {
     let mcp_path = crate::tools::mcp::mcp_servers_file_path();
     let skills_dir = crate::tools::skills::goldbot_skills_dir();
+    let shell_hint = if cfg!(target_os = "windows") {
+        "PowerShell (Windows). Use PowerShell syntax only — no bash operators like `||`, `&&`, heredoc `<<EOF`. \
+         To write files use `Set-Content`/`Out-File` or `[System.IO.File]::WriteAllText()`. \
+         Use `;` to chain commands. Use `$null` instead of `/dev/null`."
+    } else {
+        "bash (macOS/Linux)"
+    };
     SYSTEM_PROMPT_TEMPLATE
         .replace("{MCP_CONFIG_PATH}", &mcp_path.to_string_lossy())
         .replace("{SKILLS_DIR}", &skills_dir.to_string_lossy())
+        .replace("{SHELL_HINT}", shell_hint)
 }
 
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
@@ -177,6 +195,12 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             }
             Ok(LlmAction::Question { text: strip_xml_tags(&text_q), options })
         }
+        "todo" => {
+            let raw = extract_last_tag(text, "todo")
+                .ok_or_else(|| anyhow!("missing <todo> for todo tool call"))?;
+            let items = parse_todo_json(&raw)?;
+            Ok(LlmAction::Todo { items })
+        }
         t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)
@@ -188,6 +212,29 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         }
         t => Err(anyhow!("unsupported tool `{t}`")),
     }
+}
+
+fn parse_todo_json(raw: &str) -> Result<Vec<crate::types::TodoItem>> {
+    use crate::types::{TodoItem, TodoStatus};
+    let arr: Vec<Value> = serde_json::from_str(raw)
+        .map_err(|e| anyhow!("invalid <todo> JSON: {e}"))?;
+    let mut items = Vec::with_capacity(arr.len());
+    for val in arr {
+        let label = val.get("label")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("todo item missing \"label\""))?
+            .to_string();
+        let status_str = val.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
+        let status = match status_str {
+            "done" => TodoStatus::Done,
+            "running" => TodoStatus::Running,
+            _ => TodoStatus::Pending,
+        };
+        items.push(TodoItem { label, status });
+    }
+    Ok(items)
 }
 
 fn strip_xml_tags(s: &str) -> String {
@@ -299,5 +346,23 @@ mod tests {
         let raw = "<tool>mcp_context7_lookup</tool><arguments>[1,2,3]</arguments>";
         let err = parse_llm_response(raw).expect_err("should fail");
         assert!(err.to_string().contains("JSON object"));
+    }
+
+    #[test]
+    fn parse_todo_tool_call() {
+        let raw = r#"<thought>set progress</thought><tool>todo</tool><todo>[{"label":"Analyze","status":"done"},{"label":"Build","status":"running"},{"label":"Test","status":"pending"}]</todo>"#;
+        let (thought, actions) = parse_llm_response(raw).expect("should parse todo");
+        assert_eq!(thought, "set progress");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LlmAction::Todo { items } => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].label, "Analyze");
+                assert_eq!(items[0].status, crate::types::TodoStatus::Done);
+                assert_eq!(items[1].status, crate::types::TodoStatus::Running);
+                assert_eq!(items[2].status, crate::types::TodoStatus::Pending);
+            }
+            _ => panic!("expected Todo action"),
+        }
     }
 }

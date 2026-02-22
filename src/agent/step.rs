@@ -34,6 +34,8 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.task_events.clear();
     app.final_summary = None;
     app.task_collapsed = false;
+    app.todo_items.clear();
+    screen.todo_items.clear();
     app.messages.push(Message::user(task.clone()));
 
     emit_live_event(screen, &Event::UserTask { text: task });
@@ -225,7 +227,19 @@ pub(crate) fn process_llm_result(
                 app.needs_agent_step = true;
                 break 'actions;
             }
+            LlmAction::Todo { items } => {
+                // LLM explicitly sets/updates the todo progress panel.
+                app.todo_items = items.clone();
+                screen.todo_items = items;
+                screen.refresh();
+                app.messages.push(Message::user("[todo updated]".to_string()));
+                // Don't break — continue to next action (todo is non-blocking).
+            }
             LlmAction::Final { summary } => {
+                // Clear the todo panel when finishing.
+                app.todo_items.clear();
+                screen.todo_items.clear();
+                screen.refresh();
                 finish(app, screen, summary);
                 return;
             }
@@ -711,4 +725,41 @@ fn extract_last_tag_text(text: &str, tag: &str) -> Option<String> {
     let head = &text[..end];
     let start = head.rfind(&open)? + open.len();
     Some(head[start..].trim().to_string())
+}
+
+// ── Todo progress tracking ────────────────────────────────────────────────────
+
+/// Sync todo items from app to screen (used after LLM sends a Todo action).
+#[allow(dead_code)]
+fn sync_todos(app: &App, screen: &mut Screen) {
+    screen.todo_items = app.todo_items.clone();
+    screen.refresh();
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::{TodoItem, TodoStatus};
+
+    #[test]
+    fn parse_todo_json_roundtrip() {
+        // Verify the LLM-style JSON can create TodoItems.
+        let json = r#"[{"label":"分析代码","status":"done"},{"label":"编写测试","status":"running"},{"label":"提交","status":"pending"}]"#;
+        let items: Vec<TodoItem> = serde_json::from_str::<Vec<serde_json::Value>>(json)
+            .unwrap()
+            .into_iter()
+            .map(|v| {
+                let label = v.get("label").unwrap().as_str().unwrap().to_string();
+                let status = match v.get("status").and_then(|s| s.as_str()).unwrap_or("pending") {
+                    "done" => TodoStatus::Done,
+                    "running" => TodoStatus::Running,
+                    _ => TodoStatus::Pending,
+                };
+                TodoItem { label, status }
+            })
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].status, TodoStatus::Done);
+        assert_eq!(items[1].status, TodoStatus::Running);
+        assert_eq!(items[2].status, TodoStatus::Pending);
+    }
 }

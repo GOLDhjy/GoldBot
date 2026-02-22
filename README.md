@@ -160,6 +160,69 @@ Confirm: rm, mv, cp, git commit, curl, wget, > file（写入重定向）
 Safe:    ls, cat, grep, git status, cat << 'EOF'（heredoc 不写文件）, 只读操作
 ```
 
+
+
+### Consensus/GE 引擎
+
+GE（GoldBot Enhanced）监督模式通过 Consensus 引擎实现自动化开发流程，包含以下核心模块：
+
+#### 引擎架构
+
+```
+consensus/
+├── engine.rs      # GE 引擎核心：状态管理、触发处理、流程编排
+├── evaluate.rs    # 评估器：Claude/Codex 双模型执行、结果验收
+├── external.rs    # 外部 LLM 接口：调用 Claude/Codex API
+├── subagent.rs    # 子 Agent：三问生成（Purpose/Rules/Scope）、Todo 计划生成
+├── model.rs       # 数据模型：Consensus、TodoItem、AuditEvent 定义
+└── audit.rs       # 审计日志：所有 GE 操作记录到 GE_LOG.jsonl
+```
+
+#### GE Interview 阶段
+
+首次进入 GE 模式或无 `CONSENSUS.md` 时，进入三问阶段：
+
+1. **Purpose（目标）**: 明确本次开发的核心目标
+2. **Rules（规则）**: 约定开发规范、技术栈、测试要求等
+3. **Scope（范围）**: 定义任务边界，明确做什么/不做什么
+
+三问完成后自动生成 `CONSENSUS.md`，保存到项目根目录。
+
+#### Todo 状态管理
+
+每个 Todo 包含以下状态：
+
+- **Pending**: 待处理
+- **Running**: 执行中
+- **Done**: 已完成
+
+Todo 面板在 TUI 中实时显示，支持多步骤任务跟踪。
+
+#### GE 触发方式
+
+| 触发类型 | 触发时机 | 说明 |
+|---|---|---|
+| Manual | 用户输入 `GE` | 手动进入 GE 模式 |
+| TaskDone | 任务完成 | 每个 Todo 完成后触发评估 |
+| Periodic | 每 30 分钟 | 周期性重新加载共识 |
+| FileChanged | `CONSENSUS.md` 变化 | 文件修改时自动重新加载 |
+
+#### 审计日志
+
+所有 GE 操作记录到 `GE_LOG.jsonl`（JSONL 格式，追加写入）：
+
+- `ge_entered`: 进入 GE 模式
+- `ge_exited`: 退出 GE 模式
+- `consensus_generated`: 共识生成
+- `todo_plan_generated`: Todo 计划生成
+- `claude_exec`: Claude 执行
+- `codex_exec`: Codex 执行与优化
+- `self_review`: GoldBot 自审
+- `git_commit`: 自动提交
+- `validation`: 结果验证
+- `error`: 错误记录
+
+自动 git commit 时会排除 `GE_LOG.jsonl`，避免日志污染代码提交。
 ### 记忆机制
 
 - **短期记忆**: `~/.goldbot/memory/YYYY-MM-DD.md`（每日日志，任务完成后追加）
@@ -206,6 +269,74 @@ goldbot
 - `GE 细化todo` / `GE replan`：基于当前 Purpose/Rules/Scope 重新生成更细粒度 Todo
 
 GE 模式下：
+
+#### GE Interview 流程
+
+当用户首次进入 GE 模式或项目根目录不存在 `CONSENSUS.md` 时，系统会进入 Interview 阶段：
+
+1. **Purpose** - 目标确认
+   - LLM 询问：本次开发的核心目标是什么？
+   - 用户输入后，LLM 总结并确认
+   
+2. **Rules** - 规则约定
+   - LLM 询问：希望遵循哪些开发规则？（如测试要求、代码风格等）
+   - 用户输入后，LLM 总结并确认
+   
+3. **Scope** - 范围界定
+   - LLM 询问：任务边界是什么？哪些在范围内，哪些不在？
+   - 用户输入后，LLM 总结并确认
+
+三问完成后，系统自动生成 `CONSENSUS.md` 文件，包含：
+
+```markdown
+# Project Consensus
+
+## Purpose
+[LLM 总结的目标]
+
+## Rules
+[LLM 总结的规则]
+
+## Scope
+[LLM 总结的范围]
+```
+
+#### Todo 计划生成
+
+共识确立后，LLM 基于 Purpose/Rules/Scope 生成详细的 Todo 计划：
+
+- 目标 8-12 个粒度适中的步骤
+- 每个 Todo 包含清晰的描述
+- 初始状态为 `Pending`
+
+Todo 示例：
+
+```text
+1. [ ] 分析现有代码结构
+2. [ ] 设计数据库模型
+3. [ ] 实现 API 接口
+4. [ ] 编写单元测试
+5. [ ] 集成到主分支
+```
+
+#### 自动 Git Commit
+
+每个 Todo 完成后，GE 引擎会自动创建 git commit：
+
+- Commit 消息由 LLM 根据变更内容生成
+- 自动排除 `GE_LOG.jsonl`（审计日志不会提交到代码仓��）
+- 支持手动 review 修改内容
+
+#### GE 命令参考
+
+| 命令 | 说明 |
+|---|---|
+| `GE <任务描述>` | 进入 GE 模式并创建新共识 |
+| `GE` | 进入 GE 模式（如果存在 CONSENSUS.md 直接加载） |
+| `GE exit` | 退出 GE 模式 |
+| `GE status` | 查看当前 Todo 状态 |
+| `GE replan` | 基于当前共识重新生成 Todo 计划 |
+
 
 - 执行链路固定为：Claude 执行 -> Codex 检查优化 -> GoldBot 只读验收
 - 三问完成后 Todo 由 LLM 生成（目标 8-12 个细粒度步骤）
