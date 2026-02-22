@@ -215,6 +215,49 @@ In GE mode:
 - Audit log path: project root `GE_LOG.jsonl` (JSONL, single append-only file)
 - Triggers: immediate reload after each todo completion + periodic reload every 30 minutes
 
+### Consensus/GE Technical Architecture
+
+The GE (GoldBot Enhanced) supervisor mode is implemented through the Consensus system with the following modules:
+
+```text
+consensus/
+|-- engine.rs      # GE engine: state machine, event loop, execution pipeline
+|-- evaluate.rs    # Evaluation logic: Claude/Codex dual-model execution
+|-- external.rs    # External LLM interfaces: Claude/Codex API calls
+|-- subagent.rs    # SubAgent: generated from Purpose/Rules/Scope with Todo plan
+|-- model.rs       # Data models: Consensus, TodoItem, AuditEvent
+|-- audit.rs       # Audit logging: writes GE execution records to GE_LOG.jsonl
+```
+
+#### GE Interview Phase
+
+When entering GE mode for the first time (no existing `CONSENSUS.md`), GoldBot runs a structured interview:
+
+1. **Purpose**: Define the core objectives of the current project
+2. **Rules**: Define constraints and standards, including technical stack and quality requirements
+3. **Scope**: Define project boundaries, clarifying what to do and what not to do
+
+After completion, `CONSENSUS.md` is automatically created and saved to the project root directory.
+
+#### Todo State Management
+
+Each Todo item has three states:
+
+- **Pending**: Not started
+- **Running**: In progress
+- **Done**: Completed
+
+Todo status is displayed in real-time in the TUI, supporting multi-step task visualization.
+
+#### GE Trigger Modes
+
+| Trigger Type | Trigger Time | Description |
+|---|---|---|
+| Manual | User types `GE` | Manually enter GE mode |
+| TaskDone | After task completion | Triggered after each Todo is completed |
+| Periodic | Every 30 minutes | Periodic reload for recent change recognition |
+| FileChanged | `CONSENSUS.md` changes | Automatic review when file is modified |
+
 ## MCP Integration (OpenCode-style)
 
 By default, GoldBot loads MCP config from the memory directory:
