@@ -63,6 +63,7 @@ pub(crate) fn drain_ge_events(app: &mut App, screen: &mut Screen) {
         app.running = false;
         app.needs_agent_executor = false;
         app.pending_confirm = None;
+        app.pending_confirm_file = None;
         app.pending_confirm_note = false;
         screen.status.clear();
         screen.refresh();

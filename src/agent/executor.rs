@@ -28,6 +28,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.llm_preview_shown.clear();
     app.needs_agent_executor = true;
     app.pending_confirm = None;
+    app.pending_confirm_file = None;
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.input_focused = true;
@@ -134,13 +135,13 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
             }
-            LlmAction::Shell { command } => {
+            LlmAction::Shell { command, file } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 let (risk, _reason) = assess_command(&command);
                 match risk {
                     RiskLevel::Safe => {
-                        execute_command(app, screen, &command);
+                        execute_command(app, screen, &command, file.as_deref());
                         app.needs_agent_executor = true;
                     }
                     RiskLevel::Confirm => {
@@ -150,7 +151,7 @@ pub(crate) fn process_llm_result(
                             };
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);
-                            execute_command(app, screen, &command);
+                            execute_command(app, screen, &command, file.as_deref());
                             app.needs_agent_executor = true;
                         } else {
                             let label = crate::tools::shell::classify_command(&command).label();
@@ -161,6 +162,7 @@ pub(crate) fn process_llm_result(
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);
                             app.pending_confirm = Some(command);
+                            app.pending_confirm_file = file;
                             app.pending_confirm_note = false;
                             screen.confirm_selected = Some(0);
                             screen.input_focused = false;
@@ -168,6 +170,15 @@ pub(crate) fn process_llm_result(
                         }
                     }
                     RiskLevel::Block => {
+                        // Show the command label so the user knows what was blocked.
+                        let label = crate::tools::shell::classify_command(&command).label();
+                        let call_ev = Event::ToolCall {
+                            label,
+                            command: command.clone(),
+                        };
+                        emit_live_event(screen, &call_ev);
+                        app.task_events.push(call_ev);
+
                         let msg = "Command blocked by safety policy";
                         app.messages
                             .push(Message::user(format!("Tool result:\n{msg}")));
@@ -345,7 +356,7 @@ fn render_diff(screen: &mut Screen, content: &str) {
     screen.emit(&lines);
 }
 
-pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
+pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str, file_hint: Option<&str>) {
     let intent = crate::tools::shell::classify_command(cmd);
     let call_ev = Event::ToolCall {
         label: intent.label(),
@@ -354,7 +365,7 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    match crate::tools::shell::run_command(cmd) {
+    match crate::tools::shell::run_command(cmd, file_hint) {
         Ok(out) => {
             app.messages.push(Message::user(format!(
                 "Tool result (exit={}):\n{}",
@@ -522,6 +533,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     app.pending_confirm = None;
+    app.pending_confirm_file = None;
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.input_focused = true;

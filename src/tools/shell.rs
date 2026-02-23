@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
+use similar::{ChangeTag, TextDiff};
 
 const MAX_OUTPUT_CHARS: usize = 10_000;
 /// Maximum time (in seconds) a shell command is allowed to run before being
@@ -20,12 +21,13 @@ const MAX_PREVIEW_FILES: usize = 2;
 const MAX_PREVIEW_LINES: usize = 8;
 const MAX_PREVIEW_CHARS_PER_LINE: usize = 140;
 const MAX_COMPARE_CAPTURE_BYTES: usize = 64 * 1024;
+/// Maximum number of unified-diff output lines shown per modified file.
+const MAX_DIFF_LINES: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
     Search,
     Read,
-    Write,
     Update,
     Bash,
 }
@@ -35,7 +37,6 @@ impl OperationKind {
         match self {
             Self::Search => "Search",
             Self::Read => "Read",
-            Self::Write => "Write",
             Self::Update => "Update",
             Self::Bash => "Bash",
         }
@@ -85,8 +86,6 @@ pub fn classify_command(cmd: &str) -> CommandIntent {
 
     let kind = if looks_read_only(trimmed, &lower) {
         OperationKind::Read
-    } else if looks_write(trimmed, &lower) {
-        OperationKind::Write
     } else if looks_update(trimmed, &lower) {
         OperationKind::Update
     } else {
@@ -193,9 +192,9 @@ fn extract_find_descriptor(tokens: &[String]) -> Option<String> {
     })
 }
 
-pub fn run_command(cmd: &str) -> Result<CommandResult> {
+pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let before_compare = capture_before_compare(&cwd, cmd);
+    let before_compare = capture_before_compare(&cwd, cmd, file_hint);
     let before = snapshot_files(&cwd);
 
     let timeout_secs: u64 = std::env::var("GOLDBOT_CMD_TIMEOUT")
@@ -331,21 +330,18 @@ fn looks_read_only(trimmed: &str, lower: &str) -> bool {
     matches_any_prefix(lower, &unix_commands) || matches_any_prefix(lower, &windows_commands)
 }
 
-fn looks_write(trimmed: &str, lower: &str) -> bool {
+fn looks_update(trimmed: &str, lower: &str) -> bool {
     contains_write_redirection(trimmed)
         || lower.contains("<<")
         || matches_any_prefix(lower, &["tee "])
         || lower.contains("open(") && (lower.contains("\"w\"") || lower.contains("'w'"))
-}
-
-fn looks_update(_trimmed: &str, lower: &str) -> bool {
-    matches_any_prefix(
-        lower,
-        &[
-            "rm ", "mv ", "cp ", "mkdir ", "rmdir ", "chmod ", "chown ", "sed -i", "perl -pi",
-            "git add ", "git rm ", "git mv ",
-        ],
-    )
+        || matches_any_prefix(
+            lower,
+            &[
+                "rm ", "mv ", "cp ", "mkdir ", "rmdir ", "chmod ", "chown ", "sed -i", "perl -pi",
+                "git add ", "git rm ", "git mv ",
+            ],
+        )
 }
 
 fn is_read_only_sed(cmd: &str) -> bool {
@@ -720,11 +716,11 @@ fn build_fs_summary(
         let path_label = display_path(p);
         if updated.contains(&p) {
             let before_text = before_compare.get(p.as_path());
-            let after_text = read_preview(root, p);
+            let after_text = read_text_limited(&root.join(p), MAX_COMPARE_CAPTURE_BYTES);
             if let (Some(before_text), Some(after_text)) = (before_text, after_text) {
-                let snippet = render_before_after_snippet(before_text, &after_text);
-                lines.push(format!("Compare {}:", path_label));
-                lines.extend(snippet.lines().map(|l| format!("  {l}")));
+                let diff = render_unified_diff(before_text, &after_text);
+                lines.push(format!("Diff {}:", path_label));
+                lines.extend(diff.lines().map(|l| format!("  {l}")));
                 continue;
             }
         }
@@ -779,10 +775,24 @@ fn read_preview(root: &Path, rel: &Path) -> Option<String> {
     Some(out)
 }
 
-fn capture_before_compare(root: &Path, cmd: &str) -> HashMap<PathBuf, String> {
+fn capture_before_compare(root: &Path, cmd: &str, file_hint: Option<&str>) -> HashMap<PathBuf, String> {
     let mut out = HashMap::new();
 
-    // First try extract_target for simple commands
+    // If the LLM explicitly declared the target file, capture it first.
+    if let Some(hint) = file_hint {
+        let abs = absolutize_for_runtime(root, hint);
+        if abs.is_file() {
+            if let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) {
+                if !should_skip(&rel) {
+                    if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
+                        out.insert(rel, text);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also try extract_target for simple commands
     if let Some(target) = extract_target(cmd) {
         let abs = absolutize_for_runtime(root, &target);
         if let Ok(meta) = fs::metadata(&abs) {
@@ -801,7 +811,7 @@ fn capture_before_compare(root: &Path, cmd: &str) -> HashMap<PathBuf, String> {
     // For write/update operations, also scan the entire command for file paths
     // This handles complex commands like "$content = Get-Content 'file'; Set-Content 'file' ..."
     let cmd_lower = cmd.to_lowercase();
-    let is_write_or_update = looks_write(cmd, &cmd_lower) || looks_update(cmd, &cmd_lower);
+    let is_write_or_update = looks_update(cmd, &cmd_lower);
 
     if is_write_or_update {
         // Extract all quoted paths from the command
@@ -854,53 +864,53 @@ fn read_text_limited(path: &Path, limit: usize) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-fn render_before_after_snippet(before: &str, after: &str) -> String {
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
-
-    let mut i = 0usize;
-    let max_eq = before_lines.len().min(after_lines.len());
-    while i < max_eq && before_lines[i] == after_lines[i] {
-        i += 1;
-    }
-
-    let start = i.saturating_sub(2);
-    let end_before = (start + MAX_PREVIEW_LINES).min(before_lines.len());
-    let end_after = (start + MAX_PREVIEW_LINES).min(after_lines.len());
-
+fn render_unified_diff(before: &str, after: &str) -> String {
+    let diff = TextDiff::from_lines(before, after);
     let mut out = String::new();
-    out.push_str("Before:\n");
-    if start >= end_before {
-        out.push_str("  - (empty)\n");
-    } else {
-        for line in &before_lines[start..end_before] {
-            out.push_str("  - ");
-            out.push_str(&truncate_line_for_preview(line));
-            out.push('\n');
+    let mut total = 0usize;
+    let mut truncated = false;
+
+    // Count digits needed for the largest line number so all columns align.
+    let max_line = before.lines().count().max(after.lines().count());
+    let num_width = max_line.to_string().len().max(3);
+
+    'outer: for group in diff.grouped_ops(3) {
+        // Separator between hunks.
+        if !out.is_empty() {
+            out.push_str(&format!("{}\n", "─".repeat(num_width + 4)));
         }
-    }
-    out.push_str("After:\n");
-    if start >= end_after {
-        out.push_str("  + (empty)");
-    } else {
-        for (idx, line) in after_lines[start..end_after].iter().enumerate() {
-            out.push_str("  + ");
-            out.push_str(&truncate_line_for_preview(line));
-            if idx + 1 < end_after - start {
-                out.push('\n');
+
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                if total >= MAX_DIFF_LINES {
+                    truncated = true;
+                    break 'outer;
+                }
+                let (lineno, marker) = match change.tag() {
+                    ChangeTag::Delete => (change.old_index().unwrap_or(0) + 1, '-'),
+                    ChangeTag::Insert => (change.new_index().unwrap_or(0) + 1, '+'),
+                    ChangeTag::Equal  => (change.old_index().unwrap_or(0) + 1, ' '),
+                };
+                let value = change.value().trim_end_matches('\n');
+                let content = if value.chars().count() > MAX_PREVIEW_CHARS_PER_LINE {
+                    let s: String = value.chars().take(MAX_PREVIEW_CHARS_PER_LINE).collect();
+                    format!("{s}…")
+                } else {
+                    value.to_string()
+                };
+                out.push_str(&format!("{lineno:>num_width$} {marker} {content}\n"));
+                total += 1;
             }
         }
     }
-    out
-}
 
-fn truncate_line_for_preview(line: &str) -> String {
-    if line.chars().count() > MAX_PREVIEW_CHARS_PER_LINE {
-        let truncated: String = line.chars().take(MAX_PREVIEW_CHARS_PER_LINE).collect();
-        format!("{truncated}...")
-    } else {
-        line.to_string()
+    if truncated {
+        out.push_str("... (diff truncated)\n");
     }
+    if out.is_empty() {
+        out.push_str("(no textual changes)\n");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -921,12 +931,12 @@ mod tests {
     #[test]
     fn classify_write_redirect() {
         let intent = classify_command("cat > README_EN.md << 'EOF'");
-        assert_eq!(intent.kind, OperationKind::Write);
+        assert_eq!(intent.kind, OperationKind::Update);
         let cwd = std::env::current_dir()
             .expect("cwd")
             .to_string_lossy()
             .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Write({cwd}/README_EN.md)"));
+        assert_eq!(intent.label(), format!("Update({cwd}/README_EN.md)"));
     }
 
     #[test]

@@ -147,7 +147,7 @@ pub enum Event {
 
 #[derive(Debug, Clone)]
 pub enum LlmAction {
-    Shell { command: String },
+    Shell { command: String, file: Option<String> },
     WebSearch { query: String },
     Plan { content: String },
     Question { text: String, options: Vec<String> },

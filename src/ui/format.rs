@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crossterm::style::Stylize;
+use unicode_width::UnicodeWidthStr;
 
 use crate::types::Event;
 
@@ -27,11 +28,10 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             let ok = *exit_code == 0;
             lines_with(output, |i, line| {
                 let pfx = if i == 0 { "  ⎿ " } else { "    " };
-                let s = format!("{}{}", pfx, line);
                 if !ok {
-                    s.red().to_string()
+                    format!("{pfx}{line}").red().to_string()
                 } else {
-                    style_tool_result_line(line, s)
+                    style_tool_result_line(pfx, line)
                 }
             })
         }
@@ -328,8 +328,62 @@ fn format_bullet_line(item: &str) -> String {
     format!("    {} {}", "•".grey(), render_inline_markdown(item))
 }
 
-fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
+/// Detects our line-numbered diff format: `"NNN - content"` or `"NNN + content"`.
+/// Returns `Some('-')` / `Some('+')` on a match, `None` otherwise.
+fn numbered_diff_marker(t: &str) -> Option<char> {
+    let rest = t.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == t.len() {
+        return None; // no leading digits
+    }
+    if rest.starts_with(" - ") {
+        Some('-')
+    } else if rest.starts_with(" + ") {
+        Some('+')
+    } else {
+        None
+    }
+}
+
+
+/// Render a diff line with colored background starting at `content` (after `prefix`).
+/// The prefix is left uncolored; the content + trailing padding fill the rest of the
+/// terminal width with a dark red (delete) or dark green (insert) background.
+/// White foreground is applied so text is readable on both dark backgrounds.
+fn bg_fill_after_prefix(prefix: &str, content: &str, is_delete: bool) -> String {
+    let term_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let content_width = UnicodeWidthStr::width(content);
+    let total_used = prefix_width + content_width;
+    let padding = if term_width > total_used {
+        " ".repeat(term_width - total_used)
+    } else {
+        String::new()
+    };
+    let padded_content = format!("{content}{padding}");
+    let colored = if is_delete {
+        padded_content.white().on_dark_red().to_string()
+    } else {
+        padded_content.white().on_dark_green().to_string()
+    };
+    format!("{prefix}{colored}")
+}
+
+/// Style a single tool-result line.
+/// `pfx` is the indent prefix (e.g. `"  ⎿ "` / `"    "`); `raw_line` is the
+/// content without the prefix.  Returns the complete styled string.
+fn style_tool_result_line(pfx: &str, raw_line: &str) -> String {
+    let rendered = format!("{pfx}{raw_line}");
     let t = raw_line.trim_start();
+    // Numbered diff lines: prefix uncolored, content filled with red/green bg + white text.
+    match numbered_diff_marker(t) {
+        Some('-') => return bg_fill_after_prefix(pfx, raw_line, true),
+        Some('+') => return bg_fill_after_prefix(pfx, raw_line, false),
+        _ => {}
+    }
+    // Hunk separator, plain diff markers, fs summary, diff headers — keep their original styling.
+    if t.starts_with('─') {
+        return rendered.dark_grey().to_string();
+    }
     if t.starts_with('+') {
         return rendered.green().to_string();
     }
@@ -351,16 +405,11 @@ fn style_tool_result_line(raw_line: &str, rendered: String) -> String {
     if t.starts_with("deleted (") {
         return rendered.red().to_string();
     }
-    if t.starts_with("Compare ") || t.starts_with("Preview ") {
+    if t.starts_with("Diff ") || t.starts_with("Preview ") {
         return rendered.dark_yellow().to_string();
     }
-    if t == "Before:" {
-        return rendered.dark_red().to_string();
-    }
-    if t == "After:" {
-        return rendered.dark_green().to_string();
-    }
-    rendered.grey().to_string()
+    // All other lines (including unchanged diff context): white text, no background.
+    rendered.white().to_string()
 }
 
 pub(crate) fn render_inline_markdown_pub(line: &str) -> String {
@@ -485,28 +534,30 @@ pub(crate) struct FsChangeSummary {
 }
 
 fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
-    let mut raw = Vec::new();
+    let mut summary = Vec::new();
     if let Some(fs) = parse_fs_changes(output) {
         if !fs.created.is_empty() {
-            raw.push(format!("    ⎿ created: {}", summarize_paths(&fs.created)));
+            summary.push(format!("    ⎿ created: {}", summarize_paths(&fs.created)));
         }
         if !fs.updated.is_empty() {
-            raw.push(format!("    ⎿ updated: {}", summarize_paths(&fs.updated)));
+            summary.push(format!("    ⎿ updated: {}", summarize_paths(&fs.updated)));
         }
         if !fs.deleted.is_empty() {
-            raw.push(format!("    ⎿ deleted: {}", summarize_paths(&fs.deleted)));
+            summary.push(format!("    ⎿ deleted: {}", summarize_paths(&fs.deleted)));
         }
     }
 
-    if raw.is_empty() {
+    if summary.is_empty() {
         if let Some(line) = first_non_empty_line(output) {
-            raw.push(format!("    ⎿ {}", shorten_text(line, 110)));
+            summary.push(format!("    ⎿ {}", shorten_text(line, 110)));
         } else {
-            raw.push("    ⎿ (no output)".to_string());
+            summary.push("    ⎿ (no output)".to_string());
         }
     }
 
-    raw.into_iter()
+    // Summary lines: colored by exit code.
+    let mut result: Vec<String> = summary
+        .into_iter()
         .map(|line| {
             if exit_code == 0 {
                 line.grey().to_string()
@@ -514,7 +565,48 @@ fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
                 line.red().to_string()
             }
         })
-        .collect()
+        .collect();
+
+    // Append diff blocks with per-line coloring (red/green).
+    // render_unified_diff already caps at MAX_DIFF_LINES, so no second limit needed.
+    for diff_lines in parse_diff_blocks(output) {
+        for dl in &diff_lines {
+            let prefix = "      ";
+            let t = dl.trim_start();
+            let colored = match numbered_diff_marker(t) {
+                Some('-') => bg_fill_after_prefix(prefix, dl, true),
+                Some('+') => bg_fill_after_prefix(prefix, dl, false),
+                _ if t.starts_with('─') => format!("{prefix}{dl}").dark_grey().to_string(),
+                _ => format!("{prefix}{dl}").white().to_string(),
+            };
+            result.push(colored);
+        }
+    }
+
+    result
+}
+
+/// Extract diff line-blocks from command output.
+/// Each `Diff <file>:` section's lines are returned as a separate `Vec<String>`.
+fn parse_diff_blocks(output: &str) -> Vec<Vec<String>> {
+    let mut result = Vec::new();
+    let mut current: Option<Vec<String>> = None;
+
+    for line in output.lines() {
+        let t = line.trim();
+        if t.starts_with("Diff ") && t.ends_with(':') {
+            if let Some(block) = current.take() {
+                result.push(block);
+            }
+            current = Some(Vec::new());
+        } else if let Some(block) = current.as_mut() {
+            block.push(t.to_string());
+        }
+    }
+    if let Some(block) = current {
+        result.push(block);
+    }
+    result
 }
 
 fn parse_fs_changes(output: &str) -> Option<FsChangeSummary> {
@@ -530,7 +622,7 @@ fn parse_fs_changes(output: &str) -> Option<FsChangeSummary> {
             continue;
         }
 
-        if t.starts_with("Preview ") {
+        if t.starts_with("Preview ") || t.starts_with("Diff ") {
             break;
         }
         if let Some(path) = t.strip_prefix("+ ") {

@@ -156,7 +156,58 @@ fn is_env_assignment(token: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Strip the body lines of heredoc blocks so their content is not mistaken
+/// for shell commands.  The delimiter line and the `<<`-bearing line are kept;
+/// only the interior content lines are removed.
+///
+/// Example input:
+///   cat > README.md << 'EOF'\nsudo make install\nEOF
+/// becomes:
+///   cat > README.md << 'EOF'\nEOF
+fn strip_heredoc_bodies(command: &str) -> String {
+    let mut out = String::new();
+    let mut delimiter: Option<String> = None;
+
+    for line in command.split('\n') {
+        if let Some(ref delim) = delimiter {
+            // Inside heredoc body — check for closing delimiter.
+            if line.trim() == delim.as_str() {
+                delimiter = None;
+                out.push_str(line);
+                out.push('\n');
+            }
+            // Skip body line — do NOT push it to `out`.
+            continue;
+        }
+
+        // Outside heredoc — check if this line opens one.
+        if let Some(delim) = extract_heredoc_delimiter(line) {
+            delimiter = Some(delim);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Extract the heredoc closing delimiter from a line that contains `<<`.
+/// Returns `None` if no heredoc marker is found.
+fn extract_heredoc_delimiter(line: &str) -> Option<String> {
+    // Find `<<` (heredoc) or `<<-` (strip-tabs heredoc).
+    let pos = line.find("<<")?;
+    let after = line[pos + 2..].trim_start_matches('-').trim_start();
+    let delim = if after.starts_with('\'') {
+        after[1..].split('\'').next().unwrap_or("").to_string()
+    } else if after.starts_with('"') {
+        after[1..].split('"').next().unwrap_or("").to_string()
+    } else {
+        after.split_whitespace().next().unwrap_or("").to_string()
+    };
+    if delim.is_empty() { None } else { Some(delim) }
+}
+
 fn split_unquoted_segments(command: &str) -> Vec<String> {
+    let command = &strip_heredoc_bodies(command);
     let b = command.as_bytes();
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -440,6 +491,22 @@ mod tests {
     #[test]
     fn mkdir_p_is_safe() {
         let (risk, _) = assess_command("mkdir -p .github/workflows Formula");
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn heredoc_with_sudo_in_content_is_confirm_not_block() {
+        // The heredoc body contains "sudo" but that's just README content —
+        // should be Confirm (due to > redirect), never Block.
+        let cmd = "cat > README.md << 'EOF'\n## Install\nsudo make install\nEOF";
+        let (risk, _) = assess_command(cmd);
+        assert_eq!(risk, RiskLevel::Confirm);
+    }
+
+    #[test]
+    fn heredoc_without_redirect_is_safe() {
+        let cmd = "cat << 'EOF'\nsudo make install\nEOF";
+        let (risk, _) = assess_command(cmd);
         assert_eq!(risk, RiskLevel::Safe);
     }
 }

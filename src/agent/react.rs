@@ -35,7 +35,9 @@ Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须�
 Shell command:
 <thought>reasoning</thought>
 <tool>shell</tool>
+<file>path/to/file</file>
 <command>bash command</command>
+The optional <file> tag names the primary file being created or modified (relative or absolute path). Omit it for read-only or multi-file commands. It is used to capture a before-diff.
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>
@@ -159,7 +161,7 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
 
     // Backward compatibility: bare <command> without a wrapping <tool>.
     if let Some(command) = extract_last_tag(text, "command") {
-        return Ok((thought, vec![LlmAction::Shell { command }]));
+        return Ok((thought, vec![LlmAction::Shell { command, file: None }]));
     }
 
     Err(anyhow!(
@@ -172,7 +174,8 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "shell" => {
             let command = extract_last_tag(text, "command")
                 .ok_or_else(|| anyhow!("missing <command> for shell tool call"))?;
-            Ok(LlmAction::Shell { command })
+            let file = extract_last_tag(text, "file");
+            Ok(LlmAction::Shell { command, file })
         }
         "web_search" => {
             let query = extract_last_tag(text, "query")
