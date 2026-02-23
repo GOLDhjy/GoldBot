@@ -781,26 +781,57 @@ fn read_preview(root: &Path, rel: &Path) -> Option<String> {
 
 fn capture_before_compare(root: &Path, cmd: &str) -> HashMap<PathBuf, String> {
     let mut out = HashMap::new();
-    let Some(target) = extract_target(cmd) else {
-        return out;
-    };
-    let abs = absolutize_for_runtime(root, &target);
-    let Ok(meta) = fs::metadata(&abs) else {
-        return out;
-    };
-    if !meta.is_file() {
-        return out;
+
+    // First try extract_target for simple commands
+    if let Some(target) = extract_target(cmd) {
+        let abs = absolutize_for_runtime(root, &target);
+        if let Ok(meta) = fs::metadata(&abs) {
+            if meta.is_file() {
+                if let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) {
+                    if !should_skip(&rel) {
+                        if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
+                            out.insert(rel, text);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) else {
-        return out;
-    };
-    if should_skip(&rel) {
-        return out;
+    // For write/update operations, also scan the entire command for file paths
+    // This handles complex commands like "$content = Get-Content 'file'; Set-Content 'file' ..."
+    let cmd_lower = cmd.to_lowercase();
+    let is_write_or_update = looks_write(cmd, &cmd_lower) || looks_update(cmd, &cmd_lower);
+
+    if is_write_or_update {
+        // Extract all quoted paths from the command
+        // Match paths in quotes like "file.txt" or 'file.md'
+        // Also handle paths with dots anywhere (not just extensions)
+        let re = regex::Regex::new(r#"["']([^"']+)["']"#).ok();
+        if let Some(re) = re {
+            for caps in re.captures_iter(cmd) {
+                if let Some(path_match) = caps.get(1) {
+                    let path_str = path_match.as_str();
+                    // Skip if it looks like a command or option
+                    if path_str.starts_with('-') || path_str.contains('$') {
+                        continue;
+                    }
+                    // Try to resolve the path
+                    let abs = absolutize_for_runtime(root, path_str);
+                    if abs.is_file() {
+                        if let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) {
+                            if !should_skip(&rel) && !out.contains_key(&rel) {
+                                if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
+                                    out.insert(rel, text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-    if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
-        out.insert(rel, text);
-    }
+
     out
 }
 

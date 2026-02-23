@@ -155,5 +155,6 @@ pub enum LlmAction {
     Skill { name: String },
     CreateMcp { config: Value },
     Todo { items: Vec<TodoItem> },
+    Diff { content: String },
     Final { summary: String },
 }

@@ -208,6 +208,11 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let items = parse_todo_json(&raw)?;
             Ok(LlmAction::Todo { items })
         }
+        "diff" => {
+            let content = extract_last_tag(text, "diff")
+                .ok_or_else(|| anyhow!("missing <diff> for diff tool call"))?;
+            Ok(LlmAction::Diff { content: strip_xml_tags(&content) })
+        }
         t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)

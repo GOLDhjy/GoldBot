@@ -128,6 +128,12 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
             }
+            LlmAction::Diff { content } => {
+                render_diff(screen, &content);
+                app.messages.push(Message::user("[diff shown]".to_string()));
+                plan_shown_without_followup = true;
+                // Don't break — continue to next action in this response.
+            }
             LlmAction::Shell { command } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
@@ -301,6 +307,37 @@ fn render_plan(screen: &mut Screen, content: &str) {
             String::new()
         } else {
             format!("  {}", render_inline_markdown_pub(trimmed))
+        };
+        lines.push(styled);
+    }
+    lines.push(String::new());
+    screen.emit(&lines);
+}
+
+fn render_diff(screen: &mut Screen, content: &str) {
+    let mut lines = vec![String::new()];
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let styled = if trimmed.starts_with("-") {
+            // Removed line
+            format!("  {}", line.red())
+        } else if trimmed.starts_with("+") {
+            // Added line
+            format!("  {}", line.green())
+        } else if trimmed.starts_with("@@") {
+            // Diff header
+            format!("  {}", line.cyan())
+        } else if trimmed.starts_with(|c: char| c.is_numeric()) {
+            // Line number (e.g., "20  - original line")
+            if trimmed.contains(" - ") {
+                format!("  {}", line.red())
+            } else if trimmed.contains(" + ") {
+                format!("  {}", line.green())
+            } else {
+                format!("  {}", line)
+            }
+        } else {
+            format!("  {}", line)
         };
         lines.push(styled);
     }
