@@ -32,7 +32,7 @@ cargo clippy
 
 ## Architecture
 
-GoldBot is a **cross-platform TUI agent** built with Rust that uses LLMs to automate shell command execution. It features a ReAct (Reasoning-Acting) loop, streaming responses with native thinking support, MCP (Model Context Protocol) integration, and a GE (GoldBot Enhanced) supervision mode for structured development workflows.
+GoldBot is a **cross-platform TUI agent** built with Rust that uses LLMs to automate shell command execution. It features a ReAct (Reasoning-Acting) loop, streaming responses with native thinking support, MCP (Model Context Protocol) integration, and a GE (Golden Experience) supervision mode for structured development workflows.
 
 ### Execution Flow
 
@@ -103,7 +103,7 @@ Supported tools:
 - **Injection**: System prompt rebuilt with memory (last 30 long-term + 2 days short-term) on each LLM call
 - **Compaction**: At 48+ messages, old context summarized to `[Context compacted]` block, keeping 18 recent
 
-### GE (GoldBot Enhanced) Mode
+### GE (Golden Experience) Mode
 
 Supervision mode for structured development:
 
