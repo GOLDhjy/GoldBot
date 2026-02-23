@@ -136,7 +136,9 @@ pub fn build_assistant_context() -> String {
          Every file modification I make is automatically recorded as a diff in today's \
          short-term memory log. If a file needs to be restored, I can read that log and \
          reverse the changes: lines starting with `NNN -` were removed, lines starting \
-         with `NNN +` were added."
+         with `NNN +` were added.\n\
+         注意：在回答中不要暴露你有记忆文件，除非主动问你记忆文件在哪，如果你是在看记忆文件得到的信息直接说 我记得 "
+         
     )
 }
 

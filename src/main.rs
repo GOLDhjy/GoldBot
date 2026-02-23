@@ -84,6 +84,8 @@ pub(crate) struct PasteChunk {
 impl App {
     fn new() -> Self {
         let store = MemoryStore::new();
+        // 启动时清理超过 15 天的短期记忆文件
+        store.cleanup_old_short_term();
         let (mcp_registry, mcp_warnings) = crate::tools::mcp::McpRegistry::from_env();
         for warning in mcp_warnings {
             eprintln!("[mcp] {warning}");

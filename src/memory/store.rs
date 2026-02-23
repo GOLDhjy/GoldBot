@@ -11,7 +11,6 @@ const SHORT_TERM_PROMPT_TAIL_CHARS: usize = 1800;
 const SHORT_TERM_PROMPT_DAYS: i64 = 2;
 const MAX_SHORT_TERM_FINAL_CHARS: usize = 4000;
 const MAX_LONG_TERM_NOTE_CHARS: usize = 120;
-const MAX_LONG_TERM_NOTES_IN_PROMPT: usize = 30;
 const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
 const LT_SECTION_CAPS_ZH: &str = "## Bot Capabilities";
 const LT_SECTION_MEM_ZH: &str = "## Conversation Memories";
@@ -143,6 +142,27 @@ impl MemoryStore {
         }
 
         Ok(promoted)
+    }
+
+    /// 清理超过 15 天的短期记忆文件，在启动时调用
+    pub fn cleanup_old_short_term(&self) {
+        let dir = self.base.join("memory");
+        let cutoff = Local::now().date_naive() - Duration::days(15);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // 文件名格式为 YYYY-MM-DD.md
+            if let Some(date_str) = name.strip_suffix(".md") {
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    if date < cutoff {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     /// Build the memory assistant message injected at conversation start.
@@ -294,8 +314,8 @@ fn curated_long_term_for_prompt(raw: &str) -> String {
         return String::new();
     }
 
-    let start = notes.len().saturating_sub(MAX_LONG_TERM_NOTES_IN_PROMPT);
-    notes[start..]
+    // 全量传入长期记忆，不做条数限制
+    notes
         .iter()
         .map(|n| format!("- {n}"))
         .collect::<Vec<_>>()
