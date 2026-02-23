@@ -124,6 +124,22 @@ pub fn build_system_prompt() -> String {
         .replace("{SHELL_HINT}", shell_hint)
 }
 
+/// Build the fixed assistant-role context message injected right after the system prompt.
+/// This message is always present and never removed during context compaction.
+pub fn build_assistant_context() -> String {
+    let memory_dir = crate::memory::store::MemoryStore::new().base_dir_display();
+    format!(
+        "I have access to the memory system at `{memory_dir}`:\n\
+         - Long-term memory: `{memory_dir}/MEMORY.md`\n\
+         - Short-term memory: `{memory_dir}/memory/YYYY-MM-DD.md` (daily logs)\n\
+         \n\
+         Every file modification I make is automatically recorded as a diff in today's \
+         short-term memory log. If a file needs to be restored, I can read that log and \
+         reverse the changes: lines starting with `NNN -` were removed, lines starting \
+         with `NNN +` were added."
+    )
+}
+
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
 ///
 /// The LLM may legitimately emit multiple tool calls in one response (e.g. `plan` followed

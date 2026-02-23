@@ -1,5 +1,7 @@
 # GoldBot - AI 终端自动化助手
 
+![GitHub Release](https://img.shields.io/github/v/release/GOLDhjy/GoldBot?display_name=tag&style=flat-square) ![GitHub Actions](https://img.shields.io/github/actions/workflow/status/GOLDhjy/GoldBot/ci.yml?style=flat-square) ![GitHub Stars](https://img.shields.io/github/stars/GOLDhjy/GoldBot?style=flat-square) ![License](https://img.shields.io/github/license/GOLDhjy/GoldBot?style=flat-square)
+
 一个基于 Rust 开发的跨平台 TUI Agent，通过 LLM 自动规划和执行 Shell 命令来完成任务。
 
 [English Version](README_EN.md)
@@ -221,7 +223,7 @@ heredoc 内容不参与评估，仅外层命令生效。
 
 - **短期**：`~/.goldbot/memory/YYYY-MM-DD.md`，每日日志
 - **长期**：`~/.goldbot/MEMORY.md`，偏好与规则，自动去重提取
-- **注入**：每次请求携带长期记忆（最近 30 条）+ 最近 2 天短期记忆
+- **注入**：启动时读取长期记忆（最近 30 条）+ 最近 2 天短期记忆，嵌入 System Prompt，仅注入一次
 - **压缩**：消息超 48 条时自动摘要，保留最近 18 条
 
 ### 项目结构

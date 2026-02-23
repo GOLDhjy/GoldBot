@@ -47,6 +47,14 @@ pub(crate) fn process_llm_result(
     screen: &mut Screen,
     result: anyhow::Result<String>,
 ) {
+    // 第一次收到回复后，把 messages[1] 的内容截断回纯固定提示词（去掉拼进去的记忆部分）
+    if app.has_memory_message {
+        app.has_memory_message = false;
+        if let Some(msg) = app.messages.get_mut(1) {
+            msg.content = crate::agent::react::build_assistant_context();
+        }
+    }
+
     app.steps_taken += 1;
 
     let response = match result {
@@ -719,8 +727,9 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
     }
 
     let summary = summarize_for_compaction(&older);
-    let mut compacted = Vec::new();
-    compacted.push(app.messages[0].clone());
+    // Preserve system + fixed assistant context; ephemeral memory is already gone by now.
+    let prefix_end = app.messages.len().min(2);
+    let mut compacted = app.messages[..prefix_end].to_vec();
     if !summary.is_empty() {
         compacted.push(Message::user(format!("[Context compacted]\n{summary}")));
     }

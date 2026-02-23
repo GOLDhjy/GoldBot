@@ -9,7 +9,7 @@ use std::{io, time::Duration};
 
 use agent::{
     provider::{Message, build_http_client, chat_stream_with},
-    react::build_system_prompt,
+    react::{build_assistant_context, build_system_prompt},
     executor::{
         handle_llm_stream_delta, handle_llm_thinking_delta,
         maybe_flush_and_compact_before_call, process_llm_result, start_task,
@@ -67,6 +67,9 @@ pub(crate) struct App {
     /// Base system prompt = SYSTEM_PROMPT + skills section.
     /// Used as the foundation when rebuilding the full prompt after MCP discovery.
     pub base_prompt: String,
+    /// True when the memory assistant message is still sitting at messages[1].
+    /// Cleared (and the message removed) after the first LLM response is received.
+    pub has_memory_message: bool,
     pub mode: Mode,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
     pub todo_items: Vec<crate::types::TodoItem>,
@@ -90,10 +93,21 @@ impl App {
         // MCP tools are appended later after background discovery.
         let skills_section = skills_system_prompt(&skills);
         let base_prompt = format!("{}{skills_section}", build_system_prompt());
-        // System prompt built without MCP tools; augmented after background discovery.
-        let system_prompt = store.build_system_prompt(&base_prompt);
+        // messages[1] = 固定 assistant 提示词，永久保留。
+        // 第一次请求时把当日记忆拼在后面一起发；收到回复后截断，只留固定部分。
+        let base_ctx = build_assistant_context();
+        let memory = store.build_memory_message();
+        let has_memory_message = memory.is_some();
+        let first_ctx = match memory {
+            Some(mem) => format!("{base_ctx}\n\n{mem}"),
+            None => base_ctx,
+        };
+        let messages = vec![
+            Message::system(base_prompt.clone()),
+            Message::assistant(first_ctx),
+        ];
         Self {
-            messages: vec![Message::system(system_prompt)],
+            messages,
 
             task: String::new(),
             steps_taken: 0,
@@ -118,6 +132,7 @@ impl App {
             mcp_discovery_rx: None,
             skills,
             base_prompt,
+            has_memory_message,
             mode: Mode::Normal,
             ge_agent: None,
             todo_items: Vec::new(),
@@ -207,9 +222,8 @@ async fn run_loop(
                 )]);
             }
             app.mcp_registry = registry;
-            // Rebuild system prompt now that tools are known.
-            let base = app.mcp_registry.augment_system_prompt(&app.base_prompt);
-            let new_prompt = MemoryStore::new().build_system_prompt(&base);
+            // Rebuild system prompt now that tools are known (memory stays in assistant message).
+            let new_prompt = app.mcp_registry.augment_system_prompt(&app.base_prompt);
             if let Some(sys) = app.messages.first_mut() {
                 sys.content = new_prompt;
             }

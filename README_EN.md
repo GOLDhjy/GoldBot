@@ -219,7 +219,7 @@ Heredoc body content is never evaluated — only the outer command is assessed.
 
 - **Short-term**: `~/.goldbot/memory/YYYY-MM-DD.md` — daily log
 - **Long-term**: `~/.goldbot/MEMORY.md` — preferences and rules, auto-deduplicated
-- **Injection**: every request carries the last 30 long-term entries + 2 days of short-term memory
+- **Injection**: loaded once at startup — last 30 long-term entries + 2 days of short-term memory, embedded into the System Prompt
 - **Compaction**: when messages exceed 48, older ones are summarized, keeping the last 18
 
 ### Project Structure

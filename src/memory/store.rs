@@ -46,6 +46,11 @@ impl MemoryStore {
         self.base.join("MEMORY.md")
     }
 
+    /// Return the base memory directory as a display string (for use in prompts).
+    pub fn base_dir_display(&self) -> String {
+        self.base.to_string_lossy().into_owned()
+    }
+
     pub fn append_short_term(&self, task: &str, final_output: &str) -> Result<()> {
         let path = self.short_term_path();
         let day = Local::now().format("%Y-%m-%d").to_string();
@@ -57,6 +62,23 @@ impl MemoryStore {
         let block = format!(
             "\n## {now}\n- **Task**\n\n```text\n{task}\n```\n- **Final**\n\n```text\n{final_output}\n```\n"
         );
+        append_file(path, &block)
+    }
+
+    /// 将命令执行产生的文件差异写入今日短期记忆，方便后续查阅或恢复文件
+    pub fn append_diff_to_short_term(&self, cmd: &str, diffs: &[(String, String)]) -> Result<()> {
+        if diffs.is_empty() {
+            return Ok(());
+        }
+        let path = self.short_term_path();
+        let day = Local::now().format("%Y-%m-%d").to_string();
+        ensure_markdown_header(&path, &format!("Short-term Memory {day}"))?;
+        let now = Local::now().format("%H:%M:%S");
+        let cmd = sanitize_fenced_text(cmd.trim());
+        let mut block = format!("\n## {now} [diff]\n- **Command**: `{cmd}`\n");
+        for (label, diff) in diffs {
+            block.push_str(&format!("\n- **File**: {label}\n\n```diff\n{diff}\n```\n"));
+        }
         append_file(path, &block)
     }
 
@@ -123,7 +145,9 @@ impl MemoryStore {
         Ok(promoted)
     }
 
-    pub fn build_system_prompt(&self, base_prompt: &str) -> String {
+    /// Build the memory assistant message injected at conversation start.
+    /// Returns `None` when there is no memory to inject.
+    pub fn build_memory_message(&self) -> Option<String> {
         let long_term_path = self.long_term_path();
         let _ = ensure_long_term_template(&long_term_path);
 
@@ -155,11 +179,11 @@ impl MemoryStore {
         let short_term = short_chunks.join("\n\n");
 
         if long_term.trim().is_empty() && short_term.trim().is_empty() {
-            return base_prompt.to_string();
+            return None;
         }
 
-        format!(
-            "{base_prompt}\n\n## Memory\n\
+        Some(format!(
+            "## Memory\n\
              On conflict, follow the latest user instruction.\n\n\
              ### Long-term Memory\n\
              {}\n\n\
@@ -167,7 +191,7 @@ impl MemoryStore {
              {}",
             fallback_if_empty(&long_term),
             fallback_if_empty(&short_term),
-        )
+        ))
     }
 
     fn collect_recent_short_term_tasks(&self, days: i64, max_tasks: usize) -> Vec<String> {

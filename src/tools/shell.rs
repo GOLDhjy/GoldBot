@@ -259,7 +259,13 @@ pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> 
     };
 
     let after = snapshot_files(&cwd);
-    let fs_summary = build_fs_summary(&cwd, &before, &after, &before_compare);
+    let (fs_summary, diffs) = build_fs_summary(&cwd, &before, &after, &before_compare);
+
+    // 将文件差异写入今日短期记忆，方便后续查阅或恢复
+    if !diffs.is_empty() {
+        let store = crate::memory::store::MemoryStore::new();
+        let _ = store.append_diff_to_short_term(cmd, &diffs);
+    }
 
     let mut text = String::new();
     text.push_str(&String::from_utf8_lossy(&stdout_buf));
@@ -683,12 +689,14 @@ fn should_skip(rel: &Path) -> bool {
     matches!(first, ".git" | "target")
 }
 
+/// 构建文件系统变更摘要，同时收集 diff 内容供写入短期记忆
+/// 返回 (显示文本, [(文件路径标签, diff文本)])
 fn build_fs_summary(
     root: &Path,
     before: &HashMap<PathBuf, FileSignature>,
     after: &HashMap<PathBuf, FileSignature>,
     before_compare: &HashMap<PathBuf, String>,
-) -> String {
+) -> (String, Vec<(String, String)>) {
     let before_keys: BTreeSet<&PathBuf> = before.keys().collect();
     let after_keys: BTreeSet<&PathBuf> = after.keys().collect();
 
@@ -701,10 +709,13 @@ fn build_fs_summary(
         .collect();
 
     if created.is_empty() && deleted.is_empty() && updated.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
 
     let mut lines: Vec<String> = Vec::new();
+    // 收集 diff 内容，用于写入短期记忆
+    let mut collected_diffs: Vec<(String, String)> = Vec::new();
+
     lines.push("Filesystem changes:".to_string());
     push_change_lines(&mut lines, "created", &created, '+');
     push_change_lines(&mut lines, "updated", &updated, '~');
@@ -719,6 +730,8 @@ fn build_fs_summary(
             let after_text = read_text_limited(&root.join(p), MAX_COMPARE_CAPTURE_BYTES);
             if let (Some(before_text), Some(after_text)) = (before_text, after_text) {
                 let diff = render_unified_diff(before_text, &after_text);
+                // 同一份完整 diff 用于 TUI 显示和写入短期记忆
+                collected_diffs.push((path_label.clone(), diff.clone()));
                 lines.push(format!("Diff {}:", path_label));
                 lines.extend(diff.lines().map(|l| format!("  {l}")));
                 continue;
@@ -730,7 +743,7 @@ fn build_fs_summary(
         }
     }
 
-    lines.join("\n")
+    (lines.join("\n"), collected_diffs)
 }
 
 fn push_change_lines(lines: &mut Vec<String>, label: &str, paths: &[&PathBuf], marker: char) {
@@ -864,18 +877,19 @@ fn read_text_limited(path: &Path, limit: usize) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
+/// 生成 unified diff 文本，行内容不截断
 fn render_unified_diff(before: &str, after: &str) -> String {
     let diff = TextDiff::from_lines(before, after);
     let mut out = String::new();
     let mut total = 0usize;
     let mut truncated = false;
 
-    // Count digits needed for the largest line number so all columns align.
+    // 计算最大行号位数，保证列对齐
     let max_line = before.lines().count().max(after.lines().count());
     let num_width = max_line.to_string().len().max(3);
 
     'outer: for group in diff.grouped_ops(3) {
-        // Separator between hunks.
+        // 不同 hunk 之间加分隔线
         if !out.is_empty() {
             out.push_str(&format!("{}\n", "─".repeat(num_width + 4)));
         }
@@ -892,13 +906,7 @@ fn render_unified_diff(before: &str, after: &str) -> String {
                     ChangeTag::Equal  => (change.old_index().unwrap_or(0) + 1, ' '),
                 };
                 let value = change.value().trim_end_matches('\n');
-                let content = if value.chars().count() > MAX_PREVIEW_CHARS_PER_LINE {
-                    let s: String = value.chars().take(MAX_PREVIEW_CHARS_PER_LINE).collect();
-                    format!("{s}…")
-                } else {
-                    value.to_string()
-                };
-                out.push_str(&format!("{lineno:>num_width$} {marker} {content}\n"));
+                out.push_str(&format!("{lineno:>num_width$} {marker} {value}\n"));
                 total += 1;
             }
         }
