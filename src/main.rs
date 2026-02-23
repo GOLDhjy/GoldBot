@@ -191,7 +191,7 @@ async fn run_loop(
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
 
     loop {
-        // Check if background MCP discovery has completed.
+        // 动态检查能用的mcp加入系统提示，并显示当前可用的mcp工具状态
         let mcp_result = app
             .mcp_discovery_rx
             .as_ref()
@@ -218,6 +218,7 @@ async fn run_loop(
             app.mcp_discovery_rx = None;
         }
 
+        //接收llm worker的消息，更新界面状态或处理结果
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 LlmWorkerEvent::Delta(delta) => handle_llm_stream_delta(app, screen, &delta),
@@ -238,6 +239,7 @@ async fn run_loop(
 
         if app.running && app.pending_confirm.is_none() && app.needs_agent_executor && !app.llm_calling
         {
+            //在compact之前写入长期记忆把
             maybe_flush_and_compact_before_call(app, screen);
             app.needs_agent_executor = false;
             app.llm_calling = true;
@@ -268,6 +270,7 @@ async fn run_loop(
             });
         }
 
+        //处理键盘事件，包括普通按键和粘贴事件
         if event::poll(Duration::from_millis(50))? {
             // Drain all immediately-available events.
             let mut events = vec![event::read()?];

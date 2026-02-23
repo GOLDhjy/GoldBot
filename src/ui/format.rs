@@ -67,7 +67,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
             let first = command.lines().next().unwrap_or(command.as_str());
             vec![
                 format!("  ⏺ {}", label).cyan().to_string(),
-                format!("    {}", shorten_text(first, 120))
+                format!("    {}", first)
                     .grey()
                     .to_string(),
             ]

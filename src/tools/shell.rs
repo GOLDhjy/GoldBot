@@ -309,28 +309,26 @@ fn looks_read_only(trimmed: &str, lower: &str) -> bool {
     if is_read_only_sed(trimmed) {
         return true;
     }
-    matches_any_prefix(
-        lower,
-        &[
-            "cat ",
-            "less ",
-            "more ",
-            "ls",
-            "pwd",
-            "find ",
-            "grep ",
-            "rg ",
-            "head ",
-            "tail ",
-            "wc ",
-            "stat ",
-            "du ",
-            "tree",
-            "git status",
-            "git log",
-            "git show",
-        ],
-    )
+    // Unix read commands
+    let unix_commands = [
+        "cat ", "less ", "more ", "ls", "pwd", "find ", "grep ", "rg ",
+        "head ", "tail ", "wc ", "stat ", "du ", "tree",
+        "git status", "git log", "git show",
+    ];
+    // Windows PowerShell read commands
+    let windows_commands = [
+        "get-content ",
+        "gc ",
+        "get-childitem ",
+        "gci ",
+        "get-item ",
+        "gi ",
+        "get-location ",
+        "gl ",
+        "select-string ",
+        "sls ",
+    ];
+    matches_any_prefix(lower, &unix_commands) || matches_any_prefix(lower, &windows_commands)
 }
 
 fn looks_write(trimmed: &str, lower: &str) -> bool {
@@ -419,15 +417,16 @@ fn extract_target(cmd: &str) -> Option<String> {
     }
 
     let first = tokens[0];
-    let candidate = match first {
-        "pwd" => Some("."),
-        "ls" | "find" => tokens
+    let first_lower = first.to_lowercase();
+    let candidate = match first_lower.as_str() {
+        "pwd" | "get-location" | "gl" => Some("."),
+        "ls" | "find" | "get-childitem" | "gci" => tokens
             .iter()
             .skip(1)
             .find(|t| !t.starts_with('-'))
             .copied()
             .or(Some(".")),
-        "grep" | "rg" => {
+        "grep" | "rg" | "select-string" | "sls" => {
             let args: Vec<&&str> = tokens
                 .iter()
                 .skip(1)
@@ -440,7 +439,7 @@ fn extract_target(cmd: &str) -> Option<String> {
             }
         }
         "git" => extract_git_target(&tokens),
-        "cat" | "less" | "more" | "head" | "tail" | "stat" => {
+        "cat" | "less" | "more" | "head" | "tail" | "stat" | "get-content" | "gc" | "get-item" | "gi" => {
             tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied()
         }
         "sed" => tokens.last().copied(),

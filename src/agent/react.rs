@@ -75,6 +75,7 @@ Example of a 3-step task progression:
 Task complete:
 <thought>reasoning</thought>
 <final>outcome summary</final>
+outcome summary: 如果此次任务修改了文件等，最好把涉及的文件名（有链接那种）写在里面，可以通过鼠标点击打开
 
 ## Rules
 - One tool call per response; wait for the result before proceeding. Exception: <tool>todo</tool> is non-blocking and can always be included alongside another tool call.
