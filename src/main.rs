@@ -10,7 +10,7 @@ use std::{io, time::Duration};
 use agent::{
     provider::{Message, build_http_client, chat_stream_with},
     react::build_system_prompt,
-    step::{
+    executor::{
         handle_llm_stream_delta, handle_llm_thinking_delta,
         maybe_flush_and_compact_before_call, process_llm_result, start_task,
     },
@@ -43,7 +43,7 @@ pub(crate) struct App {
     pub llm_calling: bool,
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
-    pub needs_agent_step: bool,
+    pub needs_agent_executor: bool,
     pub running: bool,
     pub quit: bool,
     pub pending_confirm: Option<String>,
@@ -98,7 +98,7 @@ impl App {
             llm_calling: false,
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
-            needs_agent_step: false,
+            needs_agent_executor: false,
             running: false,
             quit: false,
             pending_confirm: None,
@@ -236,10 +236,10 @@ async fn run_loop(
 
         drain_ge_events(app, screen);
 
-        if app.running && app.pending_confirm.is_none() && app.needs_agent_step && !app.llm_calling
+        if app.running && app.pending_confirm.is_none() && app.needs_agent_executor && !app.llm_calling
         {
             maybe_flush_and_compact_before_call(app, screen);
-            app.needs_agent_step = false;
+            app.needs_agent_executor = false;
             app.llm_calling = true;
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();

@@ -61,7 +61,7 @@ pub(crate) fn drain_ge_events(app: &mut App, screen: &mut Screen) {
     }
     if disable_screen_status {
         app.running = false;
-        app.needs_agent_step = false;
+        app.needs_agent_executor = false;
         app.pending_confirm = None;
         app.pending_confirm_note = false;
         screen.status.clear();

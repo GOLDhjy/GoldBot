@@ -1,11 +1,7 @@
-use crossterm::{
-    event::KeyCode,
-    event::KeyModifiers,
-    style::Stylize,
-};
+use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
+use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
-use crate::agent::step::{execute_command, finish};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
@@ -55,7 +51,7 @@ pub(crate) fn handle_key(
         if let Some(agent) = app.ge_agent.as_ref() {
             if agent.hard_exit() {
                 screen.emit(&[
-                    "  GE hard exit requested (q). Stopping current executor...".to_string(),
+                    "  GE hard exit requested (q). Stopping current executor...".to_string()
                 ]);
             } else {
                 app.ge_agent = None;
@@ -177,7 +173,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                             return;
                         };
                         execute_command(app, screen, &cmd);
-                        app.needs_agent_step = true;
+                        app.needs_agent_executor = true;
                     }
                     1 => {
                         // Skip
@@ -197,7 +193,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                         };
                         emit_live_event(screen, &ev);
                         app.task_events.push(ev);
-                        app.needs_agent_step = true;
+                        app.needs_agent_executor = true;
                     }
                     2 => {
                         // Abort
@@ -238,7 +234,7 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 
             app.pending_confirm = None;
             app.pending_confirm_note = false;
-            app.needs_agent_step = true;
+            app.needs_agent_executor = true;
             screen.status.clear();
             clear_input_buffer(app, screen);
             screen.input_focused = true;
@@ -277,9 +273,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.input_focused = false;
                 screen.refresh();
             }
-            KeyCode::Char(c)
-                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-            {
+            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input.push(c);
                 screen.refresh();
             }
@@ -298,9 +292,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             KeyCode::Esc if modifiers.is_empty() => {
                 app.quit = true;
             }
-            KeyCode::Char(c)
-                if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-            {
+            KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input_focused = true;
                 screen.input.push(c);
                 screen.refresh();
@@ -314,16 +306,9 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
     }
 }
 
-fn handle_running_mode(
-    app: &mut App,
-    screen: &mut Screen,
-    key: KeyCode,
-    modifiers: KeyModifiers,
-) {
+fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     match key {
-        KeyCode::Char(c)
-            if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-        {
+        KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             screen.input_focused = true;
             screen.input.push(c);
             screen.refresh();
@@ -348,7 +333,7 @@ pub(crate) fn submit_question_answer(app: &mut App, screen: &mut Screen, answer:
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
     app.running = true;
-    app.needs_agent_step = true;
+    app.needs_agent_executor = true;
     screen.status.clear();
     screen.refresh();
 }
@@ -372,7 +357,7 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
             if let Some(agent) = app.ge_agent.as_ref() {
                 if agent.hard_exit() {
                     screen.emit(&[
-                        "  GE hard exit requested. Stopping current executor...".to_string(),
+                        "  GE hard exit requested. Stopping current executor...".to_string()
                     ]);
                 } else {
                     app.ge_agent = None;
@@ -446,8 +431,7 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
                 "  GE controls: `q` hard exit | Ctrl+P expand prompt | Ctrl+R expand result.",
             )]);
         } else {
-            screen
-                .emit(&["  GE already active. Use `GE 退出` to leave this mode.".to_string()]);
+            screen.emit(&["  GE already active. Use `GE 退出` to leave this mode.".to_string()]);
         }
         return Ok(());
     }
@@ -474,13 +458,11 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
     }
 
     if app.mode == Mode::GeRun || app.mode == Mode::GeIdle {
-        screen.emit(
-            &["  GE mode is active. Use `GE 退出` to return to normal mode.".to_string()],
-        );
+        screen.emit(&["  GE mode is active. Use `GE 退出` to return to normal mode.".to_string()]);
         return Ok(());
     }
 
-    crate::agent::step::start_task(app, screen, task.to_string());
+    crate::agent::executor::start_task(app, screen, task.to_string());
     Ok(())
 }
 
