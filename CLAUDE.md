@@ -14,8 +14,8 @@ cargo build --release
 # Run
 cargo run
 
-# Run with Codex provider and custom task
-GOLDBOT_USE_CODEX=1 GOLDBOT_TASK="整理当前目录的大文件" cargo run
+# Run with predefined task
+GOLDBOT_TASK="整理当前目录的大文件" cargo run
 
 # Run tests
 cargo test
@@ -32,54 +32,113 @@ cargo clippy
 
 ## Architecture
 
-GoldBot is a **cross-platform TUI agent** that executes a pre-planned list of shell commands, displays progress interactively, and persists results to memory files. It is built with `ratatui` + `crossterm` for the terminal UI and runs on the `2024` Rust edition.
+GoldBot is a **cross-platform TUI agent** built with Rust that uses LLMs to automate shell command execution. It features a ReAct (Reasoning-Acting) loop, streaming responses with native thinking support, MCP (Model Context Protocol) integration, and a GE (GoldBot Enhanced) supervision mode for structured development workflows.
 
 ### Execution Flow
 
-`main.rs` owns the event loop. At startup it calls `plan_from_codex_or_sample()` (in `src/agent/loop.rs`) to get a `Vec<PlanStep>`, then drives `AppState` step-by-step:
+`main.rs` owns the main event loop. The `App` struct holds all runtime state including message history, MCP registry, skills, and todo items. The loop processes:
 
-1. Each step emits a `Thinking` event, then the command is assessed by `safety::policy::assess_command`.
-2. **Safe** → executed immediately via `tools::runner::run_command`.
-3. **Confirm** → pauses and renders a popup menu; user picks Execute / Edit / Skip / Abort with arrow keys + Enter.
-4. **Block** → command is rejected outright (e.g. `sudo`, fork-bomb patterns).
-5. After every step, `CompactState::tick_and_maybe_compact` fires every 8 rounds to truncate the `events` vec and prepend a summary, preventing unbounded growth.
-6. When all steps finish (or user aborts), `finish()` writes to both memory stores and sets `app.running = false`.
+1. **LLM streaming responses** via `LlmWorkerEvent` channels (separate `Delta` and `ThinkingDelta` streams)
+2. **Keyboard/paste input** via `handle_key` and `handle_paste`
+3. **MCP discovery** completes asynchronously, augments system prompt when done
+4. **GE mode events** via `drain_ge_events`
+
+When a task starts (`start_task` in `agent/step.rs`):
+1. `maybe_flush_and_compact_before_call()` - if messages exceed 48, compacts context with summary
+2. LLM is called with streaming (two streams: `content` and `reasoning_content`)
+3. `process_llm_result()` parses response via `parse_llm_response()` from `agent/react.rs`
+4. Actions are dispatched: `shell`, `web_search`, `plan`, `question`, `mcp_*`, `skill`, `create_mcp`, `todo`, or `final`
+5. For shell commands: `assess_command()` classifies as Safe/Confirm/Block
 
 ### Module Map
 
 | Module | Purpose |
 |---|---|
-| `src/main.rs` | Entry point, event loop, keybinding handler, step dispatcher |
-| `src/types.rs` | `Event` enum (Thinking/ToolCall/ToolResult/NeedsConfirmation/Final), `ConfirmationChoice` |
-| `src/app/state.rs` | `AppState` — all runtime state (plan, index, events, UI flags) |
-| `src/agent/loop.rs` | `PlanStep` struct, `sample_plan()`, `plan_from_codex_or_sample()` |
-| `src/agent/provider.rs` | `CodexProvider` — shells out to `codex exec` CLI to generate plans or decide next actions |
-| `src/safety/policy.rs` | `assess_command()` — classifies commands as Safe / Confirm / Block |
-| `src/tools/runner.rs` | `run_command()` — executes via `bash -lc` (Unix) or `powershell -NoProfile -Command` (Windows), caps output at 8 KB |
-| `src/memory/store.rs` | `MemoryStore` — appends short-term logs to `memory/YYYY-MM-DD.md` and long-term notes to `MEMORY.md` |
-| `src/memory/compactor.rs` | `CompactState` — periodic in-memory context compaction |
-| `src/ui/mod.rs` | `draw()` — ratatui rendering: header bar, event log / collapsed summary, footer, confirmation popup |
+| `src/main.rs` | Entry point, event loop, `App` struct, async LLM worker spawning |
+| `src/types.rs` | `Event`, `LlmAction`, `TodoItem`, `Mode`, `TodoStatus`, GE-related enums |
+| `src/agent/react.rs` | System prompt template, `parse_llm_response()` for XML-style tool tags |
+| `src/agent/step.rs` | Core step lifecycle: `start_task`, `process_llm_result`, command execution, context compaction |
+| `src/agent/provider.rs` | `Message` type, HTTP client with proxy support, `chat_stream_with()` for streaming API calls |
+| `src/tools/shell.rs` | Command execution (bash on Unix, PowerShell on Windows), command classification (Read/Write/Update/Search/Bash) |
+| `src/tools/safety.rs` | `assess_command()` - three-tier risk: Block (dangerous), Confirm (destructive), Safe (read-only) |
+| `src/tools/mcp.rs` | MCP server discovery (stdio), tool registration, execution, `augment_system_prompt()` |
+| `src/tools/web_search.rs` | Bocha AI integration for internet search |
+| `src/tools/skills.rs` | Skill discovery from `~/.goldbot/skills/*/SKILL.md` |
+| `src/memory/store.rs` | Dual-layer memory: short-term daily logs (`memory/YYYY-MM-DD.md`), long-term (`MEMORY.md`) |
+| `src/memory/compactor.rs` | Context compression logic |
+| `src/ui/screen.rs` | TUI rendering, event emission, status bar |
+| `src/ui/format.rs` | Markdown rendering, event formatting |
+| `src/ui/input.rs` | Keyboard and paste handling |
+| `src/ui/ge.rs` | GE mode-specific UI rendering |
+| `src/consensus/engine.rs` | GE mode state management, interview flow (Purpose/Rules/Scope) |
+| `src/consensus/evaluate.rs` | Multi-model evaluation (Claude → Codex → GoldBot review) |
+| `src/consensus/external.rs` | External LLM API calls for GE workflow |
+| `src/consensus/model.rs` | `Consensus`, `AuditEvent` data structures |
+| `src/consensus/audit.rs` | JSONL audit logging to `GE_LOG.jsonl` |
 
-### Plan Sources
+### LLM Response Format
 
-- **Default (sample):** `sample_plan()` in `src/agent/loop.rs` returns a hardcoded 3-step plan.
-- **Codex provider:** When `GOLDBOT_USE_CODEX=1`, `CodexProvider::build_plan()` calls `codex exec` with a JSON-structured prompt and parses the response. Falls back to sample plan on any error.
-- `GOLDBOT_TASK` env var sets the task description (default: `"整理当前目录并汇总文件信息"`).
+The LLM responds with XML-style tags:
 
-### Memory Files
+```xml
+<thought>reasoning here</thought>
+<tool>shell</tool><command>ls -la</command>
+```
 
-- `memory/YYYY-MM-DD.md` — short-term, one file per day, timestamped entries.
-- `MEMORY.md` — long-term, append-only, one bullet per completed task.
+Supported tools:
+- `shell` - Execute command (risk-assessed)
+- `web_search` - Internet search via Bocha AI
+- `plan` - Render markdown plan to TUI
+- `question` - Ask user with numbered options
+- `mcp_<server>_<tool>` - Call MCP tool
+- `skill` - Load skill content
+- `create_mcp` - Create new MCP server config
+- `todo` - Update todo progress panel
+- `final` - Complete task
 
-### Key Keybindings
+### Memory System
+
+- **Short-term**: `~/.goldbot/memory/YYYY-MM-DD.md` - daily logs
+- **Long-term**: `~/.goldbot/MEMORY.md` - persistent preferences/rules
+- **Injection**: System prompt rebuilt with memory (last 30 long-term + 2 days short-term) on each LLM call
+- **Compaction**: At 48+ messages, old context summarized to `[Context compacted]` block, keeping 18 recent
+
+### GE (GoldBot Enhanced) Mode
+
+Supervision mode for structured development:
+
+1. **Interview** (if no `CONSENSUS.md`): Three questions (Purpose/Rules/Scope)
+2. **Todo Planning**: LLM generates 8-12 granular steps
+3. **Execution**: Claude executes → Codex optimizes → GoldBot reviews
+4. **Auto-commit**: Git commits after each Todo (excludes `GE_LOG.jsonl`)
+5. **Audit log**: All operations logged to `GE_LOG.jsonl`
+
+Trigger with `GE` prefix in input.
+
+### Keybindings
 
 | Key | Action |
 |---|---|
-| `q` | Quit |
-| `d` | Toggle detail/collapsed view (after task completes) |
-| `↑` / `↓` | Navigate confirmation menu |
-| `Enter` | Confirm menu selection |
+| `Ctrl+C` | Quit |
+| `Ctrl+D` | Toggle detail/collapsed view |
+| `Tab` | Toggle native thinking ON/OFF |
+| `↑` / `↓` | Navigate menus |
+| `Enter` | Confirm selection |
+| Type characters | Enter custom input in question menu |
+| `Esc` | Exit input mode |
 
-## Current State Note
+### Environment Variables
 
-`src/agent/loop.rs` has uncommitted changes that removed `plan_from_codex_or_sample()`, but `src/main.rs` still imports and calls it. The project will not compile until this function is restored in `loop.rs` or `main.rs` is updated to call `sample_plan()` directly.
+| Variable | Required | Default | Purpose |
+|---|---|---|
+| `BIGMODEL_API_KEY` | Yes | — | GLM API key |
+| `BIGMODEL_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | API endpoint |
+| `BIGMODEL_MODEL` | No | `GLM-4.7` | Model name |
+| `BOCHA_API_KEY` | No | — | Bocha AI search key |
+| `GOLDBOT_TASK` | No | — | Predefined task on startup |
+| `GOLDBOT_MCP_SERVERS` | No | — | MCP config JSON |
+| `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config path |
+| `HTTP_PROXY` | No | — | HTTP proxy |
+| `API_TIMEOUT_MS` | No | — | Request timeout |
+
+Config stored at `~/.goldbot/.env` (auto-created from template on first run).
