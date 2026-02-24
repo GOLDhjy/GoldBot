@@ -78,12 +78,32 @@ pub(crate) struct App {
     pub todo_items: Vec<crate::types::TodoItem>,
     /// True when launched with -p: auto-quit after task finishes, print final_summary to stdout.
     pub headless: bool,
+
+    // ── @ file picker ──────────────────────────────────────────────────────────
+    /// When `Some`, the @ file picker is active; value is the search query after `@`.
+    pub at_file_query: Option<String>,
+    /// Byte position in `screen.input` immediately after the `@` that opened the picker.
+    pub at_file_at_pos: usize,
+    /// Current file candidates matching `at_file_query`.
+    pub at_file_candidates: Vec<std::path::PathBuf>,
+    /// Index of the selected candidate in `at_file_candidates`.
+    pub at_file_sel: usize,
+    /// Files attached to the current input via @ selection, waiting to be sent with the message.
+    pub at_file_chunks: Vec<AtFileChunk>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PasteChunk {
     pub placeholder: String,
     pub content: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AtFileChunk {
+    /// The placeholder token inserted into the input, e.g. `[@src/main.rs]`.
+    pub placeholder: String,
+    /// Resolved path to the file (relative to workspace).
+    pub path: std::path::PathBuf,
 }
 
 impl App {
@@ -157,6 +177,11 @@ impl App {
             todo_items: Vec::new(),
             backend: LlmBackend::from_env(),
             headless: false,
+            at_file_query: None,
+            at_file_at_pos: 0,
+            at_file_candidates: Vec::new(),
+            at_file_sel: 0,
+            at_file_chunks: Vec::new(),
         }
     }
 }

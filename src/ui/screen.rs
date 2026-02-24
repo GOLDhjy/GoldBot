@@ -43,6 +43,10 @@ pub(crate) struct Screen {
     cursor_at_prompt: bool,
     /// 上次 draw_managed 渲染的状态行数，用于 refresh_status_only 定位
     last_status_rows: usize,
+    /// @ 文件选择器：待显示的候选文件路径（相对路径字符串）
+    pub at_file_labels: Vec<String>,
+    /// @ 文件选择器：当前选中的索引
+    pub at_file_sel: usize,
 }
 
 impl Screen {
@@ -64,6 +68,8 @@ impl Screen {
             spinner_tick: 0,
             cursor_at_prompt: false,
             last_status_rows: 1,
+            at_file_labels: Vec::new(),
+            at_file_sel: 0,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -129,6 +135,9 @@ impl Screen {
         // ── Todo panel (topmost in managed area) ──
         let todo_rows = self.draw_todo_panel(cols);
 
+        // ── @ file picker panel ──
+        let at_file_rows = self.draw_at_file_panel(cols);
+
         // 进入渲染前先隐藏光标，避免渲染过程中闪烁
         let _ = execute!(self.stdout, cursor::Hide);
 
@@ -165,7 +174,7 @@ impl Screen {
             }
             let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = todo_rows + display_labels.len() + 1;
+            self.managed_lines = todo_rows + at_file_rows + display_labels.len() + 1;
         } else {
             let sym = Symbols::current();
             let spinner_frame = sym.spinner_frames[self.spinner_tick as usize % sym.spinner_frames.len()];
@@ -218,7 +227,7 @@ impl Screen {
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
-            self.managed_lines = todo_rows + status_rows + 2;
+            self.managed_lines = todo_rows + at_file_rows + status_rows + 2;
 
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示
@@ -280,6 +289,48 @@ impl Screen {
         rows
     }
 
+    /// Render the @ file picker panel below the todo panel.
+    /// Returns the number of terminal rows consumed.
+    fn draw_at_file_panel(&mut self, cols: usize) -> usize {
+        if self.at_file_labels.is_empty() {
+            return 0;
+        }
+
+        let sym = Symbols::current();
+        let count = self.at_file_labels.len();
+        let header = format!("  {} 文件 ({count})", sym.arrow_down);
+        let _ = execute!(self.stdout, Print(format!("{}\r\n", header.grey())));
+
+        let max_visible = 8.min(count);
+        // Sliding window: keep selected item visible
+        let half = max_visible / 2;
+        let start = if self.at_file_sel > half {
+            (self.at_file_sel - half).min(count.saturating_sub(max_visible))
+        } else {
+            0
+        };
+        let end = (start + max_visible).min(count);
+
+        let budget = cols.saturating_sub(6);
+        let mut rows = 1; // header row
+        for i in start..end {
+            let label = &self.at_file_labels[i];
+            let trimmed = fit_single_line_tail(label, budget);
+            let line = if i == self.at_file_sel {
+                format!(
+                    "  {} {}\r\n",
+                    sym.prompt.cyan().bold(),
+                    trimmed.bold().white()
+                )
+            } else {
+                format!("    {}\r\n", trimmed).grey().to_string()
+            };
+            let _ = execute!(self.stdout, Print(line));
+            rows += 1;
+        }
+        rows
+    }
+
     pub(crate) fn emit(&mut self, lines: &[String]) {
         self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
         self.task_rendered.extend(lines.iter().cloned());
@@ -299,7 +350,7 @@ impl Screen {
     /// 仅适用于 spinner 跳帧和思考预览更新场景。
     /// 若行数发生变化或处于确认/todo 界面，则回退到完整 refresh()。
     pub(crate) fn refresh_status_only(&mut self) {
-        if self.confirm_selected.is_some() || !self.todo_items.is_empty() {
+        if self.confirm_selected.is_some() || !self.todo_items.is_empty() || !self.at_file_labels.is_empty() {
             self.refresh();
             return;
         }

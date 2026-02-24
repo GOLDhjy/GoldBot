@@ -6,7 +6,7 @@ use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
 use crate::ui::screen::Screen;
-use crate::{App, PasteChunk};
+use crate::{App, AtFileChunk, PasteChunk};
 
 // ── Key handling ──────────────────────────────────────────────────────────────
 
@@ -268,26 +268,95 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 
 fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     if screen.input_focused {
+        // ── @ file picker intercepts navigation keys first ──
+        if app.at_file_query.is_some() {
+            match key {
+                KeyCode::Up => {
+                    app.at_file_sel = app.at_file_sel.saturating_sub(1);
+                    screen.at_file_sel = app.at_file_sel;
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Down => {
+                    let max = app.at_file_candidates.len().saturating_sub(1);
+                    app.at_file_sel = (app.at_file_sel + 1).min(max);
+                    screen.at_file_sel = app.at_file_sel;
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    if app.at_file_candidates.is_empty() {
+                        cancel_at_file_mode(app, screen);
+                    } else {
+                        select_at_file(app, screen);
+                    }
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Esc if modifiers.is_empty() => {
+                    cancel_at_file_mode(app, screen);
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Backspace => {
+                    let query = app.at_file_query.as_mut().unwrap();
+                    if query.is_empty() {
+                        // Remove the @ from input and exit picker
+                        screen.input.pop();
+                        cancel_at_file_mode(app, screen);
+                    } else {
+                        query.pop();
+                        screen.input.pop();
+                        let q = query.clone();
+                        update_at_file_candidates(app, screen, &q);
+                    }
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                    let query = app.at_file_query.as_mut().unwrap();
+                    query.push(c);
+                    screen.input.push(c);
+                    let q = query.clone();
+                    update_at_file_candidates(app, screen, &q);
+                    screen.refresh();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key {
             KeyCode::Enter => {
                 let task = expand_input_text(app, &screen.input).trim().to_string();
                 if !task.is_empty() {
+                    // Build final task with attached file contents before clearing state
+                    let at_file_chunks = std::mem::take(&mut app.at_file_chunks);
+                    cancel_at_file_mode(app, screen);
+                    let final_task = attach_files_to_task(&at_file_chunks, &task);
                     clear_input_buffer(app, screen);
                     if app.answering_question {
                         app.answering_question = false;
                         screen.status.clear();
-                        submit_question_answer(app, screen, task);
+                        submit_question_answer(app, screen, final_task);
                     } else {
-                        submit_user_input(app, screen, task);
+                        submit_user_input(app, screen, final_task);
                     }
                 }
             }
             KeyCode::Esc if modifiers.is_empty() => {
-                screen.input_focused = false;
+                if app.at_file_query.is_some() {
+                    cancel_at_file_mode(app, screen);
+                } else {
+                    screen.input_focused = false;
+                }
                 screen.refresh();
             }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input.push(c);
+                if c == '@' {
+                    enter_at_file_mode(app, screen);
+                }
                 screen.refresh();
             }
             KeyCode::Backspace => {
@@ -308,6 +377,9 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input_focused = true;
                 screen.input.push(c);
+                if c == '@' {
+                    enter_at_file_mode(app, screen);
+                }
                 screen.refresh();
             }
             KeyCode::Backspace => {
@@ -623,4 +695,139 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
         screen.input_focused = true;
     }
     screen.refresh();
+}
+
+// ── @ file picker ─────────────────────────────────────────────────────────────
+
+/// Enter @ file picker mode: record the cursor position, run the initial (empty) search.
+fn enter_at_file_mode(app: &mut App, screen: &mut Screen) {
+    app.at_file_at_pos = screen.input.len(); // byte offset immediately after '@'
+    app.at_file_query = Some(String::new());
+    app.at_file_sel = 0;
+    update_at_file_candidates(app, screen, "");
+}
+
+/// Exit @ file picker mode without selecting a file (clears picker state, leaves input intact).
+fn cancel_at_file_mode(app: &mut App, screen: &mut Screen) {
+    app.at_file_query = None;
+    app.at_file_candidates.clear();
+    app.at_file_sel = 0;
+    screen.at_file_labels.clear();
+    screen.at_file_sel = 0;
+}
+
+/// Re-run the file search for `query` and update App + Screen state.
+fn update_at_file_candidates(app: &mut App, screen: &mut Screen, query: &str) {
+    app.at_file_candidates = search_files(&app.workspace, query);
+    app.at_file_sel = 0;
+    screen.at_file_sel = 0;
+    screen.at_file_labels = app
+        .at_file_candidates
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+}
+
+/// Confirm the currently highlighted candidate: replace `@{query}` in the input with a
+/// placeholder token, record the file chunk, then exit picker mode.
+fn select_at_file(app: &mut App, screen: &mut Screen) {
+    let sel = app.at_file_sel;
+    let Some(rel_path) = app.at_file_candidates.get(sel).cloned() else {
+        cancel_at_file_mode(app, screen);
+        return;
+    };
+
+    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    let placeholder = format!("[@{}]", rel_str);
+
+    // Replace "@{query}" portion of screen.input (from the @ position onwards) with placeholder
+    let at_pos = app.at_file_at_pos; // byte position just after '@'
+    // at_pos - 1 is where '@' sits; everything from there to the end is "@query"
+    let replace_start = at_pos.saturating_sub(1);
+    screen.input.truncate(replace_start);
+    screen.input.push_str(&placeholder);
+
+    // Store absolute path so read works regardless of CWD changes
+    let abs_path = app.workspace.join(&rel_path);
+    app.at_file_chunks.push(AtFileChunk { placeholder, path: abs_path });
+    cancel_at_file_mode(app, screen);
+}
+
+/// Append the content of all attached files to the task string.
+fn attach_files_to_task(chunks: &[AtFileChunk], task: &str) -> String {
+    if chunks.is_empty() {
+        return task.to_string();
+    }
+    let mut result = task.to_string();
+    for chunk in chunks {
+        let rel = chunk.path.to_string_lossy().replace('\\', "/");
+        match std::fs::read_to_string(&chunk.path) {
+            Ok(content) => {
+                result.push_str(&format!(
+                    "\n\n--- {} ({}) ---\n{content}\n--- end {} ---",
+                    chunk.placeholder, rel, rel
+                ));
+            }
+            Err(e) => {
+                result.push_str(&format!(
+                    "\n\n--- {} 读取失败: {e} ---",
+                    chunk.placeholder
+                ));
+            }
+        }
+    }
+    result
+}
+
+/// Search files under `workspace` whose name contains `query` (case-insensitive).
+/// Returns at most 8 relative paths, sorted by path depth then alphabetically.
+fn search_files(workspace: &std::path::Path, query: &str) -> Vec<std::path::PathBuf> {
+    let query_lower = query.to_lowercase();
+    let mut results: Vec<std::path::PathBuf> = Vec::new();
+    collect_files_recursive(workspace, workspace, &query_lower, &mut results, 0);
+    // Sort: shallower paths first, then alphabetically
+    results.sort_by(|a, b| {
+        let da = a.components().count();
+        let db = b.components().count();
+        da.cmp(&db).then_with(|| a.cmp(b))
+    });
+    results.truncate(8);
+    results
+}
+
+/// Recursively collect files matching `query` under `dir` (relative to `base`).
+fn collect_files_recursive(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    query: &str,
+    results: &mut Vec<std::path::PathBuf>,
+    depth: usize,
+) {
+    if depth > 6 || results.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        // Skip hidden entries and common large/non-source directories
+        if name.starts_with('.') || matches!(name, "target" | "node_modules" | "dist" | "build") {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files_recursive(base, &path, query, results, depth + 1);
+        } else if path.is_file() {
+            let name_lower = name.to_lowercase();
+            if (query.is_empty() || name_lower.contains(query))
+                && let Ok(rel) = path.strip_prefix(base)
+            {
+                results.push(rel.to_path_buf());
+            }
+        }
+    }
 }
