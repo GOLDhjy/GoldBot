@@ -592,7 +592,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
+    out.push_str(crate::ui::symbols::Symbols::current().ellipsis);
     out
 }
 

@@ -197,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
         screen.emit(&[
             format!(
                 "  {} BIGMODEL_API_KEY 未配置，请编辑: {}",
-                crossterm::style::Stylize::yellow("⚠"),
+                crossterm::style::Stylize::yellow(crate::ui::symbols::Symbols::current().warning),
                 env_path.display()
             ),
             String::new(),
@@ -294,7 +294,7 @@ async fn run_loop(
             app.llm_calling = true;
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
-            screen.status = "⏳ Thinking...".to_string();
+            screen.status = "Thinking...".to_string();
             screen.refresh();
 
             let tx_done = tx.clone();
@@ -323,7 +323,7 @@ async fn run_loop(
         screen.is_running = app.running;
         if app.running && last_spinner_refresh.elapsed() >= Duration::from_millis(400) {
             screen.spinner_tick = screen.spinner_tick.wrapping_add(1);
-            screen.refresh();
+            screen.refresh_status_only();
             last_spinner_refresh = std::time::Instant::now();
         }
 

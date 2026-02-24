@@ -63,7 +63,8 @@ pub(crate) fn process_llm_result(
             let msg = e.to_string();
             // Empty-content errors are often transient; retry once automatically.
             if msg.contains("empty content") {
-                screen.status = "⚠ API 返回空响应，自动重试…".dark_yellow().to_string();
+                let sym = crate::ui::symbols::Symbols::current();
+                screen.status = format!("{} API 返回空响应，自动重试{}", sym.warning, sym.ellipsis).dark_yellow().to_string();
                 screen.refresh();
                 app.needs_agent_executor = true;
                 return;
@@ -595,8 +596,8 @@ pub(crate) fn handle_llm_thinking_delta(app: &mut App, screen: &mut Screen, chun
     }
 
     app.llm_preview_shown = preview.clone();
-    screen.status = format!("⏳ {}", preview);
-    screen.refresh();
+    screen.status = preview;
+    screen.refresh_status_only();
 }
 
 pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
@@ -632,8 +633,8 @@ pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta:
     }
 
     app.llm_preview_shown = preview.clone();
-    screen.status = format!("⏳ {}", preview);
-    screen.refresh();
+    screen.status = preview;
+    screen.refresh_status_only();
 }
 
 fn extract_live_preview(raw: &str) -> String {

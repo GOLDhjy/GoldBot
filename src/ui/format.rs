@@ -4,12 +4,14 @@ use crossterm::style::Stylize;
 use unicode_width::UnicodeWidthStr;
 
 use crate::types::Event;
+use crate::ui::symbols::Symbols;
 
 pub(crate) fn format_event(event: &Event) -> Vec<String> {
+    let sym = Symbols::current();
     match event {
         Event::UserTask { text } => lines_with(text, |i, line| {
             if i == 0 {
-                format!("❯ {}", line).bold().to_string()
+                format!("{} {}", sym.prompt, line).bold().to_string()
             } else {
                 format!("  {}", line)
             }
@@ -18,7 +20,7 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             format!("  {}", line).grey().to_string()
         }),
         Event::ToolCall { label, command } => {
-            let mut lines = vec![format!("  ⏺ {}", label).cyan().to_string()];
+            let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
             lines.extend(lines_with(command, |_, line| {
                 format!("    {}", line).grey().to_string()
             }));
@@ -27,24 +29,24 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
         Event::ToolResult { output, exit_code } => {
             let ok = *exit_code == 0;
             lines_with(output, |i, line| {
-                let pfx = if i == 0 { "  ⎿ " } else { "    " };
+                let pfx = if i == 0 { format!("  {} ", sym.corner) } else { "    ".to_string() };
                 if !ok {
-                    format!("{pfx}{line}").red().to_string()
+                    format!("{}{}", pfx, line).red().to_string()
                 } else {
-                    style_tool_result_line(pfx, line)
+                    style_tool_result_line(&pfx, line)
                 }
             })
         }
         Event::NeedsConfirmation { command, reason } => {
             let mut lines = vec![
-                format!("  ⏺ {}", reason).cyan().bold().to_string(),
-                "  ⚠ 需要确认".dark_yellow().to_string(),
+                format!("  {} {}", sym.record, reason).cyan().bold().to_string(),
+                format!("  {} 需要确认", sym.warning).dark_yellow().to_string(),
             ];
             for line in command.lines().take(6) {
                 lines.push(format!("    {}", line).cyan().to_string());
             }
             if command.lines().count() > 6 {
-                lines.push("    …".grey().to_string());
+                lines.push(format!("    {}", sym.ellipsis).grey().to_string());
             }
             lines
         }
@@ -53,6 +55,7 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
 }
 
 pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
+    let sym = Symbols::current();
     match event {
         Event::UserTask { .. } | Event::Final { .. } => format_event(event),
         Event::Thinking { text } => {
@@ -66,7 +69,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
         Event::ToolCall { label, command } => {
             let first = command.lines().next().unwrap_or(command.as_str());
             vec![
-                format!("  ⏺ {}", label).cyan().to_string(),
+                format!("  {} {}", sym.record, label).cyan().to_string(),
                 format!("    {}", first)
                     .grey()
                     .to_string(),
@@ -82,20 +85,21 @@ pub(crate) fn emit_live_event(screen: &mut super::screen::Screen, event: &Event)
 }
 
 pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
+    let sym = Symbols::current();
     match event {
         Event::Thinking { .. } => Vec::new(),
-        Event::ToolCall { label, .. } => vec![format!("  • {}", label).cyan().to_string()],
+        Event::ToolCall { label, .. } => vec![format!("  {} {}", sym.bullet, label).cyan().to_string()],
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
         Event::NeedsConfirmation { command, reason } => {
             let mut lines = vec![
-                format!("  ⏺ {}", reason).cyan().bold().to_string(),
-                "    ⚠ 需要确认".dark_yellow().to_string(),
+                format!("  {} {}", sym.record, reason).cyan().bold().to_string(),
+                format!("    {} 需要确认", sym.warning).dark_yellow().to_string(),
             ];
             for line in command.lines().take(4) {
                 lines.push(format!("      {}", shorten_text(line, 72)).cyan().to_string());
             }
             if command.lines().count() > 4 {
-                lines.push("      …".grey().to_string());
+                lines.push(format!("      {}", sym.ellipsis).grey().to_string());
             }
             lines
         }
@@ -319,13 +323,13 @@ fn format_bullet_line(item: &str) -> String {
         let value = render_inline_markdown(value);
         return format!(
             "    {} {}{} {}",
-            "•".grey(),
+            crate::ui::symbols::Symbols::current().bullet.grey(),
             key.bold().yellow(),
             sep,
             value
         );
     }
-    format!("    {} {}", "•".grey(), render_inline_markdown(item))
+    format!("    {} {}", crate::ui::symbols::Symbols::current().bullet.grey(), render_inline_markdown(item))
 }
 
 /// Detects our line-numbered diff format: `"NNN - content"` or `"NNN + content"`.
@@ -537,21 +541,21 @@ fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
     let mut summary = Vec::new();
     if let Some(fs) = parse_fs_changes(output) {
         if !fs.created.is_empty() {
-            summary.push(format!("    ⎿ created: {}", summarize_paths(&fs.created)));
+            summary.push(format!("    {} created: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.created)));
         }
         if !fs.updated.is_empty() {
-            summary.push(format!("    ⎿ updated: {}", summarize_paths(&fs.updated)));
+            summary.push(format!("    {} updated: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.updated)));
         }
         if !fs.deleted.is_empty() {
-            summary.push(format!("    ⎿ deleted: {}", summarize_paths(&fs.deleted)));
+            summary.push(format!("    {} deleted: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.deleted)));
         }
     }
 
     if summary.is_empty() {
         if let Some(line) = first_non_empty_line(output) {
-            summary.push(format!("    ⎿ {}", shorten_text(line, 110)));
+            summary.push(format!("    {} {}", crate::ui::symbols::Symbols::current().corner, shorten_text(line, 110)));
         } else {
-            summary.push("    ⎿ (no output)".to_string());
+            summary.push(format!("    {} (no output)", crate::ui::symbols::Symbols::current().corner));
         }
     }
 
@@ -730,7 +734,7 @@ pub(crate) fn shorten_text(s: &str, max_chars: usize) -> String {
         return trimmed.to_string();
     }
     let mut out: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
+    out.push_str(Symbols::current().ellipsis);
     out
 }
 
@@ -784,7 +788,7 @@ pub(crate) fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
                 }
 
                 if count >= 2 {
-                    let summary = format!("  • Reading {count} files... (Ctrl+d 查看详情)");
+                    let summary = format!("  {} Reading {count} files... (Ctrl+d 查看详情)", crate::ui::symbols::Symbols::current().bullet);
                     if had_error {
                         lines.push(summary.red().to_string());
                     } else {

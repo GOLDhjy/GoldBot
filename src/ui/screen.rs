@@ -8,6 +8,7 @@ use crossterm::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::types::{AutoAccept, TodoItem, TodoStatus};
+use crate::ui::symbols::Symbols;
 
 pub(crate) const TITLE_BANNER: [&str; 5] = [
     "   ____       _     _ ____        _   ",
@@ -16,8 +17,6 @@ pub(crate) const TITLE_BANNER: [&str; 5] = [
     " | |_| | (_) | | (_| | |_) | (_) | |_ ",
     "  \\____|\\___/|_|\\__,_|____/ \\___/ \\__|",
 ];
-
-const SPINNER_FRAMES: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 pub(crate) struct Screen {
     stdout: io::Stdout,
@@ -42,6 +41,8 @@ pub(crate) struct Screen {
     pub spinner_tick: u64,
     /// 光标是否已从 hint 行上移到 prompt 行（影响 clear_managed 的起点计算）
     cursor_at_prompt: bool,
+    /// 上次 draw_managed 渲染的状态行数，用于 refresh_status_only 定位
+    last_status_rows: usize,
 }
 
 impl Screen {
@@ -62,6 +63,7 @@ impl Screen {
             is_running: false,
             spinner_tick: 0,
             cursor_at_prompt: false,
+            last_status_rows: 1,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -97,7 +99,7 @@ impl Screen {
             cursor::MoveToColumn(0),
             Clear(ClearType::CurrentLine),
             Print("\r\n"),
-            Print("❯ ")
+            Print(format!("{} ", Symbols::current().prompt))
         )?;
         let _ = execute!(s.stdout, cursor::Hide);
         s.stdout.flush()?;
@@ -131,13 +133,14 @@ impl Screen {
         let _ = execute!(self.stdout, cursor::Hide);
 
         if let Some(selected) = self.confirm_selected {
-            let (labels, hint): (&[&str], &str) = if self.question_labels.is_empty() {
+            let sym = Symbols::current();
+            let (labels, hint): (&[&str], String) = if self.question_labels.is_empty() {
                 (
                     &["Execute", "Skip", "Abort", "Add Note"],
-                    "❯ 直接输入补充说明，或 ↑/↓ 选择后 Enter",
+                    format!("{} 直接输入补充说明，或 ↑/↓ 选择后 Enter", sym.prompt),
                 )
             } else {
-                (&[], "❯ ↑/↓ 选择，Enter 确认，或直接输入自定义内容")
+                (&[], format!("{} ↑/↓ 选择，Enter 确认，或直接输入自定义内容", sym.prompt))
             };
 
             let display_labels: Vec<String> = if self.question_labels.is_empty() {
@@ -151,7 +154,7 @@ impl Screen {
                 let line = if i == selected {
                     format!(
                         "  {} {} {}\r\n",
-                        "❯".cyan().bold(),
+                        sym.prompt.cyan().bold(),
                         num.cyan().bold(),
                         label.clone().bold().white()
                     )
@@ -160,16 +163,15 @@ impl Screen {
                 };
                 let _ = execute!(self.stdout, Print(line));
             }
-            let hint = fit_single_line_tail(hint, cols);
+            let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
             self.managed_lines = todo_rows + display_labels.len() + 1;
         } else {
-            let spinner_frame = SPINNER_FRAMES[self.spinner_tick as usize % SPINNER_FRAMES.len()];
+            let sym = Symbols::current();
+            let spinner_frame = sym.spinner_frames[self.spinner_tick as usize % sym.spinner_frames.len()];
             let status_display = if self.is_running {
                 let label = if self.status.is_empty() {
                     "Working...".to_string()
-                } else if let Some(rest) = self.status.strip_prefix("⏳ ") {
-                    rest.to_string()
                 } else {
                     self.status.clone()
                 };
@@ -178,11 +180,7 @@ impl Screen {
                 self.status.clone()
             };
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
-            let max_status_lines = if self.is_running || self.status.starts_with("⏳ ") {
-                3
-            } else {
-                1
-            };
+            let max_status_lines = if self.is_running { 3 } else { 1 };
             let status_lines =
                 split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
             let status_rows = if status_lines.is_empty() {
@@ -190,6 +188,7 @@ impl Screen {
             } else {
                 status_lines.len()
             };
+            self.last_status_rows = status_rows;
             if status_lines.is_empty() {
                 let _ = execute!(self.stdout, Print("\r\n"));
             } else {
@@ -197,23 +196,24 @@ impl Screen {
                     let _ = execute!(self.stdout, Print(format!("  {}\r\n", line)));
                 }
             }
-            let input_budget = cols.saturating_sub(rendered_text_width("❯ "));
+            let prompt_str = format!("{} ", sym.prompt);
+            let input_budget = cols.saturating_sub(rendered_text_width(&prompt_str));
             let shown_input = fit_single_line_tail(&self.input, input_budget);
             let prompt = if self.input_focused {
-                format!("❯ {}", shown_input)
+                format!("{}{}", prompt_str, shown_input)
             } else {
-                format!("❯ {}", shown_input).grey().to_string()
+                format!("{}{}", prompt_str, shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(format!("{}\r\n", prompt)));
             let accept_hint = match self.auto_accept {
                 AutoAccept::Off => format!(
-                    "  {}{}",
-                    "⏵ accept edits off".dark_grey(),
+                    "  {} accept edits off{}",
+                    sym.arrow_right.dark_grey(),
                     "(shift+tab to cycle)".dark_grey()
                 ),
                 AutoAccept::AcceptEdits => format!(
-                    "  {}{}",
-                    "⏵⏵ accept edits on".green().bold(),
+                    "  {} accept edits on{}",
+                    format!("{}{}", sym.arrow_right, sym.arrow_right).green().bold(),
                     "(shift+tab to cycle)".dark_grey()
                 ),
             };
@@ -223,7 +223,7 @@ impl Screen {
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示
             if self.input_focused {
-                let input_col = (rendered_text_width("❯ ") + rendered_text_width(&shown_input))
+                let input_col = (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
                     .min(u16::MAX as usize) as u16;
                 let _ = execute!(
                     self.stdout,
@@ -244,10 +244,11 @@ impl Screen {
             return 0;
         }
 
+        let sym = Symbols::current();
         // Count stats
         let total = self.todo_items.len();
         let done = self.todo_items.iter().filter(|t| t.status == TodoStatus::Done).count();
-        let header = format!("  {} Todos ({}/{})", "▼".grey(), done, total);
+        let header = format!("  {} Todos ({}/{})", sym.arrow_down.grey(), done, total);
         let _ = execute!(self.stdout, Print(format!("{}\r\n", header.grey())));
 
         let budget = cols.saturating_sub(rendered_text_width("      "));
@@ -255,15 +256,15 @@ impl Screen {
         for item in &self.todo_items {
             let (icon, styled_label) = match item.status {
                 TodoStatus::Done => (
-                    "\u{2705}".to_string(), // ✅
+                    sym.check.to_string(),
                     item.label.as_str().green().to_string(),
                 ),
                 TodoStatus::Running => (
-                    "\u{25CE}".to_string(), // ◎
+                    sym.running.to_string(),
                     item.label.as_str().bold().white().to_string(),
                 ),
                 TodoStatus::Pending => (
-                    "\u{25CB}".to_string(), // ○
+                    sym.pending.to_string(),
                     item.label.as_str().grey().to_string(),
                 ),
             };
@@ -292,6 +293,92 @@ impl Screen {
     pub(crate) fn refresh(&mut self) {
         self.clear_managed();
         self.draw_managed();
+    }
+
+    /// 只原地刷新状态行，不动输入栏和 hint 行，避免光标在两行之间跳动。
+    /// 仅适用于 spinner 跳帧和思考预览更新场景。
+    /// 若行数发生变化或处于确认/todo 界面，则回退到完整 refresh()。
+    pub(crate) fn refresh_status_only(&mut self) {
+        if self.confirm_selected.is_some() || !self.todo_items.is_empty() {
+            self.refresh();
+            return;
+        }
+
+        let cols = crossterm::terminal::size()
+            .map(|(c, _)| c.max(1) as usize)
+            .unwrap_or(80);
+        let sym = Symbols::current();
+        let spinner_frame =
+            sym.spinner_frames[self.spinner_tick as usize % sym.spinner_frames.len()];
+
+        let status_display = if self.is_running {
+            let label = if self.status.is_empty() {
+                "Working...".to_string()
+            } else {
+                self.status.clone()
+            };
+            format!("{} {}", spinner_frame.cyan().bold(), label)
+        } else {
+            self.status.clone()
+        };
+
+        let max_status_lines = if self.is_running { 3 } else { 1 };
+        let status_budget = cols.saturating_sub(rendered_text_width("  "));
+        let new_lines =
+            split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
+        let new_rows = new_lines.len().max(1);
+
+        // 行数变了需要全刷（否则会错位）
+        if new_rows != self.last_status_rows {
+            self.refresh();
+            return;
+        }
+
+        // 从当前光标位置（prompt 行 or hint 行）向上定位到第一条状态行
+        let up = if self.cursor_at_prompt {
+            new_rows as u16
+        } else {
+            (new_rows + 1) as u16
+        };
+
+        let _ = execute!(
+            self.stdout,
+            cursor::Hide,
+            cursor::MoveToColumn(0),
+            cursor::MoveUp(up)
+        );
+
+        if new_lines.is_empty() {
+            let _ = execute!(
+                self.stdout,
+                Clear(ClearType::CurrentLine),
+                Print("\r\n")
+            );
+        } else {
+            for line in &new_lines {
+                let _ = execute!(
+                    self.stdout,
+                    Clear(ClearType::CurrentLine),
+                    Print(format!("  {}\r\n", line))
+                );
+            }
+        }
+
+        // 打印完状态行后，光标位于 prompt 行开头，恢复到原来位置
+        if self.cursor_at_prompt {
+            let prompt_str = format!("{} ", sym.prompt);
+            let input_budget = cols.saturating_sub(rendered_text_width(&prompt_str));
+            let shown_input = fit_single_line_tail(&self.input, input_budget);
+            let input_col =
+                (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
+                    .min(u16::MAX as usize) as u16;
+            let _ = execute!(self.stdout, cursor::MoveToColumn(input_col), cursor::Show);
+        } else {
+            // 移回 hint 行（仅向下一行，不显示光标）
+            let _ = execute!(self.stdout, cursor::MoveDown(1));
+        }
+
+        let _ = self.stdout.flush();
     }
 
     pub(crate) fn reset_task_lines(&mut self) {
@@ -407,10 +494,10 @@ pub(crate) fn fit_single_line_tail(s: &str, max_width: usize) -> String {
         return plain;
     }
 
-    const ELLIPSIS: char = '…';
-    let ellipsis_width = UnicodeWidthChar::width(ELLIPSIS).unwrap_or(1);
+    let ellipsis = Symbols::current().ellipsis;
+    let ellipsis_width = rendered_text_width(ellipsis);
     if max_width <= ellipsis_width {
-        return ELLIPSIS.to_string();
+        return ellipsis.to_string();
     }
     let budget = max_width - ellipsis_width;
 
@@ -433,7 +520,7 @@ pub(crate) fn fit_single_line_tail(s: &str, max_width: usize) -> String {
 
     kept_rev.reverse();
     let mut out = String::new();
-    out.push(ELLIPSIS);
+    out.push_str(ellipsis);
     out.extend(kept_rev);
     out
 }
@@ -500,7 +587,8 @@ pub(crate) fn split_tail_lines_by_width(
     let mut tail = wrapped[wrapped.len() - max_lines..].to_vec();
     if let Some(first) = tail.first_mut() {
         let plain = strip_ansi(first);
-        *first = fit_single_line_tail(&format!("…{}", plain), max_width);
+        let ellipsis = Symbols::current().ellipsis;
+        *first = fit_single_line_tail(&format!("{}{}", ellipsis, plain), max_width);
     }
     tail
 }
@@ -515,17 +603,17 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
         .map(|(c, _)| c.max(1) as usize)
         .unwrap_or(80);
     let prefix = "  Skills  ";
-    let sep = " · ";
+    let sep = format!(" {} ", Symbols::current().dot);
     let mut budget = cols.saturating_sub(rendered_text_width(prefix));
 
     let mut shown: Vec<String> = Vec::new();
     for (i, name) in names.iter().enumerate() {
-        let needed = if i == 0 { 0 } else { rendered_text_width(sep) };
+        let needed = if i == 0 { 0 } else { rendered_text_width(&sep) };
         let name_w = rendered_text_width(name);
         let remaining = names.len() - i;
         // Reserve space for "+N more" if we can't fit all remaining.
         let more_w = if remaining > 1 {
-            rendered_text_width(sep) + rendered_text_width(&format!("+{}", remaining - 1))
+            rendered_text_width(&sep) + rendered_text_width(&format!("+{}", remaining - 1))
         } else {
             0
         };
@@ -547,14 +635,13 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     ))
 }
 
-
 /// Format the MCP discovery result as a single styled line for `Screen::emit()`.
 /// Returns `None` if there are no servers at all.
 pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) -> Option<String> {
     if ok.is_empty() && failed.is_empty() {
         return None;
     }
-    let sep = " · ".grey().to_string();
+    let sep = format!(" {} ", Symbols::current().dot).grey().to_string();
     let mut parts: Vec<String> = ok
         .iter()
         .map(|(name, _)| name.as_str().dark_cyan().to_string())
