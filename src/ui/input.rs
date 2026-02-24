@@ -2,7 +2,7 @@ use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
 use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
-use crate::types::{Event, Mode};
+use crate::types::{AutoAccept, Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
 use crate::ui::screen::Screen;
@@ -89,6 +89,16 @@ pub(crate) fn handle_key(
             screen.status = label;
             screen.refresh();
         }
+        return false;
+    }
+    if key == KeyCode::BackTab
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && screen.confirm_selected.is_none()
+        && !app.pending_confirm_note
+    {
+        app.auto_accept = app.auto_accept.cycle();
+        screen.auto_accept = app.auto_accept;
+        screen.refresh();
         return false;
     }
 

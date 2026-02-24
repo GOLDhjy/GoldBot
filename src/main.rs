@@ -26,7 +26,7 @@ use crossterm::{
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
-use types::{Event, Mode};
+use types::{AutoAccept, Event, Mode};
 use ui::ge::drain_ge_events;
 use ui::input::{handle_key, handle_paste};
 use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
@@ -71,6 +71,8 @@ pub(crate) struct App {
     /// Cleared (and the message removed) after the first LLM response is received.
     pub has_memory_message: bool,
     pub mode: Mode,
+    pub auto_accept: AutoAccept,
+    pub workspace: std::path::PathBuf,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
     pub todo_items: Vec<crate::types::TodoItem>,
 }
@@ -95,9 +97,19 @@ impl App {
         // MCP tools are appended later after background discovery.
         let skills_section = skills_system_prompt(&skills);
         let base_prompt = format!("{}{skills_section}", build_system_prompt());
+
+        // Determine workspace: GOLDBOT_WORKSPACE env var, or current directory.
+        let workspace = std::env::var("GOLDBOT_WORKSPACE")
+            .ok()
+            .and_then(|p| std::fs::canonicalize(&p).ok().or_else(|| Some(std::path::PathBuf::from(p))))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // chdir into workspace so all shell commands run relative to it.
+        let _ = std::env::set_current_dir(&workspace);
+
         // messages[1] = 固定 assistant 提示词，永久保留。
         // 第一次请求时把当日记忆拼在后面一起发；收到回复后截断，只留固定部分。
-        let base_ctx = build_assistant_context();
+        let base_ctx = build_assistant_context(&workspace);
         let memory = store.build_memory_message();
         let has_memory_message = memory.is_some();
         let first_ctx = match memory {
@@ -136,6 +148,8 @@ impl App {
             base_prompt,
             has_memory_message,
             mode: Mode::Normal,
+            auto_accept: AutoAccept::Off,
+            workspace,
             ge_agent: None,
             todo_items: Vec::new(),
         }
@@ -161,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnableBracketedPaste)?;
     let mut screen = Screen::new()?;
+    screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
 
     // Warn if required API key is missing and show .env path.
     if std::env::var("BIGMODEL_API_KEY").is_err() {

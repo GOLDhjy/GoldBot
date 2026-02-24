@@ -346,6 +346,11 @@ fn looks_update(trimmed: &str, lower: &str) -> bool {
             &[
                 "rm ", "mv ", "cp ", "mkdir ", "rmdir ", "chmod ", "chown ", "sed -i", "perl -pi",
                 "git add ", "git rm ", "git mv ",
+                // Windows PowerShell write commands
+                "set-content ", "sc ", "out-file ", "add-content ", "ac ",
+                "new-item ", "ni ", "remove-item ", "ri ",
+                "copy-item ", "cpi ", "move-item ", "mi ",
+                "rename-item ", "rni ", "clear-content ", "clc ", "clear-item ",
             ],
         )
 }

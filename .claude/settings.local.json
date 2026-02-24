@@ -4,7 +4,9 @@
       "Bash(cargo check:*)",
       "Bash(git checkout:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)"
     ]
   }
 }

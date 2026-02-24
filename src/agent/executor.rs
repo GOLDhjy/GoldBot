@@ -5,7 +5,7 @@ use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::store::MemoryStore;
 use crate::tools::safety::{RiskLevel, assess_command};
-use crate::types::{Event, LlmAction, Mode};
+use crate::types::{AutoAccept, Event, LlmAction, Mode};
 use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
 };
@@ -51,7 +51,7 @@ pub(crate) fn process_llm_result(
     if app.has_memory_message {
         app.has_memory_message = false;
         if let Some(msg) = app.messages.get_mut(1) {
-            msg.content = crate::agent::react::build_assistant_context();
+            msg.content = crate::agent::react::build_assistant_context(&app.workspace);
         }
     }
 
@@ -153,9 +153,15 @@ pub(crate) fn process_llm_result(
                         app.needs_agent_executor = true;
                     }
                     RiskLevel::Confirm => {
-                        if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle) {
+                        if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle)
+                            || app.auto_accept == AutoAccept::AcceptEdits
+                        {
                             let ev = Event::Thinking {
-                                text: format!("GE auto-approved confirm command: {command}"),
+                                text: if app.auto_accept == AutoAccept::AcceptEdits {
+                                    format!("auto-accepted: {command}")
+                                } else {
+                                    format!("GE auto-approved confirm command: {command}")
+                                },
                             };
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);

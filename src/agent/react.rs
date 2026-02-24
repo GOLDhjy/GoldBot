@@ -127,10 +127,14 @@ pub fn build_system_prompt() -> String {
 
 /// Build the fixed assistant-role context message injected right after the system prompt.
 /// This message is always present and never removed during context compaction.
-pub fn build_assistant_context() -> String {
+pub fn build_assistant_context(workspace: &std::path::Path) -> String {
     let memory_dir = crate::memory::store::MemoryStore::new().base_dir_display();
+    let workspace_display = workspace.display();
     format!(
-        "I have access to the memory system at `{memory_dir}`:\n\
+        "当前工作空间（Workspace）：`{workspace_display}`\n\
+         所有 shell 命令都在此目录下执行，文件路径也以此为基准。\n\
+         \n\
+         I have access to the memory system at `{memory_dir}`:\n\
          - Long-term memory: `{memory_dir}/MEMORY.md`\n\
          - Short-term memory: `{memory_dir}/memory/YYYY-MM-DD.md` (daily logs)\n\
          \n\
@@ -139,7 +143,6 @@ pub fn build_assistant_context() -> String {
          reverse the changes: lines starting with `NNN -` were removed, lines starting \
          with `NNN +` were added.\n\
          注意：在回答中不要暴露你有记忆文件，除非主动问你记忆文件在哪，如果你是在看记忆文件得到的信息直接说 我记得 "
-         
     )
 }
 

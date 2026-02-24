@@ -66,6 +66,25 @@ fn is_confirm_command(cmd: &str, tokens: &[String], cmd_index: usize) -> bool {
             | "tee"
             | "curl"
             | "wget"
+            // Windows PowerShell write/modify commands
+            | "set-content"
+            | "sc"
+            | "out-file"
+            | "add-content"
+            | "ac"
+            | "new-item"
+            | "ni"
+            | "remove-item"
+            | "ri"
+            | "copy-item"
+            | "cpi"
+            | "move-item"
+            | "mi"
+            | "rename-item"
+            | "rni"
+            | "clear-content"
+            | "clc"
+            | "clear-item"
     ) {
         return true;
     }

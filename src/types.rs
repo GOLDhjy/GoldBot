@@ -21,6 +21,22 @@ pub enum Mode {
     GeIdle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoAccept {
+    #[default]
+    Off,
+    AcceptEdits,
+}
+
+impl AutoAccept {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::AcceptEdits,
+            Self::AcceptEdits => Self::Off,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeQuestionStep {
     Purpose,
