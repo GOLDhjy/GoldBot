@@ -172,23 +172,15 @@ impl Screen {
                 format!("❯ {}", shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(format!("{}\r\n", prompt)));
-            let ws_part = if self.workspace.is_empty() {
-                String::new()
-            } else {
-                let short = shorten_workspace_path(&self.workspace, cols.saturating_sub(50));
-                format!("  {}  ", short.dark_grey())
-            };
             let accept_hint = match self.auto_accept {
                 AutoAccept::Off => format!(
-                    "  {}{}{}",
+                    "  {}{}",
                     "⏵ accept edits off".dark_grey(),
-                    ws_part,
                     "(shift+tab to cycle)".dark_grey()
                 ),
                 AutoAccept::AcceptEdits => format!(
-                    "  {}{}{}",
+                    "  {}{}",
                     "⏵⏵ accept edits on".green().bold(),
-                    ws_part,
                     "(shift+tab to cycle)".dark_grey()
                 ),
             };
@@ -508,31 +500,6 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     ))
 }
 
-/// Shorten a workspace path for display: replace home dir with `~`, then truncate
-/// from the left with `…` if longer than `max_chars`.
-fn shorten_workspace_path(path: &str, max_chars: usize) -> String {
-    // Normalize separators.
-    let p = path.replace('\\', "/");
-    // Replace home directory prefix with ~.
-    let shortened = if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        let home_fwd = home.replace('\\', "/");
-        if p.starts_with(&home_fwd) {
-            format!("~{}", &p[home_fwd.len()..])
-        } else {
-            p
-        }
-    } else {
-        p
-    };
-    if max_chars == 0 || shortened.chars().count() <= max_chars {
-        return shortened;
-    }
-    let chars: Vec<char> = shortened.chars().collect();
-    let keep = max_chars.saturating_sub(1); // 1 for '…'
-    let start = chars.len() - keep;
-    let tail: String = chars[start..].iter().collect();
-    format!("…{tail}")
-}
 
 /// Format the MCP discovery result as a single styled line for `Screen::emit()`.
 /// Returns `None` if there are no servers at all.

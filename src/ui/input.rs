@@ -2,7 +2,7 @@ use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
 use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
-use crate::types::{AutoAccept, Event, Mode};
+use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
 use crate::ui::screen::Screen;
