@@ -123,78 +123,110 @@ fn format_final_lines(summary: &str) -> Vec<String> {
     }
 
     let has_diff = looks_like_diff_block(&lines);
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let trimmed = line.trim_start();
-            if i == 0 {
-                return format!(
-                    "  {} {}",
-                    "✓".green().bold(),
-                    render_inline_markdown(trimmed).bold()
-                );
-            }
+    let mut out = Vec::with_capacity(lines.len());
+    let mut in_code_fence = false;
 
-            let rendered = format!("    {}", line);
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
 
-            if has_diff {
-                if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
-                    return rendered.green().to_string();
-                }
-                if trimmed.starts_with('-') && !trimmed.starts_with("---") {
-                    return rendered.red().to_string();
-                }
-                if trimmed.starts_with("@@")
-                    || trimmed.starts_with("diff --git")
-                    || trimmed.starts_with("index ")
-                    || trimmed.starts_with("--- ")
-                    || trimmed.starts_with("+++ ")
-                {
-                    return rendered.dark_yellow().to_string();
+        // First line: task result header.
+        if i == 0 {
+            out.push(format!(
+                "  {} {}",
+                "✓".green().bold(),
+                render_inline_markdown(trimmed).bold()
+            ));
+            continue;
+        }
+
+        // Code fence toggle.
+        if trimmed.starts_with("```") {
+            if in_code_fence {
+                in_code_fence = false;
+                // Blank line after code block as visual separator.
+                out.push(String::new());
+            } else {
+                in_code_fence = true;
+                let lang = trimmed.trim_start_matches('`').trim();
+                if !lang.is_empty() {
+                    out.push(format!("    {}", lang).grey().to_string());
                 }
             }
+            continue;
+        }
 
-            if is_markdown_rule(trimmed) {
-                return "    ─────────────────────────────".grey().to_string();
-            }
-            if let Some((level, heading)) = parse_markdown_heading(trimmed) {
-                let rendered = format!("    {}", render_inline_markdown(heading));
-                return match level {
-                    1 => rendered.bold().green().to_string(),
-                    2 => rendered.bold().yellow().to_string(),
-                    _ => rendered.bold().dark_yellow().to_string(),
-                };
-            }
-            if let Some(item) = parse_markdown_list_item(trimmed) {
-                return format_bullet_line(item);
-            }
-            if is_markdown_table_separator(trimmed) {
-                return "    ─────────────────────────────".grey().to_string();
-            }
-            if is_markdown_table_row(trimmed) {
-                return format_table_row(trimmed);
-            }
-            if let Some(rest) = trimmed.strip_prefix("> ") {
-                return format!("    {}", render_inline_markdown(rest))
-                    .grey()
-                    .to_string();
-            }
-            if let Some(section) = split_trailing_section_title(trimmed) {
-                return format!("    {}", render_inline_markdown(section))
-                    .bold()
-                    .yellow()
-                    .to_string();
-            }
-            if let Some((key, sep, value)) = split_key_value_parts(trimmed) {
-                let key = render_inline_markdown(key);
-                let value = render_inline_markdown(value);
-                return format!("    {}{} {}", key.bold().yellow(), sep, value);
-            }
+        // Inside a code block: no background fill (avoid uneven per-line block width).
+        if in_code_fence {
+            out.push(format!("    {}", line).grey().to_string());
+            continue;
+        }
 
-            format!("    {}", render_inline_markdown(trimmed))
-        })
-        .collect()
+        let rendered = format!("    {}", line);
+
+        if has_diff {
+            if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+                out.push(rendered.green().to_string());
+                continue;
+            }
+            if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+                out.push(rendered.red().to_string());
+                continue;
+            }
+            if trimmed.starts_with("@@")
+                || trimmed.starts_with("diff --git")
+                || trimmed.starts_with("index ")
+                || trimmed.starts_with("--- ")
+                || trimmed.starts_with("+++ ")
+            {
+                out.push(rendered.dark_yellow().to_string());
+                continue;
+            }
+        }
+
+        if is_markdown_rule(trimmed) {
+            out.push("    ─────────────────────────────".grey().to_string());
+            continue;
+        }
+        if let Some((level, heading)) = parse_markdown_heading(trimmed) {
+            let r = format!("    {}", render_inline_markdown(heading));
+            out.push(match level {
+                1 => r.bold().green().to_string(),
+                2 => r.bold().yellow().to_string(),
+                _ => r.bold().dark_yellow().to_string(),
+            });
+            continue;
+        }
+        if let Some(item) = parse_markdown_list_item(trimmed) {
+            out.push(format_bullet_line(item));
+            continue;
+        }
+        if is_markdown_table_separator(trimmed) {
+            out.push("    ─────────────────────────────".grey().to_string());
+            continue;
+        }
+        if is_markdown_table_row(trimmed) {
+            out.push(format_table_row(trimmed));
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            out.push(format!("    {}", render_inline_markdown(rest)).grey().to_string());
+            continue;
+        }
+        if let Some(section) = split_trailing_section_title(trimmed) {
+            out.push(format!("    {}", render_inline_markdown(section)).bold().yellow().to_string());
+            continue;
+        }
+        if let Some((key, sep, value)) = split_key_value_parts(trimmed) {
+            let key = render_inline_markdown(key);
+            let value = render_inline_markdown(value);
+            out.push(format!("    {}{} {}", key.bold().yellow(), sep, value));
+            continue;
+        }
+
+        out.push(format!("    {}", render_inline_markdown(trimmed)));
+    }
+
+    out
 }
 
 fn looks_like_diff_block(lines: &[&str]) -> bool {
@@ -485,6 +517,8 @@ pub(crate) fn sanitize_final_summary_for_tui(text: &str) -> String {
         let fence_probe = raw.trim_start();
         if fence_probe.starts_with("```") {
             in_code_fence = !in_code_fence;
+            // Keep the fence line so format_final_lines can render code blocks properly.
+            out.push(fence_probe.to_string());
             continue;
         }
 
@@ -680,17 +714,6 @@ pub(crate) fn first_non_empty_line(output: &str) -> Option<&str> {
 }
 
 /// Like `first_non_empty_line` but skips lines that contain only emoji /
-/// punctuation and no CJK / Latin letters — avoids showing a lone emoji as
-/// the entire live-thinking preview.
-fn first_meaningful_line(output: &str) -> Option<&str> {
-    output.lines().map(str::trim).find(|line| {
-        if line.is_empty() {
-            return false;
-        }
-        // Accept the line only if it has at least one letter or CJK character.
-        line.chars().any(|c| c.is_alphabetic())
-    })
-}
 
 /// Ensure every emoji is followed by at least one space so that wide-character
 /// glyphs don't bleed into the next character in terminals that count them as

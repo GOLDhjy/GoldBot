@@ -76,6 +76,8 @@ pub(crate) struct App {
     pub backend: LlmBackend,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
     pub todo_items: Vec<crate::types::TodoItem>,
+    /// True when launched with -p: auto-quit after task finishes, print final_summary to stdout.
+    pub headless: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +156,7 @@ impl App {
             ge_agent: None,
             todo_items: Vec::new(),
             backend: LlmBackend::from_env(),
+            headless: false,
         }
     }
 }
@@ -181,6 +184,8 @@ async fn main() -> anyhow::Result<()> {
             SetConsoleCP(65001);
         }
     }
+
+    let (cli_prompt, cli_yes) = parse_cli_args();
 
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
     ensure_dot_env();
@@ -223,11 +228,22 @@ async fn main() -> anyhow::Result<()> {
         app.mcp_discovery_rx = Some(rx);
     }
 
-    let run_result = run_loop(&mut app, &mut screen, http_client).await;
+    let run_result = run_loop(&mut app, &mut screen, http_client, cli_prompt, cli_yes).await;
 
     let _ = execute!(io::stdout(), DisableBracketedPaste);
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), crossterm::cursor::Show, Print("\r\n"));
+    // headless 模式：清除当前行残留的 TUI 内容，然后把最终答案打印到 stdout
+    if app.headless {
+        if let Some(summary) = &app.final_summary {
+            let _ = execute!(
+                io::stdout(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+                Print("\r")
+            );
+            println!("{summary}");
+        }
+    }
     run_result
 }
 
@@ -235,8 +251,16 @@ async fn run_loop(
     app: &mut App,
     screen: &mut Screen,
     http_client: reqwest::Client,
+    initial_task: Option<String>,
+    auto_accept: bool,
 ) -> anyhow::Result<()> {
-    if let Ok(task) = std::env::var("GOLDBOT_TASK") {
+    let startup_task = initial_task.or_else(|| std::env::var("GOLDBOT_TASK").ok());
+    // -y / --yes 开启自动接受非 Block 命令
+    if auto_accept {
+        app.auto_accept = AutoAccept::AcceptEdits;
+    }
+    if let Some(task) = startup_task {
+        app.headless = true;
         start_task(app, screen, task);
     }
 
@@ -365,6 +389,29 @@ async fn run_loop(
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+/// Parse CLI arguments, returning (prompt, auto_accept).
+/// Supported flags:
+///   -p / --prompt <text>   Initial chat message to send on startup.
+///   -y / --yes             Auto-accept all Confirm-level commands (non-Block).
+fn parse_cli_args() -> (Option<String>, bool) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut prompt = None;
+    let mut yes = false;
+    let mut i = 1;
+    while i < args.len() {
+        if (args[i] == "-p" || args[i] == "--prompt") && i + 1 < args.len() {
+            prompt = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "-y" || args[i] == "--yes" {
+            yes = true;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    (prompt, yes)
+}
 
 /// If `~/.goldbot/.env` doesn't exist, create it from the bundled template.
 fn ensure_dot_env() {

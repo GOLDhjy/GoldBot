@@ -64,6 +64,24 @@ cargo install --git https://github.com/GOLDhjy/GoldBot.git
 goldbot
 ```
 
+### 命令行参数
+
+| 参数 | 说明 |
+|---|---|
+| `-p <消息>` / `--prompt <消息>` | 启动时直接发送一条聊天消息，无需手动输入 |
+| `-y` / `--yes` | 自动接受所有 Confirm 级命令，无需手动确认（Block 级命令仍会被拦截） |
+
+```bash
+# 启动后自动发送消息（仍需手动确认 risky 命令）
+goldbot -p "整理当前目录的大文件"
+
+# 交互模式，但自动接受所有 Confirm 命令
+goldbot -y
+
+# 完全自动化：自动发消息 + 自动接受命令
+goldbot -p "整理当前目录的大文件" -y
+```
+
 ### 按键
 
 | 按键 | 场景 | 说明 |
@@ -271,3 +289,4 @@ src/
 
 - @ 功能实现
 - diff 代码语法高亮
+- 容易陷入死循环

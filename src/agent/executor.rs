@@ -632,6 +632,10 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     screen.confirm_selected = None;
     screen.input_focused = true;
     screen.status = "[Ctrl+d] full details".grey().to_string();
+    // headless 模式（-p 启动）：任务完成后自动退出
+    if app.headless {
+        app.quit = true;
+    }
     screen.refresh();
 }
 

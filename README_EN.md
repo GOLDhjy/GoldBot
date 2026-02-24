@@ -62,6 +62,24 @@ cargo install --git https://github.com/GOLDhjy/GoldBot.git
 goldbot
 ```
 
+### CLI Arguments
+
+| Flag | Description |
+|---|---|
+| `-p <message>` / `--prompt <message>` | Send an initial chat message on startup without manual input |
+| `-y` / `--yes` | Auto-accept all Confirm-level commands without prompting (Block-level commands are still rejected) |
+
+```bash
+# Send a message on startup (Confirm commands still require approval)
+goldbot -p "clean up large files in the current directory"
+
+# Interactive mode, but auto-accept all Confirm commands
+goldbot -y
+
+# Fully automated: auto-send message + auto-accept commands
+goldbot -p "clean up large files in the current directory" -y
+```
+
 ### Keyboard Shortcuts
 
 | Key | Context | Action |
