@@ -21,7 +21,7 @@ Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须�
 2. 第二步：...
 </plan>
 
-向用户提问（需要澄清或让用户做选择时）：
+向用户提问（需要澄清或让用户做选择时，你应该自己先尝试获取信息后再提问）：
 - 必须提供 3 个预设选项 + 1 个自定义输入选项
 - question 标签内写问题，每个 option 是一个选项
 <thought>reasoning</thought>
@@ -38,6 +38,7 @@ Shell command:
 <file>path/to/file</file>
 <command>bash command</command>
 The optional <file> tag names the primary file being created or modified (relative or absolute path). Omit it for read-only or multi-file commands. It is used to capture a before-diff.
+修改文件注意文件原本的编码格式。
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>

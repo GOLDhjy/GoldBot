@@ -1,6 +1,6 @@
-# GoldBot - AI 终端自动化助手
+﻿# GoldBot - AI 终端自动化助手
 
-![GitHub Release](https://img.shields.io/github/v/release/GOLDhjy/GoldBot?display_name=tag&style=flat-square) ![GitHub Actions](https://img.shields.io/github/actions/workflow/status/GOLDhjy/GoldBot/ci.yml?style=flat-square) ![GitHub Stars](https://img.shields.io/github/stars/GOLDhjy/GoldBot?style=flat-square) ![License](https://img.shields.io/github/license/GOLDhjy/GoldBot?style=flat-square)
+![GitHub Release](https://img.shields.io/github/v/release/GOLDhjy/GoldBot?display_name=tag&style=flat-square) ![GitHub Actions](https://img.shields.io/github/actions/workflow/status/GOLDhjy/GoldBot/release.yml?style=flat-square) ![GitHub Stars](https://img.shields.io/github/stars/GOLDhjy/GoldBot?style=flat-square) ![License](https://img.shields.io/github/license/GOLDhjy/GoldBot?style=flat-square)
 
 一个基于 Rust 开发的跨平台 TUI Agent，通过 LLM 自动规划和执行 Shell 命令来完成任务。
 
