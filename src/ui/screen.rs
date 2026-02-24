@@ -17,6 +17,8 @@ pub(crate) const TITLE_BANNER: [&str; 5] = [
     "  \\____|\\___/|_|\\__,_|____/ \\___/ \\__|",
 ];
 
+const SPINNER_FRAMES: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+
 pub(crate) struct Screen {
     stdout: io::Stdout,
     pub status: String,
@@ -34,6 +36,12 @@ pub(crate) struct Screen {
     pub auto_accept: AutoAccept,
     /// Current workspace path (shown in UI hint bar).
     pub workspace: String,
+    /// Whether the agent is currently running (shows animated spinner).
+    pub is_running: bool,
+    /// Spinner animation frame counter, incremented by the main loop.
+    pub spinner_tick: u64,
+    /// 光标是否已从 hint 行上移到 prompt 行（影响 clear_managed 的起点计算）
+    cursor_at_prompt: bool,
 }
 
 impl Screen {
@@ -51,6 +59,9 @@ impl Screen {
             todo_items: Vec::new(),
             auto_accept: AutoAccept::Off,
             workspace: String::new(),
+            is_running: false,
+            spinner_tick: 0,
+            cursor_at_prompt: false,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -88,11 +99,17 @@ impl Screen {
             Print("\r\n"),
             Print("❯ ")
         )?;
+        let _ = execute!(s.stdout, cursor::Hide);
         s.stdout.flush()?;
         Ok(s)
     }
 
     pub(crate) fn clear_managed(&mut self) {
+        // 如果光标已上移到 prompt 行，先移回 hint 行（managed 区底部）
+        if self.cursor_at_prompt {
+            let _ = execute!(self.stdout, cursor::MoveDown(1));
+            self.cursor_at_prompt = false;
+        }
         let up = self.managed_lines.saturating_sub(1).min(u16::MAX as usize) as u16;
         let _ = execute!(
             self.stdout,
@@ -109,6 +126,9 @@ impl Screen {
 
         // ── Todo panel (topmost in managed area) ──
         let todo_rows = self.draw_todo_panel(cols);
+
+        // 进入渲染前先隐藏光标，避免渲染过程中闪烁
+        let _ = execute!(self.stdout, cursor::Hide);
 
         if let Some(selected) = self.confirm_selected {
             let (labels, hint): (&[&str], &str) = if self.question_labels.is_empty() {
@@ -144,14 +164,27 @@ impl Screen {
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
             self.managed_lines = todo_rows + display_labels.len() + 1;
         } else {
+            let spinner_frame = SPINNER_FRAMES[self.spinner_tick as usize % SPINNER_FRAMES.len()];
+            let status_display = if self.is_running {
+                let label = if self.status.is_empty() {
+                    "Working...".to_string()
+                } else if let Some(rest) = self.status.strip_prefix("⏳ ") {
+                    rest.to_string()
+                } else {
+                    self.status.clone()
+                };
+                format!("{} {}", spinner_frame.cyan().bold(), label)
+            } else {
+                self.status.clone()
+            };
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
-            let max_status_lines = if self.status.starts_with("⏳ ") {
+            let max_status_lines = if self.is_running || self.status.starts_with("⏳ ") {
                 3
             } else {
                 1
             };
             let status_lines =
-                split_tail_lines_by_width(&self.status, status_budget, max_status_lines);
+                split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
             let status_rows = if status_lines.is_empty() {
                 1
             } else {
@@ -186,6 +219,20 @@ impl Screen {
             };
             let _ = execute!(self.stdout, Print(accept_hint));
             self.managed_lines = todo_rows + status_rows + 2;
+
+            // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
+            // 上移 1 行即到输入行，再定位到输入末尾并显示
+            if self.input_focused {
+                let input_col = (rendered_text_width("❯ ") + rendered_text_width(&shown_input))
+                    .min(u16::MAX as usize) as u16;
+                let _ = execute!(
+                    self.stdout,
+                    cursor::MoveUp(1),
+                    cursor::MoveToColumn(input_col),
+                    cursor::Show
+                );
+                self.cursor_at_prompt = true;
+            }
         }
         let _ = self.stdout.flush();
     }

@@ -206,12 +206,14 @@ pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> 
     let mut child = if cfg!(target_os = "windows") {
         Command::new("powershell")
             .args(["-NoProfile", "-Command", cmd])
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?
     } else {
         Command::new("bash")
             .args(["-lc", cmd])
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?

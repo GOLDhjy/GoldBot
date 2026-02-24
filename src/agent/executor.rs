@@ -379,6 +379,11 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str, fil
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
+    // 命令执行期间 loop 被阻塞，先写入状态供 spinner 显示
+    let short_cmd = if cmd.len() > 60 { &cmd[..60] } else { cmd };
+    screen.status = format!("Running: {short_cmd}");
+    screen.refresh();
+
     match crate::tools::shell::run_command(cmd, file_hint) {
         Ok(out) => {
             app.messages.push(Message::user(format!(
@@ -583,7 +588,7 @@ pub(crate) fn handle_llm_thinking_delta(app: &mut App, screen: &mut Screen, chun
     let should_refresh = app.llm_preview_shown.is_empty()
         || preview.chars().count() < app.llm_preview_shown.chars().count()
         || !preview.starts_with(&app.llm_preview_shown)
-        || grew_by >= 8
+        || grew_by >= 24
         || punctuation_flush;
     if !should_refresh {
         return;
@@ -620,7 +625,7 @@ pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta:
     let should_refresh = app.llm_preview_shown.is_empty()
         || preview.chars().count() < app.llm_preview_shown.chars().count()
         || !preview.starts_with(&app.llm_preview_shown)
-        || grew_by >= 8
+        || grew_by >= 24
         || punctuation_flush;
     if !should_refresh {
         return;

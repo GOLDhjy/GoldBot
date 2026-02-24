@@ -166,6 +166,20 @@ pub(crate) enum LlmWorkerEvent {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 在 Windows 老终端（CMD/PowerShell conhost）里强制 UTF-8 代码页，
+    // 否则 ❯ 等 Unicode 字符会显示乱码。
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+            fn SetConsoleCP(wCodePageID: u32) -> i32;
+        }
+        unsafe {
+            SetConsoleOutputCP(65001);
+            SetConsoleCP(65001);
+        }
+    }
+
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
     ensure_dot_env();
     let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
@@ -210,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = execute!(io::stdout(), DisableBracketedPaste);
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), Print("\r\n"));
+    let _ = execute!(io::stdout(), crossterm::cursor::Show, Print("\r\n"));
     run_result
 }
 
@@ -224,6 +238,7 @@ async fn run_loop(
     }
 
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
+    let mut last_spinner_refresh = std::time::Instant::now();
 
     loop {
         // 动态检查能用的mcp加入系统提示，并显示当前可用的mcp工具状态
@@ -302,6 +317,14 @@ async fn run_loop(
                 .await;
                 let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
             });
+        }
+
+        // 同步运行状态，每 400ms 推进一次 spinner 帧，避免频繁刷屏闪烁
+        screen.is_running = app.running;
+        if app.running && last_spinner_refresh.elapsed() >= Duration::from_millis(400) {
+            screen.spinner_tick = screen.spinner_tick.wrapping_add(1);
+            screen.refresh();
+            last_spinner_refresh = std::time::Instant::now();
         }
 
         //处理键盘事件，包括普通按键和粘贴事件
