@@ -8,7 +8,7 @@ mod ui;
 use std::{io, time::Duration};
 
 use agent::{
-    provider::{Message, build_http_client, chat_stream_with},
+    provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
     executor::{
         handle_llm_stream_delta, handle_llm_thinking_delta,
@@ -73,6 +73,7 @@ pub(crate) struct App {
     pub mode: Mode,
     pub auto_accept: AutoAccept,
     pub workspace: std::path::PathBuf,
+    pub backend: LlmBackend,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
     pub todo_items: Vec<crate::types::TodoItem>,
 }
@@ -152,6 +153,7 @@ impl App {
             workspace,
             ge_agent: None,
             todo_items: Vec::new(),
+            backend: LlmBackend::from_env(),
         }
     }
 }
@@ -192,12 +194,13 @@ async fn main() -> anyhow::Result<()> {
     screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
 
     // Warn if required API key is missing and show .env path.
-    if std::env::var("BIGMODEL_API_KEY").is_err() {
+    if app.backend.api_key_missing() {
         let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
         screen.emit(&[
             format!(
-                "  {} BIGMODEL_API_KEY 未配置，请编辑: {}",
+                "  {} {} 未配置，请编辑: {}",
                 crossterm::style::Stylize::yellow(crate::ui::symbols::Symbols::current().warning),
+                app.backend.required_key_name(),
                 env_path.display()
             ),
             String::new(),
@@ -302,19 +305,22 @@ async fn run_loop(
             let client = http_client.clone();
             let messages = app.messages.clone();
             let show_thinking = app.show_thinking;
+            let backend = app.backend;
             tokio::spawn(async move {
-                let result = chat_stream_with(
-                    &client,
-                    &messages,
-                    show_thinking,
-                    |piece| {
-                        let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
-                    },
-                    |chunk| {
-                        let _ = tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
-                    },
-                )
-                .await;
+                let result = backend
+                    .chat_stream_with(
+                        &client,
+                        &messages,
+                        show_thinking,
+                        |piece| {
+                            let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
+                        },
+                        |chunk| {
+                            let _ =
+                                tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
+                        },
+                    )
+                    .await;
                 let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
             });
         }

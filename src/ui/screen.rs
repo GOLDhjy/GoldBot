@@ -423,9 +423,7 @@ impl Screen {
 
 fn startup_subtitle_lines() -> Vec<String> {
     let version = env!("CARGO_PKG_VERSION");
-    let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
-    let base_url = std::env::var("BIGMODEL_BASE_URL")
-        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/coding/paas/v4".to_string());
+    let (model, base_url) = crate::agent::provider::LlmBackend::from_env().display_info();
     let provider = extract_host_from_url(&base_url).unwrap_or(base_url);
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().replace('\\', "/"))

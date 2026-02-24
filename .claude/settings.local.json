@@ -7,7 +7,9 @@
       "Bash(cargo build:*)",
       "Bash(cmd.exe:*)",
       "Bash(powershell.exe:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "mcp__web-reader__webReader",
+      "WebFetch(domain:platform.minimaxi.com)"
     ]
   }
 }
