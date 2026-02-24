@@ -390,7 +390,7 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str, fil
     app.task_events.push(call_ev);
 
     // 命令执行期间 loop 被阻塞，先写入状态供 spinner 显示
-    let short_cmd = if cmd.len() > 60 { &cmd[..60] } else { cmd };
+    let short_cmd = truncate_utf8_prefix(cmd, 60);
     screen.status = format!("Running: {short_cmd}");
     screen.refresh();
 
@@ -466,7 +466,7 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
 
     // Run all commands first, collecting results for inline tree display.
     for (i, cmd) in commands.iter().enumerate() {
-        let short = if cmd.len() > 60 { &cmd[..60] } else { cmd.as_str() };
+        let short = truncate_utf8_prefix(cmd, 60);
         screen.status = format!("Explorer [{}/{}]: {short}", i + 1, n);
         screen.refresh();
 
@@ -877,12 +877,24 @@ fn extract_last_tag_text(text: &str, tag: &str) -> Option<String> {
     Some(head[start..].trim().to_string())
 }
 
+fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
+}
+
 // ── Todo progress tracking ────────────────────────────────────────────────────
 // All todo progress is driven by the LLM via <tool>todo</tool>.
 // GoldBot only renders what the LLM sends — no automatic advancement.
 
 #[cfg(test)]
 mod tests {
+    use super::truncate_utf8_prefix;
     use crate::types::{TodoItem, TodoStatus};
 
     #[test]
@@ -906,5 +918,14 @@ mod tests {
         assert_eq!(items[0].status, TodoStatus::Done);
         assert_eq!(items[1].status, TodoStatus::Running);
         assert_eq!(items[2].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn truncate_utf8_prefix_handles_multibyte_chars() {
+        let s = r#"Select-String -Path src/ui/input.rs -Pattern "文件选择器" -Context 2,2"#;
+        let out = truncate_utf8_prefix(s, 60);
+        assert!(s.starts_with(out));
+        assert!(out.is_char_boundary(out.len()));
+        assert!(out.len() <= 60);
     }
 }
