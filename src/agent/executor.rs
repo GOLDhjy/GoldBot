@@ -190,6 +190,7 @@ pub(crate) fn process_llm_result(
                         let call_ev = Event::ToolCall {
                             label,
                             command: command.clone(),
+                            multiline: false,
                         };
                         emit_live_event(screen, &call_ev);
                         app.task_events.push(call_ev);
@@ -383,6 +384,7 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str, fil
     let call_ev = Event::ToolCall {
         label: intent.label(),
         command: cmd.to_string(),
+        multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
@@ -424,6 +426,7 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
     let call_ev = Event::ToolCall {
         label: format!("MCP({tool})"),
         command: args_text,
+        multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
@@ -457,26 +460,11 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
 
 pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, commands: &[String]) {
     let n = commands.len();
-    // Tree-style command list: ├ cmd … └ last
-    let tree_cmds = commands
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let prefix = if i == n - 1 { "└ " } else { "├ " };
-            format!("{}{}", prefix, shorten_text(c, 60))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let call_ev = Event::ToolCall {
-        label: "Explorer".to_string(),
-        command: tree_cmds,
-    };
-    emit_live_event(screen, &call_ev);
-    app.task_events.push(call_ev);
-
-    let mut parts: Vec<(String, String)> = Vec::new(); // (llm_entry, ui_entry)
+    let mut llm_parts: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new(); // first non-empty line per command
     let mut final_exit: i32 = 0;
 
+    // Run all commands first, collecting results for inline tree display.
     for (i, cmd) in commands.iter().enumerate() {
         let short = if cmd.len() > 60 { &cmd[..60] } else { cmd.as_str() };
         screen.status = format!("Explorer [{}/{}]: {short}", i + 1, n);
@@ -484,37 +472,58 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
 
         match crate::tools::shell::run_command(cmd, None) {
             Ok(out) => {
-                let mut ui = out.output.trim_end().to_string();
+                let mut llm = format!("$ {cmd}\n{}", out.output.trim_end());
                 if out.exit_code != 0 {
-                    ui.push_str(&format!("\n(exit={})", out.exit_code));
+                    llm.push_str(&format!("\n(exit={})", out.exit_code));
                     final_exit = out.exit_code;
                 }
-                parts.push((format!("$ {cmd}\n{}", out.output.trim_end()), ui));
+                llm_parts.push(llm);
+                let preview = out.output.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("(no output)")
+                    .to_string();
+                outputs.push(preview);
             }
             Err(e) => {
-                let err = format!("execution failed: {e}");
-                parts.push((format!("$ {cmd}\n{err}"), err));
+                llm_parts.push(format!("$ {cmd}\nexecution failed: {e}"));
+                outputs.push(format!("execution failed: {e}"));
                 final_exit = -1;
             }
         }
     }
 
-    let sep = "\u{2500}".repeat(30); // ──────────────────────────────
-    let llm_combined = parts.iter().map(|(llm, _)| llm.as_str()).collect::<Vec<_>>().join(&format!("\n{sep}\n"));
-    let ui_combined  = parts.iter().map(|(_, ui)| ui.as_str()).collect::<Vec<_>>().join(&format!("\n{sep}\n"));
+    // Build tree with first-line output preview inline under each command.
+    // ├ cmd          └ cmd (last)
+    // │   preview        preview
+    let mut tree_lines: Vec<String> = Vec::new();
+    for (i, (cmd, preview)) in commands.iter().zip(outputs.iter()).enumerate() {
+        let is_last = i == n - 1;
+        let branch = if is_last { "└ " } else { "├ " };
+        let indent  = if is_last { "    " } else { "│   " };
+        tree_lines.push(format!("{}{}", branch, shorten_text(cmd, 60)));
+        tree_lines.push(format!("{}{}", indent, shorten_text(preview, 80)));
+    }
 
+    let call_ev = Event::ToolCall {
+        label: "Explorer".to_string(),
+        command: tree_lines.join("\n"),
+        multiline: true,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    // Push full output to LLM only; no separate ToolResult UI event.
+    let llm_combined = llm_parts.join("\n\n");
     app.messages.push(Message::user(format!(
         "Tool result (exit={final_exit}):\n{llm_combined}"
     )));
-    let ev = Event::ToolResult { exit_code: final_exit, output: ui_combined };
-    emit_live_event(screen, &ev);
-    app.task_events.push(ev);
 }
 
 pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {
     let call_ev = Event::ToolCall {
         label: format!("WebSearch({query})"),
         command: query.to_string(),
+        multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
@@ -550,6 +559,7 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
     let call_ev = Event::ToolCall {
         label: format!("Skill({name})"),
         command: String::new(),
+        multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
@@ -566,6 +576,7 @@ pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json
     let call_ev = Event::ToolCall {
         label: "CreateMCP".to_string(),
         command: serde_json::to_string(config).unwrap_or_default(),
+        multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);

@@ -40,14 +40,18 @@ Shell command:
 <command>bash command</command>
 The optional <file> tag names the primary file being created or modified (relative or absolute path). Omit it for read-only or multi-file commands. It is used to capture a before-diff.
 
-Batch exploration (read-only, multiple commands in one shot):
+Batch exploration (read-only, multiple commands in ONE single call):
 <thought>reasoning</thought>
 <tool>explorer</tool>
 <command>first read-only command</command>
 <command>second read-only command</command>
 <command>third read-only command</command>
 <command>more read-only command</command>
-Use <tool>explorer</tool> when you need to gather info from multiple sources at once (ls, cat, grep, git log, cargo check …). All commands run in sequence; results are combined and returned together. Do NOT use for commands that write, delete, or depend on each other's output.
+CRITICAL rules for <tool>explorer</tool>:
+- You MUST include ALL read-only commands you need in a SINGLE <tool>explorer</tool> call. Never send explorer multiple times in a row.
+- All <command> tags are collected, executed in sequence, and ALL results returned to you at once in one message.
+- Only use for safe read-only commands (ls, cat, grep, git log, cargo check …).
+- Do NOT use for commands that write, delete, or depend on each other's output.
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>

@@ -19,7 +19,7 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
         Event::Thinking { text } => lines_with(text, |_, line| {
             format!("  {}", line).grey().to_string()
         }),
-        Event::ToolCall { label, command } => {
+        Event::ToolCall { label, command, .. } => {
             let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
             lines.extend(lines_with(command, |_, line| {
                 format!("    {}", line).grey().to_string()
@@ -65,14 +65,16 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
                 .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
                 .collect()
         }
-        Event::ToolCall { label, command } => {
-            let first = command.lines().next().unwrap_or(command.as_str());
-            vec![
-                format!("  {} {}", sym.record, label).cyan().to_string(),
-                format!("    {}", first)
-                    .grey()
-                    .to_string(),
-            ]
+        Event::ToolCall { label, command, multiline } => {
+            let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
+            if *multiline {
+                for line in command.lines() {
+                    lines.push(format!("    {}", line).grey().to_string());
+                }
+            } else if let Some(first) = command.lines().next() {
+                lines.push(format!("    {}", first).grey().to_string());
+            }
+            lines
         }
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
         Event::NeedsConfirmation { .. } => format_event(event),
@@ -896,6 +898,7 @@ mod tests {
             Event::ToolCall {
                 label: "Read(/tmp/a.rs)".to_string(),
                 command: "cat /tmp/a.rs".to_string(),
+                multiline: false,
             },
             Event::ToolResult {
                 exit_code: 0,
@@ -904,6 +907,7 @@ mod tests {
             Event::ToolCall {
                 label: "Read(/tmp/b.rs)".to_string(),
                 command: "cat /tmp/b.rs".to_string(),
+                multiline: false,
             },
             Event::ToolResult {
                 exit_code: 0,
@@ -912,6 +916,7 @@ mod tests {
             Event::ToolCall {
                 label: "Read(/tmp/c.rs)".to_string(),
                 command: "cat /tmp/c.rs".to_string(),
+                multiline: false,
             },
             Event::ToolResult {
                 exit_code: 0,
@@ -931,6 +936,7 @@ mod tests {
             Event::ToolCall {
                 label: "Read(/tmp/only.rs)".to_string(),
                 command: "cat /tmp/only.rs".to_string(),
+                multiline: false,
             },
             Event::ToolResult {
                 exit_code: 0,

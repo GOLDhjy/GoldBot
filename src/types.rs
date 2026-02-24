@@ -146,6 +146,9 @@ pub enum Event {
     ToolCall {
         label: String,
         command: String,
+        /// Show all lines of `command` in the live view (e.g. Explorer tree).
+        /// When false only the first line is shown.
+        multiline: bool,
     },
     ToolResult {
         exit_code: i32,
