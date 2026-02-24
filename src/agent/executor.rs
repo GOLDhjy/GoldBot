@@ -5,7 +5,7 @@ use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::store::MemoryStore;
 use crate::tools::safety::{RiskLevel, assess_command};
-use crate::types::{AutoAccept, Event, LlmAction, Mode};
+use crate::types::{AssistMode, Event, LlmAction, Mode};
 use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
 };
@@ -50,9 +50,8 @@ pub(crate) fn process_llm_result(
     // 第一次收到回复后，把 messages[1] 的内容截断回纯固定提示词（去掉拼进去的记忆部分）
     if app.has_memory_message {
         app.has_memory_message = false;
-        if let Some(msg) = app.messages.get_mut(1) {
-            msg.content = crate::agent::react::build_assistant_context(&app.workspace);
-        }
+        app.assistant_memory_suffix = None;
+        app.rebuild_assistant_context_message();
     }
 
     app.steps_taken += 1;
@@ -64,7 +63,9 @@ pub(crate) fn process_llm_result(
             // Empty-content errors are often transient; retry once automatically.
             if msg.contains("empty content") {
                 let sym = crate::ui::symbols::Symbols::current();
-                screen.status = format!("{} API 返回空响应，自动重试{}", sym.warning, sym.ellipsis).dark_yellow().to_string();
+                screen.status = format!("{} API 返回空响应，自动重试{}", sym.warning, sym.ellipsis)
+                    .dark_yellow()
+                    .to_string();
                 screen.refresh();
                 app.needs_agent_executor = true;
                 return;
@@ -117,7 +118,9 @@ pub(crate) fn process_llm_result(
     // the plan back after the user confirmed.  Skip re-rendering to avoid duplication and let
     // Final run immediately.  If there's a question too (user wants changes), always render.
     let plan_is_echo = actions.iter().any(|a| matches!(a, LlmAction::Final { .. }))
-        && !actions.iter().any(|a| matches!(a, LlmAction::Question { .. }));
+        && !actions
+            .iter()
+            .any(|a| matches!(a, LlmAction::Question { .. }));
 
     let mut plan_shown_without_followup = false;
     // Track whether we only saw non-blocking actions (Plan/Todo) without a
@@ -132,8 +135,7 @@ pub(crate) fn process_llm_result(
                     render_plan(screen, &content);
                     // Push immediately so the LLM knows the plan was shown in this turn,
                     // even when a question follows in the same response.
-                    app.messages
-                        .push(Message::user("[plan shown]".to_string()));
+                    app.messages.push(Message::user("[plan shown]".to_string()));
                 }
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
@@ -155,10 +157,10 @@ pub(crate) fn process_llm_result(
                     }
                     RiskLevel::Confirm => {
                         if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle)
-                            || app.auto_accept == AutoAccept::AcceptEdits
+                            || app.assist_mode == AssistMode::AcceptEdits
                         {
                             let ev = Event::Thinking {
-                                text: if app.auto_accept == AutoAccept::AcceptEdits {
+                                text: if app.assist_mode == AssistMode::AcceptEdits {
                                     format!("auto-accepted: {command}")
                                 } else {
                                     format!("GE auto-approved confirm command: {command}")
@@ -274,7 +276,8 @@ pub(crate) fn process_llm_result(
                 app.todo_items = items.clone();
                 screen.todo_items = items;
                 screen.refresh();
-                app.messages.push(Message::user("[todo updated]".to_string()));
+                app.messages
+                    .push(Message::user("[todo updated]".to_string()));
                 // Don't break — continue to next action (todo is non-blocking).
                 had_non_blocking_only = true;
             }
@@ -296,7 +299,10 @@ pub(crate) fn process_llm_result(
 }
 
 fn render_plan(screen: &mut Screen, content: &str) {
-    use crate::ui::format::{is_markdown_rule_pub, render_inline_markdown_pub, split_key_value_parts_pub, strip_ordered_marker_pub};
+    use crate::ui::format::{
+        is_markdown_rule_pub, render_inline_markdown_pub, split_key_value_parts_pub,
+        strip_ordered_marker_pub,
+    };
     let mut lines = vec![String::new()];
     for line in content.lines() {
         let trimmed = line.trim_start();
@@ -316,21 +322,47 @@ fn render_plan(screen: &mut Screen, content: &str) {
                 2 => format!("  {}", text.bold().yellow()),
                 _ => format!("  {}", text.bold().dark_yellow()),
             }
-        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
             // Checkbox
             if let Some(rest) = item.strip_prefix("[ ] ") {
-                format!("    {} {}", "\u{2610}".grey(), render_inline_markdown_pub(rest))
-            } else if let Some(rest) = item.strip_prefix("[x] ").or_else(|| item.strip_prefix("[X] ")) {
-                format!("    {} {}", "\u{2611}".green(), render_inline_markdown_pub(rest))
+                format!(
+                    "    {} {}",
+                    "\u{2610}".grey(),
+                    render_inline_markdown_pub(rest)
+                )
+            } else if let Some(rest) = item
+                .strip_prefix("[x] ")
+                .or_else(|| item.strip_prefix("[X] "))
+            {
+                format!(
+                    "    {} {}",
+                    "\u{2611}".green(),
+                    render_inline_markdown_pub(rest)
+                )
             } else if let Some((key, sep, value)) = split_key_value_parts_pub(item) {
                 let key = render_inline_markdown_pub(key);
                 let value = render_inline_markdown_pub(value);
-                format!("    {} {}{} {}", "\u{2022}".grey(), key.bold().yellow(), sep, value)
+                format!(
+                    "    {} {}{} {}",
+                    "\u{2022}".grey(),
+                    key.bold().yellow(),
+                    sep,
+                    value
+                )
             } else {
-                format!("    {} {}", "\u{2022}".grey(), render_inline_markdown_pub(item))
+                format!(
+                    "    {} {}",
+                    "\u{2022}".grey(),
+                    render_inline_markdown_pub(item)
+                )
             }
         } else if let Some(rest) = strip_ordered_marker_pub(trimmed) {
-            format!("  {}", render_inline_markdown_pub(rest)).white().to_string()
+            format!("  {}", render_inline_markdown_pub(rest))
+                .white()
+                .to_string()
         } else if is_markdown_rule_pub(trimmed) {
             "    \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".grey().to_string()
         } else if crate::ui::format::is_markdown_table_separator(trimmed) {
@@ -379,7 +411,12 @@ fn render_diff(screen: &mut Screen, content: &str) {
     screen.emit(&lines);
 }
 
-pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str, file_hint: Option<&str>) {
+pub(crate) fn execute_command(
+    app: &mut App,
+    screen: &mut Screen,
+    cmd: &str,
+    file_hint: Option<&str>,
+) {
     let intent = crate::tools::shell::classify_command(cmd);
     let call_ev = Event::ToolCall {
         label: intent.label(),
@@ -478,7 +515,9 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
                     final_exit = out.exit_code;
                 }
                 llm_parts.push(llm);
-                let preview = out.output.lines()
+                let preview = out
+                    .output
+                    .lines()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("(no output)")
                     .to_string();
@@ -499,7 +538,7 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
     for (i, (cmd, preview)) in commands.iter().zip(outputs.iter()).enumerate() {
         let is_last = i == n - 1;
         let branch = if is_last { "└ " } else { "├ " };
-        let indent  = if is_last { "    " } else { "│   " };
+        let indent = if is_last { "    " } else { "│   " };
         tree_lines.push(format!("{}{}", branch, shorten_text(cmd, 60)));
         tree_lines.push(format!("{}{}", indent, shorten_text(preview, 80)));
     }
@@ -906,7 +945,11 @@ mod tests {
             .into_iter()
             .map(|v| {
                 let label = v.get("label").unwrap().as_str().unwrap().to_string();
-                let status = match v.get("status").and_then(|s| s.as_str()).unwrap_or("pending") {
+                let status = match v
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("pending")
+                {
                     "done" => TodoStatus::Done,
                     "running" => TodoStatus::Running,
                     _ => TodoStatus::Pending,

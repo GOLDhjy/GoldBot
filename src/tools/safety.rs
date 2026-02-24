@@ -412,7 +412,6 @@ fn is_safe_redirection_target(target: &str) -> bool {
     cfg!(target_os = "windows") && target.eq_ignore_ascii_case("nul")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{RiskLevel, assess_command};

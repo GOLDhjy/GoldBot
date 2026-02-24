@@ -22,17 +22,19 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AutoAccept {
+pub enum AssistMode {
     #[default]
     Off,
     AcceptEdits,
+    Plan,
 }
 
-impl AutoAccept {
+impl AssistMode {
     pub fn cycle(self) -> Self {
         match self {
             Self::Off => Self::AcceptEdits,
-            Self::AcceptEdits => Self::Off,
+            Self::AcceptEdits => Self::Plan,
+            Self::Plan => Self::Off,
         }
     }
 }
@@ -166,17 +168,62 @@ pub enum Event {
 
 #[derive(Debug, Clone)]
 pub enum LlmAction {
-    Shell { command: String, file: Option<String> },
+    Shell {
+        command: String,
+        file: Option<String>,
+    },
     /// Batch read-only exploration: multiple commands executed in sequence,
     /// results combined into a single tool-result message.
-    Explorer { commands: Vec<String> },
-    WebSearch { query: String },
-    Plan { content: String },
-    Question { text: String, options: Vec<String> },
-    Mcp { tool: String, arguments: Value },
-    Skill { name: String },
-    CreateMcp { config: Value },
-    Todo { items: Vec<TodoItem> },
-    Diff { content: String },
-    Final { summary: String },
+    Explorer {
+        commands: Vec<String>,
+    },
+    WebSearch {
+        query: String,
+    },
+    Plan {
+        content: String,
+    },
+    Question {
+        text: String,
+        options: Vec<String>,
+    },
+    Mcp {
+        tool: String,
+        arguments: Value,
+    },
+    Skill {
+        name: String,
+    },
+    CreateMcp {
+        config: Value,
+    },
+    Todo {
+        items: Vec<TodoItem>,
+    },
+    Diff {
+        content: String,
+    },
+    Final {
+        summary: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssistMode;
+
+    #[test]
+    fn assist_mode_cycle_off_to_accept_edits() {
+        assert_eq!(AssistMode::Off.cycle(), AssistMode::AcceptEdits);
+    }
+
+    #[test]
+    fn assist_mode_cycle_accept_edits_to_plan() {
+        assert_eq!(AssistMode::AcceptEdits.cycle(), AssistMode::Plan);
+    }
+
+    #[test]
+    fn assist_mode_cycle_plan_to_off() {
+        assert_eq!(AssistMode::Plan.cycle(), AssistMode::Off);
+    }
 }

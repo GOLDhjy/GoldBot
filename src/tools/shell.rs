@@ -253,11 +253,7 @@ pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> 
     let exit_code = if timed_out {
         -1
     } else {
-        child
-            .wait()
-            .ok()
-            .and_then(|s| s.code())
-            .unwrap_or(-1)
+        child.wait().ok().and_then(|s| s.code()).unwrap_or(-1)
     };
 
     let after = snapshot_files(&cwd);
@@ -318,9 +314,23 @@ fn looks_read_only(trimmed: &str, lower: &str) -> bool {
     }
     // Unix read commands
     let unix_commands = [
-        "cat ", "less ", "more ", "ls", "pwd", "find ", "grep ", "rg ",
-        "head ", "tail ", "wc ", "stat ", "du ", "tree",
-        "git status", "git log", "git show",
+        "cat ",
+        "less ",
+        "more ",
+        "ls",
+        "pwd",
+        "find ",
+        "grep ",
+        "rg ",
+        "head ",
+        "tail ",
+        "wc ",
+        "stat ",
+        "du ",
+        "tree",
+        "git status",
+        "git log",
+        "git show",
     ];
     // Windows PowerShell read commands
     let windows_commands = [
@@ -346,13 +356,37 @@ fn looks_update(trimmed: &str, lower: &str) -> bool {
         || matches_any_prefix(
             lower,
             &[
-                "rm ", "mv ", "cp ", "mkdir ", "rmdir ", "chmod ", "chown ", "sed -i", "perl -pi",
-                "git add ", "git rm ", "git mv ",
+                "rm ",
+                "mv ",
+                "cp ",
+                "mkdir ",
+                "rmdir ",
+                "chmod ",
+                "chown ",
+                "sed -i",
+                "perl -pi",
+                "git add ",
+                "git rm ",
+                "git mv ",
                 // Windows PowerShell write commands
-                "set-content ", "sc ", "out-file ", "add-content ", "ac ",
-                "new-item ", "ni ", "remove-item ", "ri ",
-                "copy-item ", "cpi ", "move-item ", "mi ",
-                "rename-item ", "rni ", "clear-content ", "clc ", "clear-item ",
+                "set-content ",
+                "sc ",
+                "out-file ",
+                "add-content ",
+                "ac ",
+                "new-item ",
+                "ni ",
+                "remove-item ",
+                "ri ",
+                "copy-item ",
+                "cpi ",
+                "move-item ",
+                "mi ",
+                "rename-item ",
+                "rni ",
+                "clear-content ",
+                "clc ",
+                "clear-item ",
             ],
         )
 }
@@ -448,9 +482,8 @@ fn extract_target(cmd: &str) -> Option<String> {
             }
         }
         "git" => extract_git_target(&tokens),
-        "cat" | "less" | "more" | "head" | "tail" | "stat" | "get-content" | "gc" | "get-item" | "gi" => {
-            tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied()
-        }
+        "cat" | "less" | "more" | "head" | "tail" | "stat" | "get-content" | "gc" | "get-item"
+        | "gi" => tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied(),
         "sed" => tokens.last().copied(),
         "rm" | "mkdir" | "rmdir" | "touch" | "chmod" | "chown" => {
             tokens.iter().skip(1).find(|t| !t.starts_with('-')).copied()
@@ -795,7 +828,11 @@ fn read_preview(root: &Path, rel: &Path) -> Option<String> {
     Some(out)
 }
 
-fn capture_before_compare(root: &Path, cmd: &str, file_hint: Option<&str>) -> HashMap<PathBuf, String> {
+fn capture_before_compare(
+    root: &Path,
+    cmd: &str,
+    file_hint: Option<&str>,
+) -> HashMap<PathBuf, String> {
     let mut out = HashMap::new();
 
     // If the LLM explicitly declared the target file, capture it first.
@@ -851,7 +888,9 @@ fn capture_before_compare(root: &Path, cmd: &str, file_hint: Option<&str>) -> Ha
                     if abs.is_file() {
                         if let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) {
                             if !should_skip(&rel) && !out.contains_key(&rel) {
-                                if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
+                                if let Some(text) =
+                                    read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES)
+                                {
                                     out.insert(rel, text);
                                 }
                             }
@@ -910,7 +949,7 @@ fn render_unified_diff(before: &str, after: &str) -> String {
                 let (lineno, marker) = match change.tag() {
                     ChangeTag::Delete => (change.old_index().unwrap_or(0) + 1, '-'),
                     ChangeTag::Insert => (change.new_index().unwrap_or(0) + 1, '+'),
-                    ChangeTag::Equal  => (change.old_index().unwrap_or(0) + 1, ' '),
+                    ChangeTag::Equal => (change.old_index().unwrap_or(0) + 1, ' '),
                 };
                 let value = change.value().trim_end_matches('\n');
                 out.push_str(&format!("{lineno:>num_width$} {marker} {value}\n"));

@@ -2,12 +2,12 @@ use std::io::{self, Write};
 
 use crossterm::{
     cursor, execute,
-    style::{Print, Stylize},
+    style::{Color, Print, Stylize},
     terminal::{Clear, ClearType},
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::types::{AutoAccept, TodoItem, TodoStatus};
+use crate::types::{AssistMode, TodoItem, TodoStatus};
 use crate::ui::symbols::Symbols;
 
 pub(crate) const TITLE_BANNER: [&str; 5] = [
@@ -31,8 +31,8 @@ pub(crate) struct Screen {
     pub question_labels: Vec<String>,
     /// Active todo progress panel items.
     pub todo_items: Vec<TodoItem>,
-    /// Current auto-accept mode for command confirmation.
-    pub auto_accept: AutoAccept,
+    /// Current Shift+Tab assist mode.
+    pub assist_mode: AssistMode,
     /// Current workspace path (shown in UI hint bar).
     pub workspace: String,
     /// Whether the agent is currently running (shows animated spinner).
@@ -62,7 +62,7 @@ impl Screen {
             input_focused: true,
             question_labels: Vec::new(),
             todo_items: Vec::new(),
-            auto_accept: AutoAccept::Off,
+            assist_mode: AssistMode::Off,
             workspace: String::new(),
             is_running: false,
             spinner_tick: 0,
@@ -77,7 +77,15 @@ impl Screen {
                 s.stdout,
                 cursor::MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
-                Print(format!("{}\r\n", line.cyan().bold()))
+                Print(format!(
+                    "{}\r\n",
+                    line.with(Color::Rgb {
+                        r: 255,
+                        g: 215,
+                        b: 0
+                    })
+                    .bold()
+                ))
             )?;
         }
 
@@ -149,7 +157,10 @@ impl Screen {
                     format!("{} 直接输入补充说明，或 ↑/↓ 选择后 Enter", sym.prompt),
                 )
             } else {
-                (&[], format!("{} ↑/↓ 选择，Enter 确认，或直接输入自定义内容", sym.prompt))
+                (
+                    &[],
+                    format!("{} ↑/↓ 选择，Enter 确认，或直接输入自定义内容", sym.prompt),
+                )
             };
 
             let display_labels: Vec<String> = if self.question_labels.is_empty() {
@@ -177,7 +188,8 @@ impl Screen {
             self.managed_lines = todo_rows + at_file_rows + display_labels.len() + 1;
         } else {
             let sym = Symbols::current();
-            let spinner_frame = sym.spinner_frames[self.spinner_tick as usize % sym.spinner_frames.len()];
+            let spinner_frame =
+                sym.spinner_frames[self.spinner_tick as usize % sym.spinner_frames.len()];
             let status_display = if self.is_running {
                 let label = if self.status.is_empty() {
                     "Working...".to_string()
@@ -214,16 +226,30 @@ impl Screen {
                 format!("{}{}", prompt_str, shown_input).grey().to_string()
             };
             let _ = execute!(self.stdout, Print(format!("{}\r\n", prompt)));
-            let accept_hint = match self.auto_accept {
-                AutoAccept::Off => format!(
-                    "  {} accept edits off{}",
+            let accept_hint = match self.assist_mode {
+                AssistMode::Off => format!(
+                    "  {} {}{}",
                     sym.arrow_right.dark_grey(),
-                    "(shift+tab to cycle)".dark_grey()
+                    "mode: normal".grey(),
+                    " (shift+tab to cycle)".grey(),
                 ),
-                AutoAccept::AcceptEdits => format!(
-                    "  {} accept edits on{}",
-                    format!("{}{}", sym.arrow_right, sym.arrow_right).green().bold(),
-                    "(shift+tab to cycle)".dark_grey()
+                AssistMode::AcceptEdits => format!(
+                    "  {} {} {}{}",
+                    format!("{}{}", sym.arrow_right, sym.arrow_right)
+                        .green()
+                        .bold(),
+                    "mode:".grey(),
+                    "accept edits".green().bold(),
+                    " (shift+tab to cycle)".grey(),
+                ),
+                AssistMode::Plan => format!(
+                    "  {} {} {}{}",
+                    format!("{}{}", sym.arrow_right, sym.arrow_right)
+                        .cyan()
+                        .bold(),
+                    "mode:".grey(),
+                    "plan".cyan().bold(),
+                    " (shift+tab to cycle)".grey(),
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
@@ -232,8 +258,9 @@ impl Screen {
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示
             if self.input_focused {
-                let input_col = (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
-                    .min(u16::MAX as usize) as u16;
+                let input_col = (rendered_text_width(&prompt_str)
+                    + rendered_text_width(&shown_input))
+                .min(u16::MAX as usize) as u16;
                 let _ = execute!(
                     self.stdout,
                     cursor::MoveUp(1),
@@ -256,7 +283,11 @@ impl Screen {
         let sym = Symbols::current();
         // Count stats
         let total = self.todo_items.len();
-        let done = self.todo_items.iter().filter(|t| t.status == TodoStatus::Done).count();
+        let done = self
+            .todo_items
+            .iter()
+            .filter(|t| t.status == TodoStatus::Done)
+            .count();
         let header = format!("  {} Todos ({}/{})", sym.arrow_down.grey(), done, total);
         let _ = execute!(self.stdout, Print(format!("{}\r\n", header.grey())));
 
@@ -350,7 +381,10 @@ impl Screen {
     /// 仅适用于 spinner 跳帧和思考预览更新场景。
     /// 若行数发生变化或处于确认/todo 界面，则回退到完整 refresh()。
     pub(crate) fn refresh_status_only(&mut self) {
-        if self.confirm_selected.is_some() || !self.todo_items.is_empty() || !self.at_file_labels.is_empty() {
+        if self.confirm_selected.is_some()
+            || !self.todo_items.is_empty()
+            || !self.at_file_labels.is_empty()
+        {
             self.refresh();
             return;
         }
@@ -375,8 +409,7 @@ impl Screen {
 
         let max_status_lines = if self.is_running { 3 } else { 1 };
         let status_budget = cols.saturating_sub(rendered_text_width("  "));
-        let new_lines =
-            split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
+        let new_lines = split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
         let new_rows = new_lines.len().max(1);
 
         // 行数变了需要全刷（否则会错位）
@@ -400,11 +433,7 @@ impl Screen {
         );
 
         if new_lines.is_empty() {
-            let _ = execute!(
-                self.stdout,
-                Clear(ClearType::CurrentLine),
-                Print("\r\n")
-            );
+            let _ = execute!(self.stdout, Clear(ClearType::CurrentLine), Print("\r\n"));
         } else {
             for line in &new_lines {
                 let _ = execute!(
@@ -420,9 +449,8 @@ impl Screen {
             let prompt_str = format!("{} ", sym.prompt);
             let input_budget = cols.saturating_sub(rendered_text_width(&prompt_str));
             let shown_input = fit_single_line_tail(&self.input, input_budget);
-            let input_col =
-                (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
-                    .min(u16::MAX as usize) as u16;
+            let input_col = (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
+                .min(u16::MAX as usize) as u16;
             let _ = execute!(self.stdout, cursor::MoveToColumn(input_col), cursor::Show);
         } else {
             // 移回 hint 行（仅向下一行，不显示光标）
@@ -677,11 +705,7 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     }
 
     let sep_styled = sep.grey().to_string();
-    Some(format!(
-        "  {}{}",
-        prefix.grey(),
-        shown.join(&sep_styled)
-    ))
+    Some(format!("  {}{}", prefix.grey(), shown.join(&sep_styled)))
 }
 
 /// Format the MCP discovery result as a single styled line for `Screen::emit()`.
@@ -696,11 +720,7 @@ pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) 
         .map(|(name, _)| name.as_str().dark_cyan().to_string())
         .collect();
     for name in failed {
-        parts.push(format!(
-            "{} {}",
-            name.as_str().red(),
-            "(failed)".grey()
-        ));
+        parts.push(format!("{} {}", name.as_str().red(), "(failed)".grey()));
     }
     Some(format!("  {}{}", "MCP  ".grey(), parts.join(&sep)))
 }

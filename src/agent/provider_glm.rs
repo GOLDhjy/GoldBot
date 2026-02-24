@@ -111,9 +111,19 @@ impl GlmProvider {
 
         while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
             pending.push_str(&String::from_utf8_lossy(&chunk));
-            drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
+            drain_sse_frames(
+                &mut pending,
+                &mut merged,
+                &mut on_delta,
+                &mut on_thinking_delta,
+            );
         }
-        drain_sse_frames(&mut pending, &mut merged, &mut on_delta, &mut on_thinking_delta);
+        drain_sse_frames(
+            &mut pending,
+            &mut merged,
+            &mut on_delta,
+            &mut on_thinking_delta,
+        );
 
         if merged.is_empty() {
             return Err(anyhow!("API returned empty content"));
@@ -130,10 +140,8 @@ fn build_request(
     const BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
     const MODEL: &str = "GLM-4.7";
 
-    let base_url =
-        std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
-    let api_key =
-        std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
+    let base_url = std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
+    let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
     let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| MODEL.to_string());
 
     let api_messages: Vec<ApiMessage> = messages

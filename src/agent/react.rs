@@ -1,4 +1,4 @@
-﻿use crate::types::LlmAction;
+﻿use crate::types::{AssistMode, LlmAction};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
@@ -6,13 +6,6 @@ const SYSTEM_PROMPT_TEMPLATE: &str = "\
 You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below.
 
 ## Response format
-
-重要：遵循以下决策顺序：
-1. 任务简单且信息明确（如直接查询、执行单条命令）→ 直接执行，无需 plan
-2. 任务信息不足或有歧义 → 可以用 question 工具提问（每次只问一个关键问题）,收集到足够信息;
-3. 信息充足后，任务如果很复杂可用 plan 工具输出完整内容；plan 之后必须紧跟 question 询问用户是否确认
-4. 用户确认计划后 → 将 plan 的完整内容原封不动地放入 final 输出（不得删减、不得改写为摘要）；若计划是行程/方案/文档类内容，final 必须逐条重复全部细节
-5. 修改文件注意文件原本的编码格式，防止乱码。
 
 ### completed task
 Task complete:完成任务后一定要发
@@ -28,16 +21,9 @@ outcome summary:
 - <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
 - On failure, diagnose from output and try a different approach.
 - Shell: {SHELL_HINT}.
+- 修改文件时注意文件原本编码格式，避免乱码。
 
 ## Tools
-
-Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须立即用 question 工具询问用户是否确认）：
-<thought>reasoning</thought>
-<tool>plan</tool>
-<plan>## 计划
-1. 第一步：...
-2. 第二步：...
-</plan>
 
 向用户提问（需要澄清或让用户做选择时，你应该自己先尝试获取信息后再提问）：
 - 必须提供 3 个预设选项 + 1 个自定义输入选项
@@ -83,10 +69,24 @@ MCP tool (only if listed later in this prompt):
 Load a skill (only if listed later in this prompt):
 <thought>reasoning</thought>
 <skill>skill-name</skill>
+";
 
-Create a new MCP server:
+const PLAN_MODE_ASSIST_CONTEXT_APPENDIX: &str = "\
+Plan 模式已开启（你应主动使用 plan 流程）：
+任务信息不足或有歧义 → 使用 <tool>question</tool> 提问（每次只问一个关键问题），先收集信息。
+信息充足后，任务如果很复杂 → 使用 <tool>plan</tool> 输出完整计划；
+plan 之后必须紧跟 <tool>question</tool> 询问确认。
+用户确认计划后 → 在 <final> 中完整复述 plan 内容，不得改写为摘要。
+如果是复杂任务,在执行的时候,就使用todo tool分解任务进度，格式如下：
+
+Plan 输出示例：
 <thought>reasoning</thought>
-<create_mcp>{\"name\":\"server-name\",\"command\":[\"npx\",\"-y\",\"@scope/pkg\"]}</create_mcp>
+<tool>plan</tool>
+<plan>## 计划
+1. 第一步：...
+2. 第二步：...
+</plan>
+
 
 Todo progress panel (shows a live checklist in the terminal):
 <thought>reasoning</thought>
@@ -103,27 +103,7 @@ Example of a 3-step task progression:
   Response 1: [{\"label\":\"Read file\",\"status\":\"running\"},{\"label\":\"Fix bug\",\"status\":\"pending\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
   Response 2: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"running\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
   Response 3: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"running\"}] + <tool>shell</tool>
-  Response 4: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"done\"}] + <final>
-
-## create_mcp fields
-- `name` (required): server identifier used as the config key
-- `command` (required): **array** with executable and all arguments, e.g. `[\"npx\",\"-y\",\"@scope/pkg\",\"--flag\",\"val\"]`
-- `env` (optional): env vars object, e.g. `{{\"API_KEY\":\"val\"}}` — omit if not needed
-- `cwd` (optional): working directory — omit if not needed
-`type` and `enabled` are added automatically. Config is written to {MCP_CONFIG_PATH}. Tell the user to restart GoldBot to activate.
-
-## Creating skills
-Use shell commands to create a skill directory and SKILL.md file:
-  Skills directory: {SKILLS_DIR}
-  Structure: {SKILLS_DIR}/<name>/SKILL.md
-  SKILL.md format:
-    ---
-    name: <name>
-    description: one-line summary
-    ---
-
-    # Markdown content (free-form)
-Use shell-appropriate commands to write the file (bash: `printf`/`cat`; PowerShell: `Set-Content`/`Out-File`). Tell the user to restart GoldBot to load it.";
+  Response 4: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"done\"}] + <final>";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
 pub fn build_system_prompt() -> String {
@@ -142,10 +122,10 @@ pub fn build_system_prompt() -> String {
 
 /// Build the fixed assistant-role context message injected right after the system prompt.
 /// This message is always present and never removed during context compaction.
-pub fn build_assistant_context(workspace: &std::path::Path) -> String {
+pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistMode) -> String {
     let memory_dir = crate::memory::store::MemoryStore::new().base_dir_display();
     let workspace_display = workspace.display();
-    format!(
+    let mut out = format!(
         "当前工作空间（Workspace）：`{workspace_display}`\n\
          所有 shell 命令都在此目录下执行，文件路径也以此为基准。\n\
          \n\
@@ -158,7 +138,12 @@ pub fn build_assistant_context(workspace: &std::path::Path) -> String {
          reverse the changes: lines starting with `NNN -` were removed, lines starting \
          with `NNN +` were added.\n\
          注意：在回答中不要暴露你有记忆文件，除非主动问你记忆文件在哪，如果你是在看记忆文件得到的信息直接说 我记得 "
-    )
+    );
+    if assist_mode == AssistMode::Plan {
+        out.push_str("\n\n");
+        out.push_str(PLAN_MODE_ASSIST_CONTEXT_APPENDIX);
+    }
+    out
 }
 
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
@@ -198,7 +183,13 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
 
     // Backward compatibility: bare <command> without a wrapping <tool>.
     if let Some(command) = extract_last_tag(text, "command") {
-        return Ok((thought, vec![LlmAction::Shell { command, file: None }]));
+        return Ok((
+            thought,
+            vec![LlmAction::Shell {
+                command,
+                file: None,
+            }],
+        ));
     }
 
     Err(anyhow!(
@@ -222,7 +213,9 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "plan" => {
             let content = extract_last_tag(text, "plan")
                 .ok_or_else(|| anyhow!("missing <plan> for plan tool call"))?;
-            Ok(LlmAction::Plan { content: strip_xml_tags(&content) })
+            Ok(LlmAction::Plan {
+                content: strip_xml_tags(&content),
+            })
         }
         "question" => {
             let text_q = extract_last_tag(text, "question")
@@ -240,7 +233,10 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             if options.is_empty() {
                 return Err(anyhow!("missing <option> for question tool call"));
             }
-            Ok(LlmAction::Question { text: strip_xml_tags(&text_q), options })
+            Ok(LlmAction::Question {
+                text: strip_xml_tags(&text_q),
+                options,
+            })
         }
         "explorer" => {
             let commands = extract_all_tags(text, "command");
@@ -258,7 +254,9 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "diff" => {
             let content = extract_last_tag(text, "diff")
                 .ok_or_else(|| anyhow!("missing <diff> for diff tool call"))?;
-            Ok(LlmAction::Diff { content: strip_xml_tags(&content) })
+            Ok(LlmAction::Diff {
+                content: strip_xml_tags(&content),
+            })
         }
         t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
@@ -267,7 +265,10 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             if !arguments.is_object() {
                 return Err(anyhow!("MCP <arguments> must be a JSON object"));
             }
-            Ok(LlmAction::Mcp { tool: t.to_string(), arguments })
+            Ok(LlmAction::Mcp {
+                tool: t.to_string(),
+                arguments,
+            })
         }
         t => Err(anyhow!("unsupported tool `{t}`")),
     }
@@ -275,15 +276,17 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
 
 fn parse_todo_json(raw: &str) -> Result<Vec<crate::types::TodoItem>> {
     use crate::types::{TodoItem, TodoStatus};
-    let arr: Vec<Value> = serde_json::from_str(raw)
-        .map_err(|e| anyhow!("invalid <todo> JSON: {e}"))?;
+    let arr: Vec<Value> =
+        serde_json::from_str(raw).map_err(|e| anyhow!("invalid <todo> JSON: {e}"))?;
     let mut items = Vec::with_capacity(arr.len());
     for val in arr {
-        let label = val.get("label")
+        let label = val
+            .get("label")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("todo item missing \"label\""))?
             .to_string();
-        let status_str = val.get("status")
+        let status_str = val
+            .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("pending");
         let status = match status_str {
@@ -338,8 +341,8 @@ fn extract_last_tag(text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_llm_response;
-    use crate::types::LlmAction;
+    use super::{build_assistant_context, build_system_prompt, parse_llm_response};
+    use crate::types::{AssistMode, LlmAction};
     use serde_json::json;
 
     #[test]
@@ -423,5 +426,28 @@ mod tests {
             }
             _ => panic!("expected Todo action"),
         }
+    }
+    #[test]
+    fn build_assistant_context_off_does_not_include_plan_rules() {
+        let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Off);
+        assert!(!ctx.contains("Plan decision order (simplified):"));
+        assert!(!ctx.contains("<tool>plan</tool>"));
+    }
+    #[test]
+    fn build_assistant_context_plan_includes_plan_rules() {
+        let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Plan);
+        assert!(ctx.contains("Plan decision order (simplified):"));
+        assert!(ctx.contains("<tool>plan</tool>"));
+        assert!(ctx.contains("Todo progress panel (shows a live checklist in the terminal):"));
+        assert!(ctx.contains("<tool>todo</tool>"));
+        assert!(ctx.contains("<plan>"));
+        assert!(ctx.contains("<tool>question</tool>"));
+    }
+    #[test]
+    fn build_system_prompt_does_not_include_old_plan_block() {
+        let prompt = build_system_prompt();
+        assert!(!prompt.contains("<tool>plan</tool>"));
+        assert!(!prompt.contains("Plan decision order (simplified):"));
+        assert!(!prompt.contains("Todo progress panel (shows a live checklist in the terminal):"));
     }
 }

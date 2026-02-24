@@ -147,10 +147,8 @@ fn build_request(
     const BASE_URL: &str = "https://api.minimaxi.com/v1";
     const MODEL: &str = "MiniMax-M2.5";
 
-    let base_url =
-        std::env::var("MINIMAX_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
-    let api_key =
-        std::env::var("MINIMAX_API_KEY").context("MINIMAX_API_KEY env var not set")?;
+    let base_url = std::env::var("MINIMAX_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
+    let api_key = std::env::var("MINIMAX_API_KEY").context("MINIMAX_API_KEY env var not set")?;
     let model = std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| MODEL.to_string());
 
     let api_messages: Vec<ApiMessage> = messages

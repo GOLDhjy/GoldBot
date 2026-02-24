@@ -96,8 +96,9 @@ pub(crate) fn handle_key(
         && screen.confirm_selected.is_none()
         && !app.pending_confirm_note
     {
-        app.auto_accept = app.auto_accept.cycle();
-        screen.auto_accept = app.auto_accept;
+        app.assist_mode = app.assist_mode.cycle();
+        screen.assist_mode = app.assist_mode;
+        app.rebuild_assistant_context_message();
         screen.refresh();
         return false;
     }
@@ -749,7 +750,10 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
 
     // Store absolute path so read works regardless of CWD changes
     let abs_path = app.workspace.join(&rel_path);
-    app.at_file_chunks.push(AtFileChunk { placeholder, path: abs_path });
+    app.at_file_chunks.push(AtFileChunk {
+        placeholder,
+        path: abs_path,
+    });
     cancel_at_file_mode(app, screen);
 }
 
@@ -769,10 +773,7 @@ fn attach_files_to_task(chunks: &[AtFileChunk], task: &str) -> String {
                 ));
             }
             Err(e) => {
-                result.push_str(&format!(
-                    "\n\n--- {} 读取失败: {e} ---",
-                    chunk.placeholder
-                ));
+                result.push_str(&format!("\n\n--- {} 读取失败: {e} ---", chunk.placeholder));
             }
         }
     }
@@ -811,10 +812,7 @@ fn collect_files_recursive(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Skip hidden entries and common large/non-source directories
         if name.starts_with('.') || matches!(name, "target" | "node_modules" | "dist" | "build") {
             continue;

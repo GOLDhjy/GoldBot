@@ -26,10 +26,32 @@ const GLOBAL_SUBDIRS: &[&str] = &[
     ".claude/skills",
     ".agents/skills",
 ];
+#[allow(dead_code)]
+const CREATE_SKILL_ASSIST_PROMPT_APPENDIX_TEMPLATE: &str = "\
+## Creating skills
+Use shell commands to create a skill directory and SKILL.md file:
+  Skills directory: {SKILLS_DIR}
+  Structure: {SKILLS_DIR}/<name>/SKILL.md
+  SKILL.md format:
+    ---
+    name: <name>
+    description: one-line summary
+    ---
+
+    # Markdown content (free-form)";
 
 /// Returns GoldBot's own skills directory: `$GOLDBOT_MEMORY_DIR/skills` or `~/.goldbot/skills`.
 pub fn goldbot_skills_dir() -> PathBuf {
     crate::tools::mcp::goldbot_home_dir().join("skills")
+}
+
+/// Build the assistant-prompt appendix for skill creation guidance.
+/// This is intended for command-specific injection (not always-on system prompt).
+#[allow(dead_code)]
+pub fn create_skill_assist_prompt_appendix() -> String {
+    let skills_dir = goldbot_skills_dir();
+    CREATE_SKILL_ASSIST_PROMPT_APPENDIX_TEMPLATE
+        .replace("{SKILLS_DIR}", &skills_dir.to_string_lossy())
 }
 
 /// Discover all skills. Priority: project-local → GoldBot own → other global.

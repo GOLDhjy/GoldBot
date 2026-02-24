@@ -1,8 +1,8 @@
 use crossterm::style::Stylize;
 
+use crate::App;
 use crate::types::Mode;
 use crate::ui::screen::{Screen, strip_ansi};
-use crate::App;
 
 pub(crate) fn drain_ge_events(app: &mut App, screen: &mut Screen) {
     let mut drop_agent = false;

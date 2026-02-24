@@ -1610,7 +1610,14 @@ where
     } else {
         emit_line(emit, "    Summary:");
         for line in summary_lines {
-            emit_line(emit, format!("    {} {}", crate::ui::symbols::Symbols::current().bullet, line));
+            emit_line(
+                emit,
+                format!(
+                    "    {} {}",
+                    crate::ui::symbols::Symbols::current().bullet,
+                    line
+                ),
+            );
         }
     }
     if hidden_line_count > 0 {

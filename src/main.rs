@@ -8,17 +8,15 @@ mod ui;
 use std::{io, time::Duration};
 
 use agent::{
+    executor::{
+        handle_llm_stream_delta, handle_llm_thinking_delta, maybe_flush_and_compact_before_call,
+        process_llm_result, start_task,
+    },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
-    executor::{
-        handle_llm_stream_delta, handle_llm_thinking_delta,
-        maybe_flush_and_compact_before_call, process_llm_result, start_task,
-    },
 };
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyEventKind,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyEventKind},
     execute,
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -26,7 +24,7 @@ use crossterm::{
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
-use types::{AutoAccept, Event, Mode};
+use types::{AssistMode, Event, Mode};
 use ui::ge::drain_ge_events;
 use ui::input::{handle_key, handle_paste};
 use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
@@ -70,8 +68,10 @@ pub(crate) struct App {
     /// True when the memory assistant message is still sitting at messages[1].
     /// Cleared (and the message removed) after the first LLM response is received.
     pub has_memory_message: bool,
+    /// Startup memory text appended to messages[1] until the first LLM response arrives.
+    pub assistant_memory_suffix: Option<String>,
     pub mode: Mode,
-    pub auto_accept: AutoAccept,
+    pub assist_mode: AssistMode,
     pub workspace: std::path::PathBuf,
     pub backend: LlmBackend,
     pub ge_agent: Option<crate::consensus::subagent::GeSubagent>,
@@ -124,7 +124,11 @@ impl App {
         // Determine workspace: GOLDBOT_WORKSPACE env var, or current directory.
         let workspace = std::env::var("GOLDBOT_WORKSPACE")
             .ok()
-            .and_then(|p| std::fs::canonicalize(&p).ok().or_else(|| Some(std::path::PathBuf::from(p))))
+            .and_then(|p| {
+                std::fs::canonicalize(&p)
+                    .ok()
+                    .or_else(|| Some(std::path::PathBuf::from(p)))
+            })
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         // chdir into workspace so all shell commands run relative to it.
@@ -132,10 +136,11 @@ impl App {
 
         // messages[1] = 固定 assistant 提示词，永久保留。
         // 第一次请求时把当日记忆拼在后面一起发；收到回复后截断，只留固定部分。
-        let base_ctx = build_assistant_context(&workspace);
-        let memory = store.build_memory_message();
-        let has_memory_message = memory.is_some();
-        let first_ctx = match memory {
+        let assist_mode = AssistMode::Off;
+        let base_ctx = build_assistant_context(&workspace, assist_mode);
+        let assistant_memory_suffix = store.build_memory_message();
+        let has_memory_message = assistant_memory_suffix.is_some();
+        let first_ctx = match &assistant_memory_suffix {
             Some(mem) => format!("{base_ctx}\n\n{mem}"),
             None => base_ctx,
         };
@@ -170,8 +175,9 @@ impl App {
             skills,
             base_prompt,
             has_memory_message,
+            assistant_memory_suffix,
             mode: Mode::Normal,
-            auto_accept: AutoAccept::Off,
+            assist_mode,
             workspace,
             ge_agent: None,
             todo_items: Vec::new(),
@@ -182,6 +188,19 @@ impl App {
             at_file_candidates: Vec::new(),
             at_file_sel: 0,
             at_file_chunks: Vec::new(),
+        }
+    }
+
+    pub(crate) fn rebuild_assistant_context_message(&mut self) {
+        let mut base_ctx = build_assistant_context(&self.workspace, self.assist_mode);
+        if self.has_memory_message
+            && let Some(mem) = &self.assistant_memory_suffix
+        {
+            base_ctx.push_str("\n\n");
+            base_ctx.push_str(mem);
+        }
+        if let Some(msg) = self.messages.get_mut(1) {
+            msg.content = base_ctx;
         }
     }
 }
@@ -222,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
     execute!(io::stdout(), EnableBracketedPaste)?;
     let mut screen = Screen::new()?;
     screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
+    screen.assist_mode = app.assist_mode;
 
     // Warn if required API key is missing and show .env path.
     if app.backend.api_key_missing() {
@@ -282,7 +302,9 @@ async fn run_loop(
     let startup_task = initial_task.or_else(|| std::env::var("GOLDBOT_TASK").ok());
     // -y / --yes 开启自动接受非 Block 命令
     if auto_accept {
-        app.auto_accept = AutoAccept::AcceptEdits;
+        app.assist_mode = AssistMode::AcceptEdits;
+        app.rebuild_assistant_context_message();
+        screen.assist_mode = app.assist_mode;
     }
     if let Some(task) = startup_task {
         app.headless = true;
@@ -338,7 +360,10 @@ async fn run_loop(
 
         drain_ge_events(app, screen);
 
-        if app.running && app.pending_confirm.is_none() && app.needs_agent_executor && !app.llm_calling
+        if app.running
+            && app.pending_confirm.is_none()
+            && app.needs_agent_executor
+            && !app.llm_calling
         {
             //在compact之前写入长期记忆把
             maybe_flush_and_compact_before_call(app, screen);

@@ -17,10 +17,9 @@ pub fn home_dir() -> Option<PathBuf> {
         if let Some(profile) = std::env::var_os("USERPROFILE") {
             return Some(PathBuf::from(profile));
         }
-        if let (Some(drive), Some(path)) = (
-            std::env::var_os("HOMEDRIVE"),
-            std::env::var_os("HOMEPATH"),
-        ) {
+        if let (Some(drive), Some(path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+        {
             let mut p = PathBuf::from(drive);
             p.push(path);
             return Some(p);

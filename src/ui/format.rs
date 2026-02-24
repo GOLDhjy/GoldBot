@@ -16,9 +16,9 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
                 format!("  {}", line)
             }
         }),
-        Event::Thinking { text } => lines_with(text, |_, line| {
-            format!("  {}", line).grey().to_string()
-        }),
+        Event::Thinking { text } => {
+            lines_with(text, |_, line| format!("  {}", line).grey().to_string())
+        }
         Event::ToolCall { label, command, .. } => {
             let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
             lines.extend(lines_with(command, |_, line| {
@@ -29,7 +29,11 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
         Event::ToolResult { output, exit_code } => {
             let ok = *exit_code == 0;
             lines_with(output, |i, line| {
-                let pfx = if i == 0 { format!("  {} ", sym.corner) } else { "    ".to_string() };
+                let pfx = if i == 0 {
+                    format!("  {} ", sym.corner)
+                } else {
+                    "    ".to_string()
+                };
                 if !ok {
                     format!("{}{}", pfx, line).red().to_string()
                 } else {
@@ -39,8 +43,13 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
         }
         Event::NeedsConfirmation { command, reason } => {
             let mut lines = vec![
-                format!("  {} {}", sym.record, reason).cyan().bold().to_string(),
-                format!("  {} 需要确认", sym.warning).dark_yellow().to_string(),
+                format!("  {} {}", sym.record, reason)
+                    .cyan()
+                    .bold()
+                    .to_string(),
+                format!("  {} 需要确认", sym.warning)
+                    .dark_yellow()
+                    .to_string(),
             ];
             for line in command.lines().take(6) {
                 lines.push(format!("    {}", line).cyan().to_string());
@@ -58,14 +67,17 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
     let sym = Symbols::current();
     match event {
         Event::UserTask { .. } | Event::Final { .. } => format_event(event),
-        Event::Thinking { text } => {
-            text.lines()
-                .filter(|l| !l.trim().is_empty())
-                .take(3)
-                .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
-                .collect()
-        }
-        Event::ToolCall { label, command, multiline } => {
+        Event::Thinking { text } => text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
+            .collect(),
+        Event::ToolCall {
+            label,
+            command,
+            multiline,
+        } => {
             let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
             if *multiline {
                 for line in command.lines() {
@@ -89,15 +101,26 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
     let sym = Symbols::current();
     match event {
         Event::Thinking { .. } => Vec::new(),
-        Event::ToolCall { label, .. } => vec![format!("  {} {}", sym.bullet, label).cyan().to_string()],
+        Event::ToolCall { label, .. } => {
+            vec![format!("  {} {}", sym.bullet, label).cyan().to_string()]
+        }
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
         Event::NeedsConfirmation { command, reason } => {
             let mut lines = vec![
-                format!("  {} {}", sym.record, reason).cyan().bold().to_string(),
-                format!("    {} 需要确认", sym.warning).dark_yellow().to_string(),
+                format!("  {} {}", sym.record, reason)
+                    .cyan()
+                    .bold()
+                    .to_string(),
+                format!("    {} 需要确认", sym.warning)
+                    .dark_yellow()
+                    .to_string(),
             ];
             for line in command.lines().take(4) {
-                lines.push(format!("      {}", shorten_text(line, 72)).cyan().to_string());
+                lines.push(
+                    format!("      {}", shorten_text(line, 72))
+                        .cyan()
+                        .to_string(),
+                );
             }
             if command.lines().count() > 4 {
                 lines.push(format!("      {}", sym.ellipsis).grey().to_string());
@@ -209,11 +232,20 @@ fn format_final_lines(summary: &str) -> Vec<String> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("> ") {
-            out.push(format!("    {}", render_inline_markdown(rest)).grey().to_string());
+            out.push(
+                format!("    {}", render_inline_markdown(rest))
+                    .grey()
+                    .to_string(),
+            );
             continue;
         }
         if let Some(section) = split_trailing_section_title(trimmed) {
-            out.push(format!("    {}", render_inline_markdown(section)).bold().yellow().to_string());
+            out.push(
+                format!("    {}", render_inline_markdown(section))
+                    .bold()
+                    .yellow()
+                    .to_string(),
+            );
             continue;
         }
         if let Some((key, sep, value)) = split_key_value_parts(trimmed) {
@@ -276,10 +308,7 @@ fn format_table_row(line: &str) -> String {
         .split('|')
         .map(str::trim)
         .collect();
-    let parts: Vec<String> = cells
-        .iter()
-        .map(|c| render_inline_markdown(c))
-        .collect();
+    let parts: Vec<String> = cells.iter().map(|c| render_inline_markdown(c)).collect();
     format!("    {}", parts.join("  │  "))
 }
 
@@ -348,8 +377,15 @@ fn format_bullet_line(item: &str) -> String {
     if let Some(rest) = item.strip_prefix("[ ] ") {
         return format!("    {} {}", "☐".grey(), render_inline_markdown(rest));
     }
-    if let Some(rest) = item.strip_prefix("[x] ").or_else(|| item.strip_prefix("[X] ")) {
-        return format!("    {} {}", "☑".green(), render_inline_markdown(rest).green().to_string().as_str());
+    if let Some(rest) = item
+        .strip_prefix("[x] ")
+        .or_else(|| item.strip_prefix("[X] "))
+    {
+        return format!(
+            "    {} {}",
+            "☑".green(),
+            render_inline_markdown(rest).green().to_string().as_str()
+        );
     }
     if let Some((key, sep, value)) = split_key_value_parts(item) {
         let key = render_inline_markdown(key);
@@ -362,7 +398,11 @@ fn format_bullet_line(item: &str) -> String {
             value
         );
     }
-    format!("    {} {}", crate::ui::symbols::Symbols::current().bullet.grey(), render_inline_markdown(item))
+    format!(
+        "    {} {}",
+        crate::ui::symbols::Symbols::current().bullet.grey(),
+        render_inline_markdown(item)
+    )
 }
 
 /// Detects our line-numbered diff format: `"NNN - content"` or `"NNN + content"`.
@@ -381,13 +421,14 @@ fn numbered_diff_marker(t: &str) -> Option<char> {
     }
 }
 
-
 /// Render a diff line with colored background starting at `content` (after `prefix`).
 /// The prefix is left uncolored; the content + trailing padding fill the rest of the
 /// terminal width with a dark red (delete) or dark green (insert) background.
 /// White foreground is applied so text is readable on both dark backgrounds.
 fn bg_fill_after_prefix(prefix: &str, content: &str, is_delete: bool) -> String {
-    let term_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
     let prefix_width = UnicodeWidthStr::width(prefix);
     let content_width = UnicodeWidthStr::width(content);
     let total_used = prefix_width + content_width;
@@ -576,21 +617,40 @@ fn compact_tool_result_lines(exit_code: i32, output: &str) -> Vec<String> {
     let mut summary = Vec::new();
     if let Some(fs) = parse_fs_changes(output) {
         if !fs.created.is_empty() {
-            summary.push(format!("    {} created: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.created)));
+            summary.push(format!(
+                "    {} created: {}",
+                crate::ui::symbols::Symbols::current().corner,
+                summarize_paths(&fs.created)
+            ));
         }
         if !fs.updated.is_empty() {
-            summary.push(format!("    {} updated: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.updated)));
+            summary.push(format!(
+                "    {} updated: {}",
+                crate::ui::symbols::Symbols::current().corner,
+                summarize_paths(&fs.updated)
+            ));
         }
         if !fs.deleted.is_empty() {
-            summary.push(format!("    {} deleted: {}", crate::ui::symbols::Symbols::current().corner, summarize_paths(&fs.deleted)));
+            summary.push(format!(
+                "    {} deleted: {}",
+                crate::ui::symbols::Symbols::current().corner,
+                summarize_paths(&fs.deleted)
+            ));
         }
     }
 
     if summary.is_empty() {
         if let Some(line) = first_non_empty_line(output) {
-            summary.push(format!("    {} {}", crate::ui::symbols::Symbols::current().corner, shorten_text(line, 110)));
+            summary.push(format!(
+                "    {} {}",
+                crate::ui::symbols::Symbols::current().corner,
+                shorten_text(line, 110)
+            ));
         } else {
-            summary.push(format!("    {} (no output)", crate::ui::symbols::Symbols::current().corner));
+            summary.push(format!(
+                "    {} (no output)",
+                crate::ui::symbols::Symbols::current().corner
+            ));
         }
     }
 
@@ -751,7 +811,6 @@ fn is_emoji(c: char) -> bool {
     )
 }
 
-
 pub(crate) fn shorten_text(s: &str, max_chars: usize) -> String {
     let trimmed = s.trim();
     if trimmed.chars().count() <= max_chars {
@@ -812,7 +871,10 @@ pub(crate) fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
                 }
 
                 if count >= 2 {
-                    let summary = format!("  {} Reading {count} files... (Ctrl+d 查看详情)", crate::ui::symbols::Symbols::current().bullet);
+                    let summary = format!(
+                        "  {} Reading {count} files... (Ctrl+d 查看详情)",
+                        crate::ui::symbols::Symbols::current().bullet
+                    );
                     if had_error {
                         lines.push(summary.red().to_string());
                     } else {

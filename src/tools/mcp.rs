@@ -42,6 +42,18 @@ const MAX_PROMPT_TOOLS: usize = 64;
 const MAX_SCHEMA_FIELDS: usize = 8;
 const MAX_FIELD_CHARS: usize = 32;
 const MAX_DESC_CHARS: usize = 140;
+#[allow(dead_code)]
+const CREATE_MCP_ASSIST_PROMPT_APPENDIX_TEMPLATE: &str = "\
+Create a new MCP server:
+<thought>reasoning</thought>
+<create_mcp>{\"name\":\"server-name\",\"command\":[\"npx\",\"-y\",\"@scope/pkg\"]}</create_mcp>
+
+## create_mcp fields
+- `name` (required): server identifier used as the config key
+- `command` (required): **array** with executable and all arguments, e.g. `[\"npx\",\"-y\",\"@scope/pkg\",\"--flag\",\"val\"]`
+- `env` (optional): env vars object, e.g. `{{\"API_KEY\":\"val\"}}` — omit if not needed
+- `cwd` (optional): working directory — omit if not needed
+`type` and `enabled` are added automatically. Config is written to {MCP_CONFIG_PATH}. Tell the user to restart GoldBot to activate.";
 
 #[derive(Debug, Clone, Default)]
 pub struct McpRegistry {
@@ -644,6 +656,15 @@ pub fn goldbot_home_dir() -> PathBuf {
 /// Returns the resolved path of the MCP servers config file.
 pub fn mcp_servers_file_path() -> PathBuf {
     resolve_mcp_servers_file_path()
+}
+
+/// Build the assistant-prompt appendix for `create_mcp` guidance.
+/// This is intended for command-specific injection (not always-on system prompt).
+#[allow(dead_code)]
+pub fn create_mcp_assist_prompt_appendix() -> String {
+    let path = mcp_servers_file_path();
+    CREATE_MCP_ASSIST_PROMPT_APPENDIX_TEMPLATE
+        .replace("{MCP_CONFIG_PATH}", &path.to_string_lossy())
 }
 
 /// Add or overwrite a server entry in the MCP config file.
