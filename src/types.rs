@@ -164,6 +164,9 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub enum LlmAction {
     Shell { command: String, file: Option<String> },
+    /// Batch read-only exploration: multiple commands executed in sequence,
+    /// results combined into a single tool-result message.
+    Explorer { commands: Vec<String> },
     WebSearch { query: String },
     Plan { content: String },
     Question { text: String, options: Vec<String> },

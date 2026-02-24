@@ -208,6 +208,13 @@ pub(crate) fn process_llm_result(
                 }
                 break 'actions;
             }
+            LlmAction::Explorer { commands } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_explorer_batch(app, screen, &commands);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
             LlmAction::WebSearch { query } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
@@ -446,6 +453,62 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
             app.task_events.push(ev);
         }
     }
+}
+
+pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, commands: &[String]) {
+    let n = commands.len();
+    // Tree-style command list: ├ cmd … └ last
+    let tree_cmds = commands
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let prefix = if i == n - 1 { "└ " } else { "├ " };
+            format!("{}{}", prefix, shorten_text(c, 60))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call_ev = Event::ToolCall {
+        label: "Explorer".to_string(),
+        command: tree_cmds,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let mut parts: Vec<(String, String)> = Vec::new(); // (llm_entry, ui_entry)
+    let mut final_exit: i32 = 0;
+
+    for (i, cmd) in commands.iter().enumerate() {
+        let short = if cmd.len() > 60 { &cmd[..60] } else { cmd.as_str() };
+        screen.status = format!("Explorer [{}/{}]: {short}", i + 1, n);
+        screen.refresh();
+
+        match crate::tools::shell::run_command(cmd, None) {
+            Ok(out) => {
+                let mut ui = out.output.trim_end().to_string();
+                if out.exit_code != 0 {
+                    ui.push_str(&format!("\n(exit={})", out.exit_code));
+                    final_exit = out.exit_code;
+                }
+                parts.push((format!("$ {cmd}\n{}", out.output.trim_end()), ui));
+            }
+            Err(e) => {
+                let err = format!("execution failed: {e}");
+                parts.push((format!("$ {cmd}\n{err}"), err));
+                final_exit = -1;
+            }
+        }
+    }
+
+    let sep = "\u{2500}".repeat(30); // ──────────────────────────────
+    let llm_combined = parts.iter().map(|(llm, _)| llm.as_str()).collect::<Vec<_>>().join(&format!("\n{sep}\n"));
+    let ui_combined  = parts.iter().map(|(_, ui)| ui.as_str()).collect::<Vec<_>>().join(&format!("\n{sep}\n"));
+
+    app.messages.push(Message::user(format!(
+        "Tool result (exit={final_exit}):\n{llm_combined}"
+    )));
+    let ev = Event::ToolResult { exit_code: final_exit, output: ui_combined };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
 }
 
 pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {

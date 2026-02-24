@@ -9,7 +9,8 @@
       "Bash(powershell.exe:*)",
       "Bash(grep:*)",
       "mcp__web-reader__webReader",
-      "WebFetch(domain:platform.minimaxi.com)"
+      "WebFetch(domain:platform.minimaxi.com)",
+      "Bash(powershell:*)"
     ]
   }
 }

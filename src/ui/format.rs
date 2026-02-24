@@ -59,12 +59,11 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
     match event {
         Event::UserTask { .. } | Event::Final { .. } => format_event(event),
         Event::Thinking { text } => {
-            let line = first_meaningful_line(text).unwrap_or("");
-            vec![
-                format!("  {}", shorten_text(line, 110))
-                    .grey()
-                    .to_string(),
-            ]
+            text.lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(3)
+                .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
+                .collect()
         }
         Event::ToolCall { label, command } => {
             let first = command.lines().next().unwrap_or(command.as_str());
