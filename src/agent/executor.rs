@@ -27,6 +27,8 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     app.needs_agent_executor = true;
+    app.interrupt_llm_loop_requested = false;
+    app.interjection_mode = false;
     app.pending_confirm = None;
     app.pending_confirm_file = None;
     app.pending_confirm_note = false;
@@ -250,6 +252,15 @@ pub(crate) fn process_llm_result(
                 screen.refresh();
                 break 'actions;
             }
+            LlmAction::SetMode { mode } => {
+                apply_assist_mode_change(app, screen, mode);
+                app.messages.push(Message::user(format!(
+                    "[assist mode set: {}]",
+                    mode.as_llm_name()
+                )));
+                // Non-blocking local state update; continue to the next action.
+                had_non_blocking_only = true;
+            }
             LlmAction::Mcp { tool, arguments } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
@@ -296,6 +307,21 @@ pub(crate) fn process_llm_result(
     if plan_shown_without_followup || had_non_blocking_only {
         app.needs_agent_executor = true;
     }
+}
+
+fn apply_assist_mode_change(app: &mut App, screen: &mut Screen, mode: AssistMode) {
+    if app.assist_mode == mode {
+        return;
+    }
+    app.assist_mode = mode;
+    screen.assist_mode = mode;
+    app.rebuild_assistant_context_message();
+    let ev = Event::Thinking {
+        text: format!("assist mode -> {}", mode.as_llm_name()),
+    };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+    screen.refresh();
 }
 
 fn render_plan(screen: &mut Screen, content: &str) {

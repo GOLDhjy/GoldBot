@@ -37,6 +37,24 @@ impl AssistMode {
             Self::Plan => Self::Off,
         }
     }
+
+    pub fn as_llm_name(self) -> &'static str {
+        match self {
+            Self::Off => "agent",
+            Self::AcceptEdits => "accept_edits",
+            Self::Plan => "plan",
+        }
+    }
+
+    pub fn parse_llm_name(raw: &str) -> Option<Self> {
+        let normalized = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match normalized.as_str() {
+            "agent" | "off" | "normal" => Some(Self::Off),
+            "accept" | "accept_edits" | "acceptedits" => Some(Self::AcceptEdits),
+            "plan" => Some(Self::Plan),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +205,9 @@ pub enum LlmAction {
         text: String,
         options: Vec<String>,
     },
+    SetMode {
+        mode: AssistMode,
+    },
     Mcp {
         tool: String,
         arguments: Value,
@@ -225,5 +246,16 @@ mod tests {
     #[test]
     fn assist_mode_cycle_plan_to_off() {
         assert_eq!(AssistMode::Plan.cycle(), AssistMode::Off);
+    }
+
+    #[test]
+    fn assist_mode_parse_llm_aliases() {
+        assert_eq!(AssistMode::parse_llm_name("agent"), Some(AssistMode::Off));
+        assert_eq!(AssistMode::parse_llm_name("normal"), Some(AssistMode::Off));
+        assert_eq!(
+            AssistMode::parse_llm_name("accept_edits"),
+            Some(AssistMode::AcceptEdits)
+        );
+        assert_eq!(AssistMode::parse_llm_name("plan"), Some(AssistMode::Plan));
     }
 }

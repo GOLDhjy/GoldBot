@@ -42,6 +42,10 @@ pub(crate) struct App {
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
     pub needs_agent_executor: bool,
+    /// User pressed Esc to stop the active LLM loop; run_loop should abort the in-flight worker.
+    pub interrupt_llm_loop_requested: bool,
+    /// Next normal user input should be sent as an in-conversation interjection, not a new task.
+    pub interjection_mode: bool,
     pub running: bool,
     pub quit: bool,
     pub pending_confirm: Option<String>,
@@ -80,16 +84,7 @@ pub(crate) struct App {
     pub headless: bool,
 
     // ── @ file picker ──────────────────────────────────────────────────────────
-    /// When `Some`, the @ file picker is active; value is the search query after `@`.
-    pub at_file_query: Option<String>,
-    /// Byte position in `screen.input` immediately after the `@` that opened the picker.
-    pub at_file_at_pos: usize,
-    /// Current file candidates matching `at_file_query`.
-    pub at_file_candidates: Vec<std::path::PathBuf>,
-    /// Index of the selected candidate in `at_file_candidates`.
-    pub at_file_sel: usize,
-    /// Files attached to the current input via @ selection, waiting to be sent with the message.
-    pub at_file_chunks: Vec<AtFileChunk>,
+    pub at_file: AtFilePickerState,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +99,20 @@ pub(crate) struct AtFileChunk {
     pub placeholder: String,
     /// Resolved path to the file (relative to workspace).
     pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AtFilePickerState {
+    /// When `Some`, the @ file picker is active; value is the search query after `@`.
+    pub query: Option<String>,
+    /// Byte position in `screen.input` immediately after the `@` that opened the picker.
+    pub at_pos: usize,
+    /// Current file candidates matching `query`.
+    pub candidates: Vec<std::path::PathBuf>,
+    /// Index of the selected candidate in `candidates`.
+    pub sel: usize,
+    /// Files attached to the current input via @ selection, waiting to be sent with the message.
+    pub chunks: Vec<AtFileChunk>,
 }
 
 impl App {
@@ -157,6 +166,8 @@ impl App {
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
             needs_agent_executor: false,
+            interrupt_llm_loop_requested: false,
+            interjection_mode: false,
             running: false,
             quit: false,
             pending_confirm: None,
@@ -183,11 +194,7 @@ impl App {
             todo_items: Vec::new(),
             backend: LlmBackend::from_env(),
             headless: false,
-            at_file_query: None,
-            at_file_at_pos: 0,
-            at_file_candidates: Vec::new(),
-            at_file_sel: 0,
-            at_file_chunks: Vec::new(),
+            at_file: AtFilePickerState::default(),
         }
     }
 
@@ -313,6 +320,7 @@ async fn run_loop(
 
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
     let mut last_spinner_refresh = std::time::Instant::now();
+    let mut llm_task_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         // 动态检查能用的mcp加入系统提示，并显示当前可用的mcp工具状态
@@ -341,6 +349,10 @@ async fn run_loop(
             app.mcp_discovery_rx = None;
         }
 
+        if app.interrupt_llm_loop_requested {
+            interrupt_active_llm_loop(app, screen, &mut llm_task_handle);
+        }
+
         //接收llm worker的消息，更新界面状态或处理结果
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -349,6 +361,7 @@ async fn run_loop(
                     handle_llm_thinking_delta(app, screen, &chunk)
                 }
                 LlmWorkerEvent::Done(result) => {
+                    llm_task_handle = None;
                     app.llm_calling = false;
                     app.llm_stream_preview.clear();
                     app.llm_preview_shown.clear();
@@ -380,7 +393,7 @@ async fn run_loop(
             let messages = app.messages.clone();
             let show_thinking = app.show_thinking;
             let backend = app.backend;
-            tokio::spawn(async move {
+            llm_task_handle = Some(tokio::spawn(async move {
                 let result = backend
                     .chat_stream_with(
                         &client,
@@ -396,7 +409,7 @@ async fn run_loop(
                     )
                     .await;
                 let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
-            });
+            }));
         }
 
         // 同步运行状态，每 400ms 推进一次 spinner 帧，避免频繁刷屏闪烁
@@ -439,6 +452,23 @@ async fn run_loop(
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+fn interrupt_active_llm_loop(
+    app: &mut App,
+    screen: &mut Screen,
+    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    app.interrupt_llm_loop_requested = false;
+    app.running = false;
+    app.needs_agent_executor = false;
+    app.llm_calling = false;
+    app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
+    if let Some(handle) = llm_task_handle.take() {
+        handle.abort();
+    }
+    screen.refresh();
+}
 
 /// Parse CLI arguments, returning (prompt, auto_accept).
 /// Supported flags:

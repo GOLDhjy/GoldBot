@@ -230,7 +230,7 @@ impl Screen {
                 AssistMode::Off => format!(
                     "  {} {}{}",
                     sym.arrow_right.dark_grey(),
-                    "mode: normal".grey(),
+                    "mode: agent".grey(),
                     " (shift+tab to cycle)".grey(),
                 ),
                 AssistMode::AcceptEdits => format!(

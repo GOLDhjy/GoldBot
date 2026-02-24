@@ -286,7 +286,8 @@ src/
 - similar（diff 计算）
 
 ## TODO
-
-- @ 功能实现
+- ~~@ 功能实现~~
 - diff 代码语法高亮
 - 容易陷入死循环
+- slash command
+- 减少 Bash 这些标题，合并成一个，如果一直重复

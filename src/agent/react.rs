@@ -8,12 +8,12 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 ## Response format
 
 ### completed task
-Task complete:完成任务后一定要发
+Task complete (required):
 <thought>reasoning</thought>
-<final>outcome summary</final>
-outcome summary:
-- final，在最前面先说总结结论，然后在细分。
-- 如果此次任务修改了文件等，最好把涉及的文件名（有链接那种）写在细分里面
+<final>summary</final>
+<final> guidelines:
+- Start with the conclusion, then add brief details.
+- If files were changed, include the file paths.
 
 ## Rules
 - One tool call per response; wait for the result before proceeding. Exceptions: <tool>todo</tool> is non-blocking and can always be included alongside another tool call. <tool>explorer</tool> accepts multiple <command> tags and is the preferred way to batch read-only lookups into a single round-trip.
@@ -25,15 +25,15 @@ outcome summary:
 
 ## Tools
 
-向用户提问（需要澄清或让用户做选择时，你应该自己先尝试获取信息后再提问）：
-- 必须提供 3 个预设选项 + 1 个自定义输入选项
-- question 标签内写问题，每个 option 是一个选项
+Question tool (use when clarification or a user choice is required; try to gather info yourself first):
+- Provide 3 preset options + 1 custom input option.
+- Put the question in `<question>` and each choice in an `<option>`.
 <thought>reasoning</thought>
 <tool>question</tool>
-<question>问题内容</question>
-<option>选项A</option>
-<option>选项B</option>
-<option>选项C</option>
+<question>question text</question>
+<option>Option A</option>
+<option>Option B</option>
+<option>Option C</option>
 <option><user_input></option>
 
 Shell command:
@@ -77,6 +77,12 @@ Plan 模式已开启（你应主动使用 plan 流程）：
 信息充足后，任务如果很复杂 → 使用 <tool>plan</tool> 输出完整计划；
 plan 之后必须紧跟 <tool>question</tool> 询问确认。
 用户确认计划后 → 在 <final> 中完整复述 plan 内容，不得改写为摘要。
+如果用户确认开始执行 → 先调用 <tool>set_mode</tool> 并设置 <mode>agent</mode>，再继续执行工具。
+set_mode（仅在 Plan 模式使用；非阻塞，只更新本地模式/UI）：
+<thought>reasoning</thought>
+<tool>set_mode</tool>
+<mode>agent</mode>
+`<mode>` 可选值：`agent` / `accept_edits` / `plan`
 如果是复杂任务,在执行的时候,就使用todo tool分解任务进度，格式如下：
 
 Plan 输出示例：
@@ -118,6 +124,17 @@ pub fn build_system_prompt() -> String {
         .replace("{MCP_CONFIG_PATH}", &mcp_path.to_string_lossy())
         .replace("{SKILLS_DIR}", &skills_dir.to_string_lossy())
         .replace("{SHELL_HINT}", shell_hint)
+}
+
+/// Build the user-role wrapper message used when the user interrupts the loop and interjects
+/// mid-task.  Keeping the wording here makes LLM-facing prompts easier to review in one place.
+pub fn build_interjection_user_message(task: &str) -> String {
+    format!(
+        "User interrupted the current LLM loop and is interjecting mid-task.\n\
+         Continue from the current conversation context.\n\
+         \n\
+         User interjection:\n{task}"
+    )
 }
 
 /// Build the fixed assistant-role context message injected right after the system prompt.
@@ -237,6 +254,13 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
                 text: strip_xml_tags(&text_q),
                 options,
             })
+        }
+        "set_mode" => {
+            let raw_mode = extract_last_tag(text, "mode")
+                .ok_or_else(|| anyhow!("missing <mode> for set_mode tool call"))?;
+            let mode = AssistMode::parse_llm_name(&raw_mode)
+                .ok_or_else(|| anyhow!("unsupported <mode> `{raw_mode}` for set_mode tool call"))?;
+            Ok(LlmAction::SetMode { mode })
         }
         "explorer" => {
             let commands = extract_all_tags(text, "command");
@@ -408,6 +432,18 @@ mod tests {
         let raw = "<tool>mcp_context7_lookup</tool><arguments>[1,2,3]</arguments>";
         let err = parse_llm_response(raw).expect_err("should fail");
         assert!(err.to_string().contains("JSON object"));
+    }
+
+    #[test]
+    fn parse_set_mode_tool_call() {
+        let raw =
+            "<thought>switch to execution mode</thought><tool>set_mode</tool><mode>agent</mode>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse set_mode");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LlmAction::SetMode { mode } => assert_eq!(*mode, AssistMode::Off),
+            _ => panic!("expected SetMode action"),
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
 use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
+use crate::agent::react::build_interjection_user_message;
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
@@ -18,6 +19,10 @@ pub(crate) fn handle_key(
 ) -> bool {
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
+    }
+    if key == KeyCode::Esc && modifiers.is_empty() && should_interrupt_llm_chat_loop(app) {
+        interrupt_llm_chat_loop(app, screen);
+        return false;
     }
     if is_ge_mode(app.mode) && screen.input.trim().is_empty() {
         let expand_prompt_hotkey = matches!(key, KeyCode::Char('p') | KeyCode::Char('P'))
@@ -270,23 +275,23 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     if screen.input_focused {
         // ── @ file picker intercepts navigation keys first ──
-        if app.at_file_query.is_some() {
+        if app.at_file.query.is_some() {
             match key {
                 KeyCode::Up => {
-                    app.at_file_sel = app.at_file_sel.saturating_sub(1);
-                    screen.at_file_sel = app.at_file_sel;
+                    app.at_file.sel = app.at_file.sel.saturating_sub(1);
+                    screen.at_file_sel = app.at_file.sel;
                     screen.refresh();
                     return;
                 }
                 KeyCode::Down => {
-                    let max = app.at_file_candidates.len().saturating_sub(1);
-                    app.at_file_sel = (app.at_file_sel + 1).min(max);
-                    screen.at_file_sel = app.at_file_sel;
+                    let max = app.at_file.candidates.len().saturating_sub(1);
+                    app.at_file.sel = (app.at_file.sel + 1).min(max);
+                    screen.at_file_sel = app.at_file.sel;
                     screen.refresh();
                     return;
                 }
                 KeyCode::Enter | KeyCode::Tab => {
-                    if app.at_file_candidates.is_empty() {
+                    if app.at_file.candidates.is_empty() {
                         cancel_at_file_mode(app, screen);
                     } else {
                         select_at_file(app, screen);
@@ -300,7 +305,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                     return;
                 }
                 KeyCode::Backspace => {
-                    let query = app.at_file_query.as_mut().unwrap();
+                    let query = app.at_file.query.as_mut().unwrap();
                     if query.is_empty() {
                         // Remove the @ from input and exit picker
                         screen.input.pop();
@@ -315,7 +320,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                     return;
                 }
                 KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                    let query = app.at_file_query.as_mut().unwrap();
+                    let query = app.at_file.query.as_mut().unwrap();
                     query.push(c);
                     screen.input.push(c);
                     let q = query.clone();
@@ -332,7 +337,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 let task = expand_input_text(app, &screen.input).trim().to_string();
                 if !task.is_empty() {
                     // Build final task with attached file contents before clearing state
-                    let at_file_chunks = std::mem::take(&mut app.at_file_chunks);
+                    let at_file_chunks = std::mem::take(&mut app.at_file.chunks);
                     cancel_at_file_mode(app, screen);
                     let final_task = attach_files_to_task(&at_file_chunks, &task);
                     clear_input_buffer(app, screen);
@@ -346,7 +351,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 }
             }
             KeyCode::Esc if modifiers.is_empty() => {
-                if app.at_file_query.is_some() {
+                if app.at_file.query.is_some() {
                     cancel_at_file_mode(app, screen);
                 } else {
                     screen.input_focused = false;
@@ -434,6 +439,52 @@ pub(crate) fn submit_user_input(app: &mut App, screen: &mut Screen, task: String
             )]);
         }
     }
+}
+
+fn should_interrupt_llm_chat_loop(app: &App) -> bool {
+    app.mode == Mode::Normal
+        && app.running
+        && (app.llm_calling || app.needs_agent_executor)
+        && app.pending_confirm.is_none()
+        && app.pending_question.is_none()
+        && !app.pending_confirm_note
+}
+
+fn interrupt_llm_chat_loop(app: &mut App, screen: &mut Screen) {
+    app.interrupt_llm_loop_requested = true;
+    app.interjection_mode = true;
+    app.running = false;
+    app.needs_agent_executor = false;
+    app.llm_calling = false;
+    app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
+    screen.input_focused = true;
+    screen.status = "LLM loop interrupted. Type a message and press Enter to interject."
+        .dark_yellow()
+        .to_string();
+    screen.emit(&[String::from(
+        "  LLM loop interrupted. Type a message and press Enter to interject.",
+    )]);
+    screen.refresh();
+}
+
+fn submit_interjection_input(app: &mut App, screen: &mut Screen, task: &str) {
+    app.interjection_mode = false;
+    app.interrupt_llm_loop_requested = false;
+    app.running = true;
+    app.needs_agent_executor = true;
+    app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
+    app.final_summary = None;
+    let wrapped = build_interjection_user_message(task);
+    app.messages.push(Message::user(wrapped));
+    let ev = Event::UserTask {
+        text: task.to_string(),
+    };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+    screen.status = "Interjection sent. Continuing...".grey().to_string();
+    screen.refresh();
 }
 
 fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyhow::Result<()> {
@@ -545,6 +596,11 @@ fn try_submit_user_input(app: &mut App, screen: &mut Screen, task: &str) -> anyh
 
     if app.mode == Mode::GeRun || app.mode == Mode::GeIdle {
         screen.emit(&["  GE mode is active. Use `GE 退出` to return to normal mode.".to_string()]);
+        return Ok(());
+    }
+
+    if app.interjection_mode {
+        submit_interjection_input(app, screen, task);
         return Ok(());
     }
 
@@ -702,28 +758,29 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
 
 /// Enter @ file picker mode: record the cursor position, run the initial (empty) search.
 fn enter_at_file_mode(app: &mut App, screen: &mut Screen) {
-    app.at_file_at_pos = screen.input.len(); // byte offset immediately after '@'
-    app.at_file_query = Some(String::new());
-    app.at_file_sel = 0;
+    app.at_file.at_pos = screen.input.len(); // byte offset immediately after '@'
+    app.at_file.query = Some(String::new());
+    app.at_file.sel = 0;
     update_at_file_candidates(app, screen, "");
 }
 
 /// Exit @ file picker mode without selecting a file (clears picker state, leaves input intact).
 fn cancel_at_file_mode(app: &mut App, screen: &mut Screen) {
-    app.at_file_query = None;
-    app.at_file_candidates.clear();
-    app.at_file_sel = 0;
+    app.at_file.query = None;
+    app.at_file.candidates.clear();
+    app.at_file.sel = 0;
     screen.at_file_labels.clear();
     screen.at_file_sel = 0;
 }
 
 /// Re-run the file search for `query` and update App + Screen state.
 fn update_at_file_candidates(app: &mut App, screen: &mut Screen, query: &str) {
-    app.at_file_candidates = search_files(&app.workspace, query);
-    app.at_file_sel = 0;
+    app.at_file.candidates = search_files(&app.workspace, query);
+    app.at_file.sel = 0;
     screen.at_file_sel = 0;
     screen.at_file_labels = app
-        .at_file_candidates
+        .at_file
+        .candidates
         .iter()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
@@ -732,8 +789,8 @@ fn update_at_file_candidates(app: &mut App, screen: &mut Screen, query: &str) {
 /// Confirm the currently highlighted candidate: replace `@{query}` in the input with a
 /// placeholder token, record the file chunk, then exit picker mode.
 fn select_at_file(app: &mut App, screen: &mut Screen) {
-    let sel = app.at_file_sel;
-    let Some(rel_path) = app.at_file_candidates.get(sel).cloned() else {
+    let sel = app.at_file.sel;
+    let Some(rel_path) = app.at_file.candidates.get(sel).cloned() else {
         cancel_at_file_mode(app, screen);
         return;
     };
@@ -742,7 +799,7 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
     let placeholder = format!("[@{}]", rel_str);
 
     // Replace "@{query}" portion of screen.input (from the @ position onwards) with placeholder
-    let at_pos = app.at_file_at_pos; // byte position just after '@'
+    let at_pos = app.at_file.at_pos; // byte position just after '@'
     // at_pos - 1 is where '@' sits; everything from there to the end is "@query"
     let replace_start = at_pos.saturating_sub(1);
     screen.input.truncate(replace_start);
@@ -750,7 +807,7 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
 
     // Store absolute path so read works regardless of CWD changes
     let abs_path = app.workspace.join(&rel_path);
-    app.at_file_chunks.push(AtFileChunk {
+    app.at_file.chunks.push(AtFileChunk {
         placeholder,
         path: abs_path,
     });

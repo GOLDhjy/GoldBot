@@ -663,8 +663,7 @@ pub fn mcp_servers_file_path() -> PathBuf {
 #[allow(dead_code)]
 pub fn create_mcp_assist_prompt_appendix() -> String {
     let path = mcp_servers_file_path();
-    CREATE_MCP_ASSIST_PROMPT_APPENDIX_TEMPLATE
-        .replace("{MCP_CONFIG_PATH}", &path.to_string_lossy())
+    CREATE_MCP_ASSIST_PROMPT_APPENDIX_TEMPLATE.replace("{MCP_CONFIG_PATH}", &path.to_string_lossy())
 }
 
 /// Add or overwrite a server entry in the MCP config file.
