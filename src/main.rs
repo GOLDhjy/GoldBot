@@ -95,7 +95,7 @@ pub(crate) struct PasteChunk {
 
 #[derive(Clone, Debug)]
 pub(crate) struct AtFileChunk {
-    /// The placeholder token inserted into the input, e.g. `[@src/main.rs]`.
+    /// The placeholder token inserted into the input, e.g. `@src/main.rs`.
     pub placeholder: String,
     /// Resolved path to the file (relative to workspace).
     pub path: std::path::PathBuf,

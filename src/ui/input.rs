@@ -796,7 +796,7 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
     };
 
     let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-    let placeholder = format!("[@{}]", rel_str);
+    let placeholder = format!("@{}", rel_str);
 
     // Replace "@{query}" portion of screen.input (from the @ position onwards) with placeholder
     let at_pos = app.at_file.at_pos; // byte position just after '@'
@@ -814,25 +814,27 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
     cancel_at_file_mode(app, screen);
 }
 
-/// Append the content of all attached files to the task string.
+/// Append only attached file paths (not file contents) to the task string.
 fn attach_files_to_task(chunks: &[AtFileChunk], task: &str) -> String {
     if chunks.is_empty() {
         return task.to_string();
     }
     let mut result = task.to_string();
+    let mut refs = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let rel = chunk.path.to_string_lossy().replace('\\', "/");
-        match std::fs::read_to_string(&chunk.path) {
-            Ok(content) => {
-                result.push_str(&format!(
-                    "\n\n--- {} ({}) ---\n{content}\n--- end {} ---",
-                    chunk.placeholder, rel, rel
-                ));
-            }
-            Err(e) => {
-                result.push_str(&format!("\n\n--- {} 读取失败: {e} ---", chunk.placeholder));
-            }
-        }
+        let at_ref = chunk
+            .placeholder
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(&chunk.placeholder)
+            .to_string();
+        result = result.replace(&chunk.placeholder, &at_ref);
+        refs.push(at_ref);
+    }
+    result.push_str("\n\nAttached file paths:");
+    for (chunk, at_ref) in chunks.iter().zip(refs.iter()) {
+        let abs_path = chunk.path.to_string_lossy().replace('\\', "/");
+        result.push_str(&format!("\n- {at_ref} ({abs_path})"));
     }
     result
 }
