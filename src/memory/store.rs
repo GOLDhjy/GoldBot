@@ -7,8 +7,6 @@ use std::{
 use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate};
 
-const SHORT_TERM_PROMPT_TAIL_CHARS: usize = 1800;
-const SHORT_TERM_PROMPT_DAYS: i64 = 2;
 const MAX_SHORT_TERM_FINAL_CHARS: usize = 4000;
 const MAX_LONG_TERM_NOTE_CHARS: usize = 120;
 const ENV_MEMORY_DIR: &str = "GOLDBOT_MEMORY_DIR";
@@ -176,29 +174,7 @@ impl MemoryStore {
             .map(|s| curated_long_term_for_prompt(&s))
             .unwrap_or_default();
 
-        let mut short_chunks = Vec::new();
-        let today = Local::now().date_naive();
-        for i in (0..SHORT_TERM_PROMPT_DAYS).rev() {
-            let day = today - Duration::days(i);
-            let path = self.short_term_path_for_day(day);
-            let Ok(content) = fs::read_to_string(path) else {
-                continue;
-            };
-            let snippet = tail_chars(
-                &content,
-                SHORT_TERM_PROMPT_TAIL_CHARS / SHORT_TERM_PROMPT_DAYS as usize,
-            );
-            if !snippet.trim().is_empty() {
-                short_chunks.push(format!(
-                    "### {}\n{}",
-                    day.format("%Y-%m-%d"),
-                    snippet.trim()
-                ));
-            }
-        }
-        let short_term = short_chunks.join("\n\n");
-
-        if long_term.trim().is_empty() && short_term.trim().is_empty() {
+        if long_term.trim().is_empty() {
             return None;
         }
 
@@ -206,11 +182,8 @@ impl MemoryStore {
             "## Memory\n\
              On conflict, follow the latest user instruction.\n\n\
              ### Long-term Memory\n\
-             {}\n\n\
-             ### Recent Short-term Memory\n\
              {}",
             fallback_if_empty(&long_term),
-            fallback_if_empty(&short_term),
         ))
     }
 
@@ -417,17 +390,6 @@ fn fallback_if_empty(text: &str) -> String {
     } else {
         text.trim().to_string()
     }
-}
-
-fn tail_chars(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_string();
-    }
-    text.chars().skip(count - max_chars).collect()
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

@@ -1,4 +1,4 @@
-use crate::types::LlmAction;
+﻿use crate::types::LlmAction;
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
@@ -13,6 +13,24 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 3. 用户确认计划后 → 将 plan 的完整内容原封不动地放入 final 输出（不得删减、不得改写为摘要）；若计划是行程/方案/文档类内容，final 必须逐条重复全部细节
 4. 任务简单且信息明确（如直接查询、执行单条命令）→ 直接执行，无需 plan
 5. 修改文件注意文件原本的编码格式，防止乱码。
+
+### completed task
+Task complete:完成任务后一定要发这个
+<thought>reasoning</thought>
+<final>outcome summary</final>
+outcome summary:
+- final在最前面先说总结结论，然后在细分。
+- 如果此次任务修改了文件等，最好把涉及的文件名（有链接那种）写在细分里面
+
+## Rules
+- One tool call per response; wait for the result before proceeding. Exceptions: <tool>todo</tool> is non-blocking and can always be included alongside another tool call. <tool>explorer</tool> accepts multiple <command> tags and is the preferred way to batch read-only lookups into a single round-trip.
+- Use <final> as soon as done; avoid extra commands.
+- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
+- Prefer read-only commands unless changes are required.
+- On failure, diagnose from output and try a different approach.
+- Shell: {SHELL_HINT}.
+
+## Tools
 
 Plan 模式（信息充足时，输出具体可执行计划；plan 之后必须立即用 question 工具询问用户是否确认）：
 <thought>reasoning</thought>
@@ -40,7 +58,7 @@ Shell command:
 <command>bash command</command>
 The optional <file> tag names the primary file being created or modified (relative or absolute path). Omit it for read-only or multi-file commands. It is used to capture a before-diff.
 
-Batch exploration (read-only, multiple commands in ONE single call):
+Explorer (read-only, multiple commands in ONE single call):
 <thought>reasoning</thought>
 <tool>explorer</tool>
 <command>first read-only command</command>
@@ -88,20 +106,6 @@ Example of a 3-step task progression:
   Response 3: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"running\"}] + <tool>shell</tool>
   Response 4: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"done\"}] + <final>
 
-Task complete:
-<thought>reasoning</thought>
-<final>outcome summary</final>
-outcome summary:在最前面先说结论。
-如果此次任务修改了文件等，最好把涉及的文件名（有链接那种）写在里面，可以通过鼠标点击打开
-
-## Rules
-- One tool call per response; wait for the result before proceeding. Exceptions: <tool>todo</tool> is non-blocking and can always be included alongside another tool call. <tool>explorer</tool> accepts multiple <command> tags and is the preferred way to batch read-only lookups into a single round-trip.
-- Use <final> as soon as done; avoid extra commands.
-- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
-- Prefer read-only commands unless changes are required.
-- On failure, diagnose from output and try a different approach.
-- Shell: {SHELL_HINT}.
-
 ## create_mcp fields
 - `name` (required): server identifier used as the config key
 - `command` (required): **array** with executable and all arguments, e.g. `[\"npx\",\"-y\",\"@scope/pkg\",\"--flag\",\"val\"]`
@@ -127,10 +131,7 @@ pub fn build_system_prompt() -> String {
     let mcp_path = crate::tools::mcp::mcp_servers_file_path();
     let skills_dir = crate::tools::skills::goldbot_skills_dir();
     let shell_hint = if cfg!(target_os = "windows") {
-        "PowerShell (Windows). Use PowerShell syntax only — no bash operators like `||`, `&&`, heredoc `<<EOF`. \
-         To write files use `Set-Content`/`Out-File` or `[System.IO.File]::WriteAllText()`. \
-         Use `;` to chain commands. Use `$null` instead of `/dev/null`.\
-         Or like this: powershell -Command ..."
+        "PowerShell (Windows). Use PowerShell syntax only Or Execute like this: powershell -Command ..."
     } else {
         "bash (macOS/Linux)"
     };
