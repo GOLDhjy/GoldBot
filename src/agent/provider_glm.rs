@@ -71,6 +71,7 @@ impl GlmProvider {
         &self,
         client: &reqwest::Client,
         messages: &[Message],
+        model: &str,
         show_thinking: bool,
         mut on_delta: F,
         mut on_thinking_delta: G,
@@ -79,7 +80,7 @@ impl GlmProvider {
         F: FnMut(&str),
         G: FnMut(&str),
     {
-        let (base_url, api_key, body) = build_request(messages, true, show_thinking)?;
+        let (base_url, api_key, body) = build_request(messages, model, true, show_thinking)?;
 
         let mut resp = client
             .post(format!("{base_url}/chat/completions"))
@@ -134,15 +135,15 @@ impl GlmProvider {
 
 fn build_request(
     messages: &[Message],
+    model: &str,
     stream: bool,
     show_thinking: bool,
 ) -> Result<(String, String, ApiRequest)> {
     const BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
-    const MODEL: &str = "GLM-4.7";
 
     let base_url = std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
     let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
-    let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| MODEL.to_string());
+    let model = model.to_string();
 
     let api_messages: Vec<ApiMessage> = messages
         .iter()

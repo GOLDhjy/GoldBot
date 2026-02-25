@@ -51,6 +51,10 @@ pub(crate) struct Screen {
     pub command_labels: Vec<String>,
     /// / 命令选择器：当前选中的索引
     pub command_sel: usize,
+    /// /model 选择器：待显示的标签列表
+    pub model_picker_labels: Vec<String>,
+    /// /model 选择器：当前选中的索引
+    pub model_picker_sel: usize,
 }
 
 impl Screen {
@@ -76,6 +80,8 @@ impl Screen {
             at_file_sel: 0,
             command_labels: Vec::new(),
             command_sel: 0,
+            model_picker_labels: Vec::new(),
+            model_picker_sel: 0,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -155,6 +161,9 @@ impl Screen {
         // ── / command picker panel ──
         let command_rows = self.draw_command_panel(cols);
 
+        // ── /model picker panel ──
+        let model_picker_rows = self.draw_model_picker_panel(cols);
+
         // 进入渲染前先隐藏光标，避免渲染过程中闪烁
         let _ = execute!(self.stdout, cursor::Hide);
 
@@ -194,7 +203,7 @@ impl Screen {
             }
             let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = todo_rows + at_file_rows + command_rows + display_labels.len() + 1;
+            self.managed_lines = todo_rows + at_file_rows + command_rows + model_picker_rows + display_labels.len() + 1;
         } else {
             let sym = Symbols::current();
             let spinner_frame =
@@ -262,7 +271,7 @@ impl Screen {
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
-            self.managed_lines = todo_rows + at_file_rows + command_rows + status_rows + 2;
+            self.managed_lines = todo_rows + at_file_rows + command_rows + model_picker_rows + status_rows + 2;
 
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示
@@ -408,6 +417,41 @@ impl Screen {
         rows
     }
 
+    /// Render the /model picker panel. Returns the number of terminal rows consumed.
+    fn draw_model_picker_panel(&mut self, cols: usize) -> usize {
+        if self.model_picker_labels.is_empty() {
+            return 0;
+        }
+        let count = self.model_picker_labels.len();
+        let max_visible = 8.min(count);
+        let half = max_visible / 2;
+        let start = if self.model_picker_sel > half {
+            (self.model_picker_sel - half).min(count.saturating_sub(max_visible))
+        } else {
+            0
+        };
+        let end = (start + max_visible).min(count);
+        let sym = Symbols::current();
+        let budget = cols.saturating_sub(6);
+        let mut rows = 0;
+        for i in start..end {
+            let label = &self.model_picker_labels[i];
+            let trimmed = fit_single_line_tail(label, budget);
+            let line = if i == self.model_picker_sel {
+                format!(
+                    "  {} {}\r\n",
+                    sym.prompt.cyan().bold(),
+                    trimmed.bold().white()
+                )
+            } else {
+                format!("    {}\r\n", trimmed).grey().to_string()
+            };
+            let _ = execute!(self.stdout, Print(line));
+            rows += 1;
+        }
+        rows
+    }
+
     pub(crate) fn emit(&mut self, lines: &[String]) {
         self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
         self.task_rendered.extend(lines.iter().cloned());
@@ -445,6 +489,7 @@ impl Screen {
             || !self.todo_items.is_empty()
             || !self.at_file_labels.is_empty()
             || !self.command_labels.is_empty()
+            || !self.model_picker_labels.is_empty()
         {
             self.refresh();
             return;

@@ -59,31 +59,61 @@ pub fn build_http_client() -> Result<reqwest::Client> {
     builder.build().map_err(Into::into)
 }
 
+// ── Backend / model presets ───────────────────────────────────────────────────
+
+/// 所有可用后端及其模型列表，用于 /model 选择器。
+/// 格式：(backend_label, &[model_name, ...])
+pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
+    ("GLM",     &["GLM-4.7", "GLM-4.5", "GLM-4.5-Flash"]),
+    ("MiniMax", &["MiniMax-M2.5", "MiniMax-M1"]),
+];
+
 // ── Backend selector ──────────────────────────────────────────────────────────
 
-/// 当前使用的 LLM 后端。
+/// 当前使用的 LLM 后端，内部持有已选定的模型名称。
 /// 通过 `LLM_PROVIDER=minimax/glm` 显式指定，
 /// 或自动检测：只有 MINIMAX_API_KEY 时选 MiniMax，否则默认 GLM。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum LlmBackend {
-    Glm(GlmProvider),
-    MiniMax(MiniMaxProvider),
+    /// GLM 后端，持有当前选定的模型名。
+    Glm(String),
+    /// MiniMax 后端，持有当前选定的模型名。
+    MiniMax(String),
 }
 
 impl LlmBackend {
     pub(crate) fn from_env() -> Self {
-        match std::env::var("LLM_PROVIDER").as_deref() {
-            Ok("minimax") => LlmBackend::MiniMax(MiniMaxProvider),
-            Ok("glm") => LlmBackend::Glm(GlmProvider),
+        let is_minimax = match std::env::var("LLM_PROVIDER").as_deref() {
+            Ok("minimax") => true,
+            Ok("glm") => false,
             _ => {
-                if std::env::var("BIGMODEL_API_KEY").is_err()
+                std::env::var("BIGMODEL_API_KEY").is_err()
                     && std::env::var("MINIMAX_API_KEY").is_ok()
-                {
-                    LlmBackend::MiniMax(MiniMaxProvider)
-                } else {
-                    LlmBackend::Glm(GlmProvider)
-                }
             }
+        };
+        if is_minimax {
+            let model = std::env::var("MINIMAX_MODEL")
+                .unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+            LlmBackend::MiniMax(model)
+        } else {
+            let model = std::env::var("BIGMODEL_MODEL")
+                .unwrap_or_else(|_| "GLM-4.7".to_string());
+            LlmBackend::Glm(model)
+        }
+    }
+
+    /// 后端标签，与 `BACKEND_PRESETS` 中的 key 一致。
+    pub(crate) fn backend_label(&self) -> &str {
+        match self {
+            Self::Glm(_) => "GLM",
+            Self::MiniMax(_) => "MiniMax",
+        }
+    }
+
+    /// 当前选定的模型名。
+    pub(crate) fn model_name(&self) -> &str {
+        match self {
+            Self::Glm(m) | Self::MiniMax(m) => m,
         }
     }
 
@@ -101,12 +131,14 @@ impl LlmBackend {
         G: FnMut(&str),
     {
         match self {
-            Self::Glm(p) => {
-                p.chat_stream_with(client, messages, show_thinking, on_delta, on_thinking_delta)
+            Self::Glm(model) => {
+                GlmProvider
+                    .chat_stream_with(client, messages, model, show_thinking, on_delta, on_thinking_delta)
                     .await
             }
-            Self::MiniMax(p) => {
-                p.chat_stream_with(client, messages, show_thinking, on_delta, on_thinking_delta)
+            Self::MiniMax(model) => {
+                MiniMaxProvider
+                    .chat_stream_with(client, messages, model, show_thinking, on_delta, on_thinking_delta)
                     .await
             }
         }
@@ -115,13 +147,13 @@ impl LlmBackend {
     /// 返回 (model名, provider主机) 供 UI 启动信息展示。
     pub(crate) fn display_info(&self) -> (String, String) {
         match self {
-            Self::Glm(_) => (
-                std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string()),
+            Self::Glm(model) => (
+                model.clone(),
                 std::env::var("BIGMODEL_BASE_URL")
                     .unwrap_or_else(|_| "https://open.bigmodel.cn/api/coding/paas/v4".to_string()),
             ),
-            Self::MiniMax(_) => (
-                std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string()),
+            Self::MiniMax(model) => (
+                model.clone(),
                 std::env::var("MINIMAX_BASE_URL")
                     .unwrap_or_else(|_| "https://api.minimaxi.com/v1".to_string()),
             ),

@@ -34,20 +34,22 @@ pub enum BuiltinCommand {
     Skills,
     Mcp,
     Status,
+    Model,
 }
 
 // ── 内置命令列表（单一数据源）────────────────────────────────────────────────
 
 /// (variant, name, description)
 const BUILTIN_COMMANDS: &[(BuiltinCommand, &str, &str)] = &[
-    (BuiltinCommand::Help,     "help",     "显示键位绑定和可用命令列表"),
     (BuiltinCommand::Clear,    "clear",    "清除会话历史，重新开始对话"),
     (BuiltinCommand::Compact,  "compact",  "立即压缩上下文（节省 Token）"),
-    (BuiltinCommand::Memory,   "memory",   "查看当前长期和短期记忆内容"),
-    (BuiltinCommand::Thinking, "thinking", "切换原生 Thinking 模式（同 Tab）"),
-    (BuiltinCommand::Skills,   "skills",   "列出所有已发现的 Skill"),
+    (BuiltinCommand::Help,     "help",     "显示键位绑定和可用命令列表"),
     (BuiltinCommand::Mcp,      "mcp",      "列出所有已注册的 MCP 工具"),
+    (BuiltinCommand::Memory,   "memory",   "查看当前长期和短期记忆内容"),
+    (BuiltinCommand::Model,    "model",    "切换 LLM 后端与模型"),
+    (BuiltinCommand::Skills,   "skills",   "列出所有已发现的 Skill"),
     (BuiltinCommand::Status,   "status",   "显示 workspace、模型、环境配置摘要"),
+    (BuiltinCommand::Thinking, "thinking", "切换原生 Thinking 模式（同 Tab）"),
 ];
 
 // ── 目录发现 ──────────────────────────────────────────────────────────────────

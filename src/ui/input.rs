@@ -3,6 +3,7 @@ use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
+use crate::agent::provider::BACKEND_PRESETS;
 use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
@@ -330,6 +331,45 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                     return;
                 }
                 _ => {}
+            }
+        }
+
+        // ── /model picker intercepts navigation keys ──
+        if app.model_picker.stage != crate::ModelPickerStage::Backend
+            || !app.model_picker.labels.is_empty()
+        {
+            if !app.model_picker.labels.is_empty() {
+                match key {
+                    KeyCode::Up => {
+                        app.model_picker.sel = app.model_picker.sel.saturating_sub(1);
+                        screen.model_picker_sel = app.model_picker.sel;
+                        screen.refresh();
+                        return;
+                    }
+                    KeyCode::Down => {
+                        let max = app.model_picker.labels.len().saturating_sub(1);
+                        app.model_picker.sel = (app.model_picker.sel + 1).min(max);
+                        screen.model_picker_sel = app.model_picker.sel;
+                        screen.refresh();
+                        return;
+                    }
+                    KeyCode::Enter | KeyCode::Tab => {
+                        select_model_item(app, screen);
+                        return;
+                    }
+                    KeyCode::Esc if modifiers.is_empty() => {
+                        if app.model_picker.stage == crate::ModelPickerStage::Model {
+                            // 返回第一级
+                            enter_model_picker_backend_stage(app, screen);
+                        } else {
+                            cancel_model_picker(app, screen);
+                            clear_input_buffer(app, screen);
+                        }
+                        screen.refresh();
+                        return;
+                    }
+                    _ => { return; }
+                }
             }
         }
 
@@ -1122,19 +1162,178 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
 
         BuiltinCommand::Status => {
             let ws = app.workspace.to_string_lossy().replace('\\', "/");
-            let model = std::env::var("BIGMODEL_MODEL")
-                .unwrap_or_else(|_| "GLM-4.7".to_string());
             let mode_str = format!("{:?}", app.assist_mode);
             let thinking = if app.show_thinking { "ON" } else { "OFF" };
             screen.emit(&[
                 format!("  Workspace:  {}", ws),
-                format!("  Model:      {}", model),
+                format!("  Backend:    {}", app.backend.backend_label()),
+                format!("  Model:      {}", app.backend.model_name()),
                 format!("  Mode:       {}", mode_str),
                 format!("  Thinking:   {}", thinking),
                 format!("  Skills:     {}", app.skills.len()),
-                format!("  Commands:   {} 用户 + 8 内置", app.user_commands.len()),
+                format!("  Commands:   {} 用户 + 9 内置", app.user_commands.len()),
                 format!("  Messages:   {}", app.messages.len()),
             ]);
+        }
+
+        BuiltinCommand::Model => {
+            enter_model_picker_backend_stage(app, screen);
+        }
+    }
+}
+
+// ── /model picker helpers ─────────────────────────────────────────────────────
+
+/// 将选定的后端/模型写入 `~/.goldbot/.env`，下次启动时自动生效。
+/// 只更新 LLM_PROVIDER、BIGMODEL_MODEL、MINIMAX_MODEL 三个键，其余保留。
+fn persist_backend_to_env(backend_label: &str, model: &str) {
+    let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+    let raw = std::fs::read_to_string(&env_path).unwrap_or_default();
+
+    let provider_value = match backend_label {
+        "MiniMax" => "minimax",
+        _         => "glm",
+    };
+    let model_key = match backend_label {
+        "MiniMax" => "MINIMAX_MODEL",
+        _         => "BIGMODEL_MODEL",
+    };
+
+    // 逐行替换已有键，追加不存在的键
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+    let mut found_provider = false;
+    let mut found_model = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("LLM_PROVIDER=") || trimmed.starts_with("LLM_PROVIDER =") {
+            *line = format!("LLM_PROVIDER={}", provider_value);
+            found_provider = true;
+        } else if trimmed.starts_with(&format!("{}=", model_key))
+            || trimmed.starts_with(&format!("{} =", model_key))
+        {
+            *line = format!("{}={}", model_key, model);
+            found_model = true;
+        }
+    }
+    if !found_provider {
+        lines.push(format!("LLM_PROVIDER={}", provider_value));
+    }
+    if !found_model {
+        lines.push(format!("{}={}", model_key, model));
+    }
+
+    let content = lines.join("\n") + "\n";
+    let _ = std::fs::write(&env_path, content);
+}
+
+/// 进入第一级：显示所有可用后端。
+fn enter_model_picker_backend_stage(app: &mut App, screen: &mut Screen) {
+    app.model_picker.stage = crate::ModelPickerStage::Backend;
+    app.model_picker.pending_backend = None;
+    app.model_picker.sel = 0;
+    app.model_picker.labels = BACKEND_PRESETS
+        .iter()
+        .map(|(label, models)| format!("{label}  ({} 个模型)", models.len()))
+        .collect();
+    app.model_picker.values = BACKEND_PRESETS
+        .iter()
+        .map(|(label, _)| label.to_string())
+        .collect();
+    screen.model_picker_labels = app.model_picker.labels.clone();
+    screen.model_picker_sel = 0;
+    clear_input_buffer(app, screen);
+    screen.refresh();
+}
+
+/// 进入第二级：显示选定后端的所有模型，当前模型高亮。
+fn enter_model_picker_model_stage(app: &mut App, screen: &mut Screen, backend: &str) {
+    let Some(preset) = BACKEND_PRESETS.iter().find(|(l, _)| *l == backend) else {
+        cancel_model_picker(app, screen);
+        return;
+    };
+    let current_model = if app.backend.backend_label() == backend {
+        app.backend.model_name().to_string()
+    } else {
+        String::new()
+    };
+    app.model_picker.stage = crate::ModelPickerStage::Model;
+    app.model_picker.pending_backend = Some(backend.to_string());
+    app.model_picker.labels = preset
+        .1
+        .iter()
+        .map(|m| {
+            if *m == current_model {
+                format!("{m}  ✓")
+            } else {
+                m.to_string()
+            }
+        })
+        .collect();
+    app.model_picker.values = preset.1.iter().map(|m| m.to_string()).collect();
+    // 默认选中当前模型
+    app.model_picker.sel = preset
+        .1
+        .iter()
+        .position(|m| *m == current_model)
+        .unwrap_or(0);
+    screen.model_picker_labels = app.model_picker.labels.clone();
+    screen.model_picker_sel = app.model_picker.sel;
+    screen.refresh();
+}
+
+/// 取消 model picker，清空所有状态。
+fn cancel_model_picker(app: &mut App, screen: &mut Screen) {
+    app.model_picker.stage = crate::ModelPickerStage::Backend;
+    app.model_picker.labels.clear();
+    app.model_picker.values.clear();
+    app.model_picker.sel = 0;
+    app.model_picker.pending_backend = None;
+    screen.model_picker_labels.clear();
+    screen.model_picker_sel = 0;
+}
+
+/// 用户按 Enter / Tab 确认当前高亮项。
+fn select_model_item(app: &mut App, screen: &mut Screen) {
+    let sel = app.model_picker.sel;
+    let Some(value) = app.model_picker.values.get(sel).cloned() else {
+        cancel_model_picker(app, screen);
+        return;
+    };
+    match app.model_picker.stage {
+        crate::ModelPickerStage::Backend => {
+            // 进入第二级
+            enter_model_picker_model_stage(app, screen, &value);
+        }
+        crate::ModelPickerStage::Model => {
+            let backend = app.model_picker.pending_backend.clone().unwrap_or_default();
+            let model = value;
+            // 切换后端+模型
+            app.backend = match backend.as_str() {
+                "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
+                _         => crate::agent::provider::LlmBackend::Glm(model.clone()),
+            };
+            // 持久化到 ~/.goldbot/.env
+            persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());
+            cancel_model_picker(app, screen);
+            clear_input_buffer(app, screen);
+            let mut lines = vec![format!(
+                "  已切换至 {} / {}",
+                app.backend.backend_label(),
+                app.backend.model_name()
+            )];
+            if app.backend.api_key_missing() {
+                let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+                lines.push(format!(
+                    "  {} {} 未配置，请编辑: {}",
+                    crossterm::style::Stylize::yellow(
+                        crate::ui::symbols::Symbols::current().warning
+                    ),
+                    app.backend.required_key_name(),
+                    env_path.display()
+                ));
+            }
+            screen.emit(&lines);
         }
     }
 }

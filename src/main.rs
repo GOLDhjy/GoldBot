@@ -94,6 +94,9 @@ pub(crate) struct App {
     /// 用户通过 COMMAND.md 自定义的命令列表（启动时加载一次）。
     pub user_commands: Vec<UserCommand>,
     pub cmd_picker: CmdPickerState,
+
+    // ── /model picker ──────────────────────────────────────────────────────────
+    pub model_picker: ModelPickerState,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +111,28 @@ pub(crate) struct AtFileChunk {
     pub placeholder: String,
     /// Resolved path to the file (relative to workspace).
     pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) enum ModelPickerStage {
+    /// 第一级：选择后端（GLM / MiniMax）
+    #[default]
+    Backend,
+    /// 第二级：选择具体模型（已知选定的后端 label）
+    Model,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ModelPickerState {
+    pub stage: ModelPickerStage,
+    /// 当前页显示的标签列表（第一级=后端名，第二级=模型名）
+    pub labels: Vec<String>,
+    /// 与 labels 一一对应的原始值（用于逻辑判断）
+    pub values: Vec<String>,
+    /// 当前高亮索引
+    pub sel: usize,
+    /// 第一级选定的后端 label（进入第二级后使用）
+    pub pending_backend: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -219,6 +244,7 @@ impl App {
             at_file: AtFilePickerState::default(),
             user_commands: Vec::new(),
             cmd_picker: CmdPickerState::default(),
+            model_picker: ModelPickerState::default(),
         }
     }
 
@@ -425,7 +451,7 @@ async fn run_loop(
             let client = http_client.clone();
             let messages = app.messages.clone();
             let show_thinking = app.show_thinking;
-            let backend = app.backend;
+            let backend = app.backend.clone();
             llm_task_handle = Some(tokio::spawn(async move {
                 let result = backend
                     .chat_stream_with(
