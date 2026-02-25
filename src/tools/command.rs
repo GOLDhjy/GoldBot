@@ -5,8 +5,7 @@ use std::{
 };
 
 const BUILTIN_EXAMPLE_COMMAND_NAME: &str = "commit";
-const BUILTIN_EXAMPLE_COMMAND_MD: &str =
-    include_str!("../../builtin-commands/commit.md");
+const BUILTIN_EXAMPLE_COMMAND_MD: &str = include_str!("../../builtin-commands/commit.md");
 
 // ── 数据类型 ──────────────────────────────────────────────────────────────────
 
@@ -41,15 +40,31 @@ pub enum BuiltinCommand {
 
 /// (variant, name, description)
 const BUILTIN_COMMANDS: &[(BuiltinCommand, &str, &str)] = &[
-    (BuiltinCommand::Clear,    "clear",    "清除会话历史，重新开始对话"),
-    (BuiltinCommand::Compact,  "compact",  "立即压缩上下文（节省 Token）"),
-    (BuiltinCommand::Help,     "help",     "显示键位绑定和可用命令列表"),
-    (BuiltinCommand::Mcp,      "mcp",      "列出所有已注册的 MCP 工具"),
-    (BuiltinCommand::Memory,   "memory",   "查看当前长期和短期记忆内容"),
-    (BuiltinCommand::Model,    "model",    "切换 LLM 后端与模型"),
-    (BuiltinCommand::Skills,   "skills",   "列出所有已发现的 Skill"),
-    (BuiltinCommand::Status,   "status",   "显示 workspace、模型、环境配置摘要"),
-    (BuiltinCommand::Thinking, "thinking", "切换原生 Thinking 模式（同 Tab）"),
+    (BuiltinCommand::Clear, "clear", "清除会话历史，重新开始对话"),
+    (
+        BuiltinCommand::Compact,
+        "compact",
+        "立即压缩上下文（节省 Token）",
+    ),
+    (BuiltinCommand::Help, "help", "显示键位绑定和可用命令列表"),
+    (BuiltinCommand::Mcp, "mcp", "列出所有已注册的 MCP 工具"),
+    (
+        BuiltinCommand::Memory,
+        "memory",
+        "查看当前长期和短期记忆内容",
+    ),
+    (BuiltinCommand::Model, "model", "切换 LLM 后端与模型"),
+    (BuiltinCommand::Skills, "skills", "列出所有已发现的 Skill"),
+    (
+        BuiltinCommand::Status,
+        "status",
+        "显示 workspace、模型、环境配置摘要",
+    ),
+    (
+        BuiltinCommand::Thinking,
+        "thinking",
+        "切换原生 Thinking 模式（同 Tab）",
+    ),
 ];
 
 // ── 目录发现 ──────────────────────────────────────────────────────────────────
@@ -67,7 +82,9 @@ pub fn ensure_builtin_commands() -> Vec<String> {
     if path.exists() {
         return warnings;
     }
-    if let Err(e) = fs::create_dir_all(&dir).and_then(|_| fs::write(&path, BUILTIN_EXAMPLE_COMMAND_MD)) {
+    if let Err(e) =
+        fs::create_dir_all(&dir).and_then(|_| fs::write(&path, BUILTIN_EXAMPLE_COMMAND_MD))
+    {
         warnings.push(format!(
             "failed to install built-in command `{}`: {e}",
             BUILTIN_EXAMPLE_COMMAND_NAME
@@ -87,7 +104,11 @@ pub fn discover_commands() -> Vec<Command> {
 
     // Claude Code 兼容目录
     if let Some(home) = crate::tools::home_dir() {
-        scan_flat_dir(&home.join(".claude").join("commands"), &mut commands, &mut seen);
+        scan_flat_dir(
+            &home.join(".claude").join("commands"),
+            &mut commands,
+            &mut seen,
+        );
     }
 
     commands
@@ -115,24 +136,11 @@ pub fn filter_commands<'a>(commands: &'a [Command], query: &str) -> Vec<&'a Comm
     let q = query.to_lowercase();
     commands
         .iter()
-        .filter(|c| {
-            c.name.to_lowercase().contains(&q) || c.description.to_lowercase().contains(&q)
-        })
+        .filter(|c| c.name.to_lowercase().contains(&q) || c.description.to_lowercase().contains(&q))
         .collect()
 }
 
 /// 若存在用户自定义命令，返回启动时状态行提示字符串。
-pub fn format_commands_status_line(user_commands: &[Command]) -> Option<String> {
-    if user_commands.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "  {} user command{} loaded",
-        user_commands.len(),
-        if user_commands.len() == 1 { "" } else { "s" }
-    ))
-}
-
 // ── 私有辅助 ──────────────────────────────────────────────────────────────────
 
 /// 扫描平铺目录：每个 `<name>.md` 文件即一个命令。

@@ -23,7 +23,7 @@ use crossterm::{
 };
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
-use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands, format_commands_status_line};
+use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::{AssistMode, Event, Mode};
 use ui::ge::drain_ge_events;
@@ -166,7 +166,9 @@ impl App {
         let store = MemoryStore::new();
         // 启动时清理超过 15 天的短期记忆文件
         store.cleanup_old_short_term();
-        let (mcp_registry, mcp_warnings) = crate::tools::mcp::McpRegistry::from_env();
+        let backend = LlmBackend::from_env();
+        let (mut mcp_registry, mcp_warnings) = crate::tools::mcp::McpRegistry::from_env();
+        mcp_registry.inject_builtin_for_backend(backend.backend_label());
         for warning in mcp_warnings {
             eprintln!("[mcp] {warning}");
         }
@@ -238,7 +240,7 @@ impl App {
             workspace,
             ge_agent: None,
             todo_items: Vec::new(),
-            backend: LlmBackend::from_env(),
+            backend,
             headless: false,
             task_display_override: None,
             at_file: AtFilePickerState::default(),
@@ -323,11 +325,8 @@ async fn main() -> anyhow::Result<()> {
         screen.emit(&[line]);
     }
 
-    // Discover user-defined slash commands and display count.
+    // Discover user-defined slash commands.
     app.user_commands = discover_commands();
-    if let Some(line) = format_commands_status_line(&app.user_commands) {
-        screen.emit(&[line]);
-    }
 
     // Start MCP discovery in background; results arrive via channel in run_loop.
     if app.mcp_registry.has_servers() {

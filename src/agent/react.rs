@@ -117,7 +117,8 @@ pub fn build_system_prompt() -> String {
     let mcp_path = crate::tools::mcp::mcp_servers_file_path();
     let skills_dir = crate::tools::skills::goldbot_skills_dir();
     let shell_hint = if cfg!(target_os = "windows") {
-        "PowerShell (Windows). Use PowerShell syntax only Or Execute like this: powershell -Command ..."
+        "PowerShell (Windows). Use PowerShell syntax only Or Execute like this: powershell -Command .../
+        For file encoding issues, try adding `| Out-File -Encoding utf8` at the end of your command to ensure UTF-8 output."
     } else {
         "bash (macOS/Linux)"
     };

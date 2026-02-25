@@ -1,4 +1,4 @@
-﻿# GoldBot - AI 终端自动化助手
+# GoldBot - AI 终端自动化助手
 
 [![GitHub Release](https://img.shields.io/github/v/release/GOLDhjy/GoldBot?display_name=tag&style=flat-square)](https://github.com/GOLDhjy/GoldBot/releases) [![GitHub Actions](https://img.shields.io/github/actions/workflow/status/GOLDhjy/GoldBot/release.yml?style=flat-square)](https://github.com/GOLDhjy/GoldBot/actions/workflows/release.yml) [![GitHub Stars](https://img.shields.io/github/stars/GOLDhjy/GoldBot?style=flat-square)](https://github.com/GOLDhjy/GoldBot/stargazers) [![License](https://img.shields.io/github/license/GOLDhjy/GoldBot?style=flat-square)](https://github.com/GOLDhjy/GoldBot/blob/main/LICENSE)
 
@@ -39,12 +39,6 @@ curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/inst
 
 ```powershell
 irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex
-```
-
-### Homebrew
-
-```bash
-brew install GOLDhjy/GoldBot/goldbot
 ```
 
 ### 手动下载

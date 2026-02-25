@@ -1,9 +1,9 @@
 use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
 use crate::agent::executor::{execute_command, finish};
+use crate::agent::provider::BACKEND_PRESETS;
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
-use crate::agent::provider::BACKEND_PRESETS;
 use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
@@ -368,7 +368,9 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                         screen.refresh();
                         return;
                     }
-                    _ => { return; }
+                    _ => {
+                        return;
+                    }
                 }
             }
         }
@@ -1081,7 +1083,8 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
                 "    /              打开命令选择器".to_string(),
                 "    GE <目标>       进入 Golden Experience 督导模式".to_string(),
                 String::new(),
-                "  内置命令：/help  /clear  /compact  /memory  /thinking  /skills  /mcp  /status".to_string(),
+                "  内置命令：/help  /clear  /compact  /memory  /thinking  /skills  /mcp  /status"
+                    .to_string(),
             ]);
         }
 
@@ -1118,8 +1121,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             let store = crate::memory::store::MemoryStore::new();
             match store.build_memory_message() {
                 Some(mem) => {
-                    let lines: Vec<String> =
-                        mem.lines().map(|l| format!("  {}", l)).collect();
+                    let lines: Vec<String> = mem.lines().map(|l| format!("  {}", l)).collect();
                     screen.emit(&lines);
                 }
                 None => {
@@ -1192,11 +1194,11 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
 
     let provider_value = match backend_label {
         "MiniMax" => "minimax",
-        _         => "glm",
+        _ => "glm",
     };
     let model_key = match backend_label {
         "MiniMax" => "MINIMAX_MODEL",
-        _         => "BIGMODEL_MODEL",
+        _ => "BIGMODEL_MODEL",
     };
 
     // 逐行替换已有键，追加不存在的键
@@ -1311,7 +1313,7 @@ fn select_model_item(app: &mut App, screen: &mut Screen) {
             // 切换后端+模型
             app.backend = match backend.as_str() {
                 "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
-                _         => crate::agent::provider::LlmBackend::Glm(model.clone()),
+                _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
             };
             // 持久化到 ~/.goldbot/.env
             persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());

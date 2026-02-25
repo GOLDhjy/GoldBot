@@ -64,7 +64,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM",     &["GLM-4.7", "GLM-5.0"]),
+    ("GLM", &["GLM-4.7", "GLM-5.0"]),
     ("MiniMax", &["MiniMax-M2.5", "MiniMax-M2.1"]),
 ];
 
@@ -92,12 +92,11 @@ impl LlmBackend {
             }
         };
         if is_minimax {
-            let model = std::env::var("MINIMAX_MODEL")
-                .unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+            let model =
+                std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
             LlmBackend::MiniMax(model)
         } else {
-            let model = std::env::var("BIGMODEL_MODEL")
-                .unwrap_or_else(|_| "GLM-4.7".to_string());
+            let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "GLM-4.7".to_string());
             LlmBackend::Glm(model)
         }
     }
@@ -133,12 +132,26 @@ impl LlmBackend {
         match self {
             Self::Glm(model) => {
                 GlmProvider
-                    .chat_stream_with(client, messages, model, show_thinking, on_delta, on_thinking_delta)
+                    .chat_stream_with(
+                        client,
+                        messages,
+                        model,
+                        show_thinking,
+                        on_delta,
+                        on_thinking_delta,
+                    )
                     .await
             }
             Self::MiniMax(model) => {
                 MiniMaxProvider
-                    .chat_stream_with(client, messages, model, show_thinking, on_delta, on_thinking_delta)
+                    .chat_stream_with(
+                        client,
+                        messages,
+                        model,
+                        show_thinking,
+                        on_delta,
+                        on_thinking_delta,
+                    )
                     .await
             }
         }

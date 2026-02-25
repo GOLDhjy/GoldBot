@@ -326,6 +326,39 @@ impl McpRegistry {
         !self.servers.is_empty()
     }
 
+    /// 注入当前后端对应的内置 MCP 服务器。
+    /// 先移除之前注入的内置服务器（以 "builtin_" 开头），再注入新后端的。
+    /// 需在 run_discovery 之前调用，discovery 时会一并处理内置服务器。
+    pub fn inject_builtin_for_backend(&mut self, backend_label: &str) {
+        // 移除之前注入的内置服务器
+        self.servers.retain(|k, _| !k.starts_with("builtin_"));
+        self.tools
+            .retain(|_, v| !v.server_name.starts_with("builtin_"));
+        self.failed.retain(|k| !k.starts_with("builtin_"));
+
+        match backend_label {
+            "MiniMax" => {
+                let mut env = HashMap::new();
+                env.insert(
+                    "MINIMAX_API_HOST".to_string(),
+                    "https://api.minimaxi.com".to_string(),
+                );
+                // MINIMAX_API_KEY 直接从父进程环境继承，无需显式传递
+                self.servers.insert(
+                    "builtin_minimax".to_string(),
+                    LocalServerSpec {
+                        command: "uvx".to_string(),
+                        args: vec!["minimax-coding-plan-mcp".to_string(), "-y".to_string()],
+                        env,
+                        cwd: None,
+                        transport: None,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Run tool discovery synchronously. Intended to be called from a background thread.
     pub fn run_discovery(mut self) -> (Self, Vec<String>) {
         if self.servers.is_empty() {

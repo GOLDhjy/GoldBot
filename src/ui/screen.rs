@@ -203,7 +203,12 @@ impl Screen {
             }
             let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = todo_rows + at_file_rows + command_rows + model_picker_rows + display_labels.len() + 1;
+            self.managed_lines = todo_rows
+                + at_file_rows
+                + command_rows
+                + model_picker_rows
+                + display_labels.len()
+                + 1;
         } else {
             let sym = Symbols::current();
             let spinner_frame =
@@ -271,7 +276,8 @@ impl Screen {
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
-            self.managed_lines = todo_rows + at_file_rows + command_rows + model_picker_rows + status_rows + 2;
+            self.managed_lines =
+                todo_rows + at_file_rows + command_rows + model_picker_rows + status_rows + 2;
 
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示

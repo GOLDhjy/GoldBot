@@ -39,12 +39,6 @@ curl -fsSL https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/inst
 irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex
 ```
 
-### Homebrew
-
-```bash
-brew install GOLDhjy/GoldBot/goldbot
-```
-
 ### Manual Download
 
 - macOS Intel: `goldbot-v*-macos-x86_64.tar.gz`
