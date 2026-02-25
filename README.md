@@ -18,6 +18,8 @@
 - MCP 工具接入：启动时自动发现并映射为 `mcp_<server>_<tool>`
 - 联网搜索：接入 Bocha AI，LLM 可主动检索实时信息
 - Skills 系统：启动时自动发现 `~/.goldbot/skills/` 下的技能，注入系统提示词
+- **@ 文件附加**：输入框中键入 `@` 实时搜索文件，选中后自动附加到消息发送给 LLM
+- **Slash 命令**：`/` 打开命令选择器，内置 8 个实用命令，支持用户自定义扩展
 - GE 监督模式：多模型协作（Claude 执行 → Codex 优化 → GoldBot 验收），自动 git commit
 - 跨平台：macOS/Linux (bash) / Windows (PowerShell)
 
@@ -89,10 +91,13 @@ goldbot -p "整理当前目录的大文件" -y
 | `Ctrl+C` | 任意 | 退出 |
 | `Ctrl+D` | 任务完成后 | 折叠/展开详情 |
 | `Tab` | 非菜单模式 | 切换深度思考 ON/OFF |
-| `↑/↓` | 菜单模式 | 移动选项 |
-| `Enter` | 菜单模式 | 确认选项 |
+| `Shift+Tab` | 非菜单模式 | 循环切换协助模式（agent / accept edits / plan） |
+| `@` | 输入框为空时 | 打开文件搜索选择器 |
+| `/` | 输入框为空时 | 打开 slash 命令选择器 |
+| `↑/↓` | 菜单/选择器模式 | 移动选项 |
+| `Enter` / `Tab` | 选择器模式 | 确认选中项 |
 | 直接输入字符 | question 菜单 | 进入自定义输入模式 |
-| `Esc` | 输入中 | 失焦 / 返回菜单 |
+| `Esc` | 输入中 | 失焦 / 取消选择器 / 返回菜单 |
 
 ### 确认菜单（risky 命令）
 
@@ -106,6 +111,50 @@ goldbot -p "整理当前目录的大文件" -y
 ### Question 菜单（LLM 提问）
 
 LLM 使用 `question` 工具时弹出，选项由 LLM 决定。最后一项通常为 `✏ 我来说...`，选中或直接输入字符可进入自由文本模式。
+
+## @ 文件附加
+
+在输入框为空时键入 `@`，弹出文件搜索面板：
+
+- 继续输入字符实时过滤文件名（大小写不敏感）
+- `↑/↓` 选择候选，`Enter` 或 `Tab` 确认附加
+- `Esc` 或退格删除 `@` 取消选择器
+- 可附加多个文件，选中后以 `@path/to/file` 形式嵌入输入框
+- 提交时自动将文件绝对路径追加到消息，LLM 可据此读取文件内容
+
+搜索范围为当前 workspace，自动跳过 `.git`、`target`、`node_modules` 等目录。
+
+## Slash 命令
+
+在输入框为空时键入 `/`，弹出命令选择器，输入字符实时过滤，`↑/↓` 导航，`Enter` 执行。
+
+### 内置命令
+
+| 命令 | 说明 |
+|---|---|
+| `/help` | 显示键位绑定和可用命令列表 |
+| `/clear` | 清除会话历史，重新开始对话 |
+| `/compact` | 立即截断上下文，保留最近 18 条消息 |
+| `/memory` | 查看当前长期和短期记忆内容 |
+| `/thinking` | 切换原生 Thinking 模式（同 Tab 键） |
+| `/skills` | 列出所有已发现的 Skill |
+| `/mcp` | 列出所有已注册的 MCP 工具及状态 |
+| `/status` | 显示 workspace、模型、Thinking 状态等配置摘要 |
+
+### 用户自定义命令
+
+在 `~/.goldbot/command/<name>/COMMAND.md` 创建命令文件：
+
+```markdown
+---
+name: my-cmd
+description: 命令说明
+---
+
+模板内容，选中后填入输入框供用户编辑后提交
+```
+
+目录名必须与 `name` 字段一致，`name` 只允许字母、数字和连字符。
 
 ## GE 黄金体验
 
@@ -259,7 +308,8 @@ src/
 │   ├── safety.rs        # 风险评估（Safe/Confirm/Block）
 │   ├── mcp.rs           # MCP server 发现与调用
 │   ├── web_search.rs    # Bocha AI 搜索
-│   └── skills.rs        # Skills 加载
+│   ├── skills.rs        # Skills 加载
+│   └── command.rs       # Slash 命令定义与发现
 ├── memory/
 │   ├── store.rs         # 记忆读写
 │   └── compactor.rs     # 上下文压缩
@@ -287,7 +337,7 @@ src/
 
 ## TODO
 - ~~@ 功能实现~~
+- ~~slash command~~
 - diff 代码语法高亮
 - 容易陷入死循环
-- slash command
 - 减少 Bash 这些标题，合并成一个，如果一直重复

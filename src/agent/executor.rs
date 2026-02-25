@@ -41,7 +41,9 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     screen.todo_items.clear();
     app.messages.push(Message::user(task.clone()));
 
-    emit_live_event(screen, &Event::UserTask { text: task });
+    // TUI 显示用 override（如命令展开时只显示占位符），否则显示完整 task
+    let display = app.task_display_override.take().unwrap_or(task);
+    emit_live_event(screen, &Event::UserTask { text: display });
 }
 
 pub(crate) fn process_llm_result(

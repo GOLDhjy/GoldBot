@@ -395,7 +395,15 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 
         match key {
             KeyCode::Enter => {
-                let task = expand_input_text(app, &screen.input).trim().to_string();
+                let raw = expand_input_text(app, &screen.input);
+                // 若有暂存的模板命令，把占位符替换成完整模板内容发给 LLM，
+                // 同时把原始输入（如 "/commit"）保留为 TUI 显示文本。
+                let task = if let Some((ph, content)) = app.cmd_picker.pending_template.take() {
+                    app.task_display_override = Some(raw.trim().to_string());
+                    raw.replace(&ph, &content).trim().to_string()
+                } else {
+                    raw.trim().to_string()
+                };
                 if !task.is_empty() {
                     // Build final task with attached file contents before clearing state
                     let at_file_chunks = std::mem::take(&mut app.at_file.chunks);
@@ -1007,11 +1015,10 @@ fn select_command(app: &mut App, screen: &mut Screen) {
             dispatch_builtin_command(app, screen, builtin);
         }
         CommandAction::Template(content) => {
-            // 把模板内容填入输入框，由用户编辑后 Enter 提交
-            screen.input = content;
-            screen.status = format!("/{}: 编辑后按 Enter 提交", cmd.name)
-                .grey()
-                .to_string();
+            // 输入框只显示 "/name" 占位符，提交时将其替换为模板内容（同 @ 机制）。
+            let placeholder = format!("/{}", cmd.name);
+            screen.input = placeholder.clone();
+            app.cmd_picker.pending_template = Some((placeholder, content));
             screen.refresh();
         }
     }
@@ -1046,9 +1053,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             app.running = false;
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
-            screen.task_rendered.clear();
-            screen.task_lines = 0;
-            screen.emit(&["  会话历史已清除，重新开始对话。".to_string()]);
+            screen.clear_screen();
         }
 
         BuiltinCommand::Compact => {
@@ -1094,11 +1099,8 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             if app.skills.is_empty() {
                 screen.emit(&["  未发现任何 Skill。".to_string()]);
             } else {
-                let mut lines = vec![format!("  已发现 {} 个 Skill：", app.skills.len())];
-                for s in &app.skills {
-                    lines.push(format!("    - {}: {}", s.name, s.description));
-                }
-                screen.emit(&lines);
+                let names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();
+                screen.emit(&[format!("  Skills ({}): {}", names.len(), names.join(", "))]);
             }
         }
 

@@ -423,6 +423,20 @@ impl Screen {
         self.draw_managed();
     }
 
+    /// 清空整个终端屏幕，重置任务记录，重新绘制底部管理区。
+    pub(crate) fn clear_screen(&mut self) {
+        self.task_lines = 0;
+        self.task_rendered.clear();
+        self.managed_lines = 2;
+        self.cursor_at_prompt = false;
+        let _ = execute!(
+            self.stdout,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            cursor::MoveTo(0, 0)
+        );
+        self.draw_managed();
+    }
+
     /// 只原地刷新状态行，不动输入栏和 hint 行，避免光标在两行之间跳动。
     /// 仅适用于 spinner 跳帧和思考预览更新场景。
     /// 若行数发生变化或处于确认/todo 界面，则回退到完整 refresh()。

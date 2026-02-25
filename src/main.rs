@@ -23,7 +23,7 @@ use crossterm::{
 };
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
-use tools::command::{Command as UserCommand, discover_commands, format_commands_status_line};
+use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands, format_commands_status_line};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::{AssistMode, Event, Mode};
 use ui::ge::drain_ge_events;
@@ -84,6 +84,9 @@ pub(crate) struct App {
     /// True when launched with -p: auto-quit after task finishes, print final_summary to stdout.
     pub headless: bool,
 
+    /// 覆盖 UserTask 事件的 TUI 显示文本（命令展开时显示占位符而非完整内容）。
+    pub task_display_override: Option<String>,
+
     // ── @ file picker ──────────────────────────────────────────────────────────
     pub at_file: AtFilePickerState,
 
@@ -115,6 +118,8 @@ pub(crate) struct CmdPickerState {
     pub candidates: Vec<String>,
     /// 当前选中的索引。
     pub sel: usize,
+    /// 用户选中模板命令后暂存的 (占位符, 模板内容)，提交时把占位符替换成内容。
+    pub pending_template: Option<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -210,6 +215,7 @@ impl App {
             todo_items: Vec::new(),
             backend: LlmBackend::from_env(),
             headless: false,
+            task_display_override: None,
             at_file: AtFilePickerState::default(),
             user_commands: Vec::new(),
             cmd_picker: CmdPickerState::default(),
@@ -258,6 +264,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
     ensure_dot_env();
+    for warning in ensure_builtin_commands() {
+        eprintln!("[command] {warning}");
+    }
     let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
     let http_client = build_http_client()?;
     let mut app = App::new();

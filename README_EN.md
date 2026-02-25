@@ -16,6 +16,8 @@ A cross-platform TUI Agent built with Rust that automatically plans and executes
 - **MCP Tools**: Auto-discover and expose MCP tools as `mcp_<server>_<tool>`
 - **Web Search**: Bocha AI integration — LLM can proactively search for up-to-date information
 - **Skills System**: Auto-discovers skills from `~/.goldbot/skills/` and injects them into the system prompt
+- **@ File Attachment**: Type `@` in the input box to search and attach files — they are sent with the message to the LLM
+- **Slash Commands**: Type `/` to open a command picker with 8 built-in commands and user-defined extensions
 - **GE Golden Experience**: Multi-model collaboration (Claude executes → Codex optimizes → GoldBot validates), auto git commit
 - **Cross-Platform**: macOS/Linux (bash) / Windows (PowerShell)
 
@@ -87,10 +89,13 @@ goldbot -p "clean up large files in the current directory" -y
 | `Ctrl+C` | Anywhere | Exit |
 | `Ctrl+D` | After task completes | Collapse/expand details |
 | `Tab` | Outside menu | Toggle deep thinking ON/OFF |
-| `↑/↓` | Menu mode | Move selection |
-| `Enter` | Menu mode | Confirm selection |
+| `Shift+Tab` | Outside menu | Cycle assist mode (agent / accept edits / plan) |
+| `@` | Empty input box | Open file attachment picker |
+| `/` | Empty input box | Open slash command picker |
+| `↑/↓` | Menu / picker mode | Move selection |
+| `Enter` / `Tab` | Picker mode | Confirm selection |
 | Type any char | Question menu | Enter free-text input mode |
-| `Esc` | Input focused | Unfocus / return to menu |
+| `Esc` | Input focused | Unfocus / cancel picker / return to menu |
 
 ### Confirmation Menu (risky commands)
 
@@ -104,6 +109,50 @@ Shown when a Confirm-level command is about to run:
 ### Question Menu (LLM asks user)
 
 Shown when the LLM uses the `question` tool. Options are decided by the LLM. The last option is typically `✏ Custom input` — select it or just start typing to enter free-text mode.
+
+## @ File Attachment
+
+Type `@` in an empty input box to open the file picker:
+
+- Continue typing to filter by filename (case-insensitive)
+- `↑/↓` to navigate, `Enter` or `Tab` to attach the selected file
+- `Esc` or backspace over `@` to cancel
+- Multiple files can be attached; each appears as `@path/to/file` in the input
+- On submit, absolute paths are appended to the message so the LLM can reference them
+
+Search covers the current workspace, automatically skipping `.git`, `target`, `node_modules`, etc.
+
+## Slash Commands
+
+Type `/` in an empty input box to open the command picker. Type to filter, `↑/↓` to navigate, `Enter` to run.
+
+### Built-in Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show keyboard shortcuts and available commands |
+| `/clear` | Clear conversation history and start fresh |
+| `/compact` | Immediately truncate context, keeping the last 18 messages |
+| `/memory` | View current long-term and short-term memory |
+| `/thinking` | Toggle native Thinking mode (same as Tab) |
+| `/skills` | List all discovered Skills |
+| `/mcp` | List all registered MCP tools and their status |
+| `/status` | Show workspace, model, Thinking state, and other config |
+
+### User-Defined Commands
+
+Create a command file at `~/.goldbot/command/<name>/COMMAND.md`:
+
+```markdown
+---
+name: my-cmd
+description: What this command does
+---
+
+Template content — placed into the input box for editing before submit
+```
+
+The directory name must match the `name` field. Only letters, digits, and hyphens are allowed in `name`.
 
 ## GE Golden Experience
 
@@ -255,7 +304,8 @@ src/
 │   ├── safety.rs        # Risk assessment (Safe/Confirm/Block)
 │   ├── mcp.rs           # MCP server discovery and invocation
 │   ├── web_search.rs    # Bocha AI search
-│   └── skills.rs        # Skills loading
+│   ├── skills.rs        # Skills loading
+│   └── command.rs       # Slash command definitions and discovery
 ├── memory/
 │   ├── store.rs         # Memory read/write
 │   └── compactor.rs     # Context compaction
@@ -283,5 +333,6 @@ src/
 
 ## TODO
 
-- @ mention feature
+- ~~@ file attachment~~
+- ~~Slash commands~~
 - Syntax highlighting for code in diffs
