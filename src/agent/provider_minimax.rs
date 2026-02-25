@@ -25,6 +25,8 @@ struct ApiRequest {
     /// 设为 true 时，思考内容从 reasoning_details 字段单独输出
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_split: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +171,7 @@ fn build_request(
         max_tokens: Some(4096),
         stream: if stream { Some(true) } else { None },
         reasoning_split: if show_thinking { Some(true) } else { None },
+        temperature: Some(1.0),
     };
 
     Ok((base_url, api_key, body))
