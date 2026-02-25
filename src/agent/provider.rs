@@ -64,8 +64,8 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM",     &["GLM-4.7", "GLM-4.5", "GLM-4.5-Flash"]),
-    ("MiniMax", &["MiniMax-M2.5", "MiniMax-M1"]),
+    ("GLM",     &["GLM-4.7", "GLM-5.0"]),
+    ("MiniMax", &["MiniMax-M2.5", "MiniMax-M2.1"]),
 ];
 
 // ── Backend selector ──────────────────────────────────────────────────────────
