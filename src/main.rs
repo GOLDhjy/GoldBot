@@ -89,6 +89,10 @@ pub(crate) struct App {
 
     // ── @ file picker ──────────────────────────────────────────────────────────
     pub at_file: AtFilePickerState,
+    /// 全量文件路径索引（后台扫描一次，之后内存过滤）
+    pub at_file_index: Vec<std::path::PathBuf>,
+    /// 后台扫描线程的结果接收端
+    pub at_file_index_rx: Option<std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>>,
 
     // ── / command picker ───────────────────────────────────────────────────────
     /// 用户通过 COMMAND.md 自定义的命令列表（启动时加载一次）。
@@ -244,6 +248,8 @@ impl App {
             headless: false,
             task_display_override: None,
             at_file: AtFilePickerState::default(),
+            at_file_index: Vec::new(),
+            at_file_index_rx: None,
             user_commands: Vec::new(),
             cmd_picker: CmdPickerState::default(),
             model_picker: ModelPickerState::default(),
@@ -409,6 +415,18 @@ async fn run_loop(
                 screen.emit(&[line]);
             }
             app.mcp_discovery_rx = None;
+        }
+
+        // 轮询 @ 文件索引后台扫描结果
+        if let Some(rx) = &app.at_file_index_rx {
+            if let Ok(index) = rx.try_recv() {
+                app.at_file_index = index;
+                app.at_file_index_rx = None;
+                // @ picker 仍然活跃时，用新索引刷新候选
+                if app.at_file.query.is_some() {
+                    ui::input::apply_at_file_filter(app, screen);
+                }
+            }
         }
 
         if app.interrupt_llm_loop_requested {

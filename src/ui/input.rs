@@ -889,8 +889,48 @@ fn cancel_at_file_mode(app: &mut App, screen: &mut Screen) {
 }
 
 /// Re-run the file search for `query` and update App + Screen state.
-fn update_at_file_candidates(app: &mut App, screen: &mut Screen, query: &str) {
-    app.at_file.candidates = search_files(&app.workspace, query);
+fn update_at_file_candidates(app: &mut App, screen: &mut Screen, _query: &str) {
+    // 索引未建立时 spawn 后台扫描（只触发一次）
+    if app.at_file_index.is_empty() && app.at_file_index_rx.is_none() {
+        let workspace = app.workspace.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut results = Vec::new();
+            collect_all_files(&workspace, &workspace, &mut results, 0);
+            let _ = tx.send(results);
+        });
+        app.at_file_index_rx = Some(rx);
+    }
+    // 用当前索引（可能为空，等扫描完成后 run_loop 会刷新）立即过滤
+    apply_at_file_filter(app, screen);
+}
+
+/// 在已有索引上做内存过滤，刷新候选列表和 screen 标签。
+/// 由 update_at_file_candidates 和 run_loop（索引加载完成时）共同调用。
+pub(crate) fn apply_at_file_filter(app: &mut App, screen: &mut Screen) {
+    let query_lower = app
+        .at_file
+        .query
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase();
+    let mut matched: Vec<_> = app
+        .at_file_index
+        .iter()
+        .filter(|p| {
+            query_lower.is_empty()
+                || p.to_string_lossy().to_lowercase().contains(&query_lower)
+        })
+        .cloned()
+        .collect();
+    matched.sort_by(|a, b| {
+        a.components()
+            .count()
+            .cmp(&b.components().count())
+            .then_with(|| a.cmp(b))
+    });
+    matched.truncate(8);
+    app.at_file.candidates = matched;
     app.at_file.sel = 0;
     screen.at_file_sel = 0;
     screen.at_file_labels = app
@@ -899,6 +939,7 @@ fn update_at_file_candidates(app: &mut App, screen: &mut Screen, query: &str) {
         .iter()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
+    screen.refresh();
 }
 
 /// Confirm the currently highlighted candidate: replace `@{query}` in the input with a
@@ -956,29 +997,15 @@ fn attach_files_to_task(chunks: &[AtFileChunk], task: &str) -> String {
 
 /// Search files under `workspace` whose name contains `query` (case-insensitive).
 /// Returns at most 8 relative paths, sorted by path depth then alphabetically.
-fn search_files(workspace: &std::path::Path, query: &str) -> Vec<std::path::PathBuf> {
-    let query_lower = query.to_lowercase();
-    let mut results: Vec<std::path::PathBuf> = Vec::new();
-    collect_files_recursive(workspace, workspace, &query_lower, &mut results, 0);
-    // Sort: shallower paths first, then alphabetically
-    results.sort_by(|a, b| {
-        let da = a.components().count();
-        let db = b.components().count();
-        da.cmp(&db).then_with(|| a.cmp(b))
-    });
-    results.truncate(8);
-    results
-}
-
-/// Recursively collect files matching `query` under `dir` (relative to `base`).
-fn collect_files_recursive(
+/// 递归收集 workspace 下所有文件路径到索引，供后续内存过滤使用。
+/// 在后台线程中调用，不限制结果数量（最多 20000 条防止内存爆炸）。
+fn collect_all_files(
     base: &std::path::Path,
     dir: &std::path::Path,
-    query: &str,
     results: &mut Vec<std::path::PathBuf>,
     depth: usize,
 ) {
-    if depth > 6 || results.len() >= 64 {
+    if depth > 6 || results.len() >= 20_000 {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -987,17 +1014,29 @@ fn collect_files_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // Skip hidden entries and common large/non-source directories
-        if name.starts_with('.') || matches!(name, "target" | "node_modules" | "dist" | "build") {
+        if name.starts_with('.')
+            || matches!(
+                name,
+                "target"
+                    | "node_modules"
+                    | "dist"
+                    | "build"
+                    | "out"
+                    | "obj"
+                    | "vendor"
+                    | "__pycache__"
+                    | "Binaries"
+                    | "Saved"
+                    | "Intermediate"
+                    | "DerivedDataCache"
+            )
+        {
             continue;
         }
         if path.is_dir() {
-            collect_files_recursive(base, &path, query, results, depth + 1);
+            collect_all_files(base, &path, results, depth + 1);
         } else if path.is_file() {
-            let name_lower = name.to_lowercase();
-            if (query.is_empty() || name_lower.contains(query))
-                && let Ok(rel) = path.strip_prefix(base)
-            {
+            if let Ok(rel) = path.strip_prefix(base) {
                 results.push(rel.to_path_buf());
             }
         }

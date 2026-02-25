@@ -881,7 +881,7 @@ pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) 
         .map(|(name, _)| name.as_str().dark_cyan().to_string())
         .collect();
     for name in failed {
-        parts.push(format!("{} {}", name.as_str().red(), "(failed)".grey()));
+        parts.push(name.as_str().red().to_string());
     }
     Some(format!("  {}{}", "MCP  ".grey(), parts.join(&sep)))
 }
