@@ -177,7 +177,9 @@ fn parse_skill(file: &Path, dir: &Path) -> Option<Skill> {
 
 fn parse_frontmatter(content: &str) -> Option<(HashMap<String, String>, String)> {
     let mut lines = content.lines();
-    if lines.next()?.trim() != "---" {
+    let first = lines.next()?;
+    let first = first.strip_prefix('\u{feff}').unwrap_or(first);
+    if first.trim() != "---" {
         return None;
     }
     let mut meta = HashMap::new();

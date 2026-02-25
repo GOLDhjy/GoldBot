@@ -14,6 +14,7 @@ Task complete (required):
 <final> guidelines:
 - Start with the conclusion, then add brief details.
 - If files were changed, include the file paths.
+- 不要用Emoji
 
 ## Rules
 - One tool call per response; wait for the result before proceeding. Exceptions: <tool>todo</tool> is non-blocking and can always be included alongside another tool call. <tool>explorer</tool> accepts multiple <command> tags and is the preferred way to batch read-only lookups into a single round-trip.

@@ -47,6 +47,10 @@ pub(crate) struct Screen {
     pub at_file_labels: Vec<String>,
     /// @ 文件选择器：当前选中的索引
     pub at_file_sel: usize,
+    /// / 命令选择器：待显示的命令名+描述列表（"name  description" 格式）
+    pub command_labels: Vec<String>,
+    /// / 命令选择器：当前选中的索引
+    pub command_sel: usize,
 }
 
 impl Screen {
@@ -70,6 +74,8 @@ impl Screen {
             last_status_rows: 1,
             at_file_labels: Vec::new(),
             at_file_sel: 0,
+            command_labels: Vec::new(),
+            command_sel: 0,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -146,6 +152,9 @@ impl Screen {
         // ── @ file picker panel ──
         let at_file_rows = self.draw_at_file_panel(cols);
 
+        // ── / command picker panel ──
+        let command_rows = self.draw_command_panel(cols);
+
         // 进入渲染前先隐藏光标，避免渲染过程中闪烁
         let _ = execute!(self.stdout, cursor::Hide);
 
@@ -185,7 +194,7 @@ impl Screen {
             }
             let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
-            self.managed_lines = todo_rows + at_file_rows + display_labels.len() + 1;
+            self.managed_lines = todo_rows + at_file_rows + command_rows + display_labels.len() + 1;
         } else {
             let sym = Symbols::current();
             let spinner_frame =
@@ -253,7 +262,7 @@ impl Screen {
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
-            self.managed_lines = todo_rows + at_file_rows + status_rows + 2;
+            self.managed_lines = todo_rows + at_file_rows + command_rows + status_rows + 2;
 
             // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
             // 上移 1 行即到输入行，再定位到输入末尾并显示
@@ -362,6 +371,43 @@ impl Screen {
         rows
     }
 
+    /// Render the / command picker panel. Returns the number of terminal rows consumed.
+    fn draw_command_panel(&mut self, cols: usize) -> usize {
+        if self.command_labels.is_empty() {
+            return 0;
+        }
+
+        let count = self.command_labels.len();
+        let max_visible = 8.min(count);
+        let half = max_visible / 2;
+        let start = if self.command_sel > half {
+            (self.command_sel - half).min(count.saturating_sub(max_visible))
+        } else {
+            0
+        };
+        let end = (start + max_visible).min(count);
+
+        let sym = Symbols::current();
+        let budget = cols.saturating_sub(6);
+        let mut rows = 0;
+        for i in start..end {
+            let label = &self.command_labels[i];
+            let trimmed = fit_single_line_tail(label, budget);
+            let line = if i == self.command_sel {
+                format!(
+                    "  {} {}\r\n",
+                    sym.prompt.cyan().bold(),
+                    trimmed.bold().white()
+                )
+            } else {
+                format!("    {}\r\n", trimmed).grey().to_string()
+            };
+            let _ = execute!(self.stdout, Print(line));
+            rows += 1;
+        }
+        rows
+    }
+
     pub(crate) fn emit(&mut self, lines: &[String]) {
         self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
         self.task_rendered.extend(lines.iter().cloned());
@@ -384,6 +430,7 @@ impl Screen {
         if self.confirm_selected.is_some()
             || !self.todo_items.is_empty()
             || !self.at_file_labels.is_empty()
+            || !self.command_labels.is_empty()
         {
             self.refresh();
             return;

@@ -3,6 +3,7 @@ use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 use crate::agent::executor::{execute_command, finish};
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
+use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
@@ -332,6 +333,66 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             }
         }
 
+        // ── / command picker intercepts navigation keys ──
+        if app.cmd_picker.query.is_some() {
+            match key {
+                KeyCode::Up => {
+                    app.cmd_picker.sel = app.cmd_picker.sel.saturating_sub(1);
+                    screen.command_sel = app.cmd_picker.sel;
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Down => {
+                    let max = app.cmd_picker.candidates.len().saturating_sub(1);
+                    app.cmd_picker.sel = (app.cmd_picker.sel + 1).min(max);
+                    screen.command_sel = app.cmd_picker.sel;
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    if app.cmd_picker.candidates.is_empty() {
+                        cancel_command_mode(app, screen);
+                        clear_input_buffer(app, screen);
+                    } else {
+                        select_command(app, screen);
+                    }
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Esc if modifiers.is_empty() => {
+                    cancel_command_mode(app, screen);
+                    clear_input_buffer(app, screen);
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Backspace => {
+                    let query = app.cmd_picker.query.as_mut().unwrap();
+                    if query.is_empty() {
+                        // Remove the / from input and exit picker
+                        screen.input.pop();
+                        cancel_command_mode(app, screen);
+                    } else {
+                        query.pop();
+                        screen.input.pop();
+                        let q = query.clone();
+                        update_command_candidates(app, screen, &q);
+                    }
+                    screen.refresh();
+                    return;
+                }
+                KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                    let query = app.cmd_picker.query.as_mut().unwrap();
+                    query.push(c);
+                    screen.input.push(c);
+                    let q = query.clone();
+                    update_command_candidates(app, screen, &q);
+                    screen.refresh();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key {
             KeyCode::Enter => {
                 let task = expand_input_text(app, &screen.input).trim().to_string();
@@ -362,6 +423,8 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.input.push(c);
                 if c == '@' {
                     enter_at_file_mode(app, screen);
+                } else if c == '/' && screen.input == "/" {
+                    enter_command_mode(app, screen);
                 }
                 screen.refresh();
             }
@@ -385,6 +448,8 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.input.push(c);
                 if c == '@' {
                     enter_at_file_mode(app, screen);
+                } else if c == '/' && screen.input == "/" {
+                    enter_command_mode(app, screen);
                 }
                 screen.refresh();
             }
@@ -885,6 +950,189 @@ fn collect_files_recursive(
             {
                 results.push(rel.to_path_buf());
             }
+        }
+    }
+}
+
+// ── / command picker ──────────────────────────────────────────────────────────
+
+/// 进入命令选择器：query 置为 Some(""), 加载全量候选。
+fn enter_command_mode(app: &mut App, screen: &mut Screen) {
+    app.cmd_picker.query = Some(String::new());
+    app.cmd_picker.sel = 0;
+    update_command_candidates(app, screen, "");
+}
+
+/// 退出命令选择器（不选中任何命令），清空 picker 状态。
+fn cancel_command_mode(app: &mut App, screen: &mut Screen) {
+    app.cmd_picker.query = None;
+    app.cmd_picker.candidates.clear();
+    app.cmd_picker.sel = 0;
+    screen.command_labels.clear();
+    screen.command_sel = 0;
+}
+
+/// 按 query 更新候选列表并同步到 Screen。
+fn update_command_candidates(app: &mut App, screen: &mut Screen, query: &str) {
+    let all = all_commands(&app.user_commands);
+    let filtered = filter_commands(&all, query);
+    app.cmd_picker.candidates = filtered.iter().map(|c| c.name.clone()).collect();
+    screen.command_labels = filtered
+        .iter()
+        .map(|c| format!("/{:<16}  {}", c.name, c.description))
+        .collect();
+    app.cmd_picker.sel = 0;
+    screen.command_sel = 0;
+}
+
+/// 确认当前高亮的命令：内置命令立即执行，模板命令填入输入框。
+fn select_command(app: &mut App, screen: &mut Screen) {
+    let sel = app.cmd_picker.sel;
+    let Some(name) = app.cmd_picker.candidates.get(sel).cloned() else {
+        cancel_command_mode(app, screen);
+        return;
+    };
+
+    let all = all_commands(&app.user_commands);
+    let Some(cmd) = all.into_iter().find(|c| c.name == name) else {
+        cancel_command_mode(app, screen);
+        return;
+    };
+
+    cancel_command_mode(app, screen);
+    clear_input_buffer(app, screen);
+
+    match cmd.action {
+        CommandAction::Builtin(builtin) => {
+            dispatch_builtin_command(app, screen, builtin);
+        }
+        CommandAction::Template(content) => {
+            // 把模板内容填入输入框，由用户编辑后 Enter 提交
+            screen.input = content;
+            screen.status = format!("/{}: 编辑后按 Enter 提交", cmd.name)
+                .grey()
+                .to_string();
+            screen.refresh();
+        }
+    }
+}
+
+/// 执行内置命令。
+fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinCommand) {
+    match cmd {
+        BuiltinCommand::Help => {
+            screen.emit(&[
+                "  键位绑定：".to_string(),
+                "    Ctrl+C         退出".to_string(),
+                "    Ctrl+D         展开/折叠任务详情".to_string(),
+                "    Tab            切换原生 Thinking ON/OFF".to_string(),
+                "    Shift+Tab      循环切换协助模式 (agent / accept edits / plan)".to_string(),
+                "    ↑ / ↓          导航菜单选项".to_string(),
+                "    Enter          确认选择 / 提交输入".to_string(),
+                "    Esc            中断 LLM / 取消输入焦点".to_string(),
+                "    @              搜索并附加文件".to_string(),
+                "    /              打开命令选择器".to_string(),
+                "    GE <目标>       进入 Golden Experience 督导模式".to_string(),
+                String::new(),
+                "  内置命令：/help  /clear  /compact  /memory  /thinking  /skills  /mcp  /status".to_string(),
+            ]);
+        }
+
+        BuiltinCommand::Clear => {
+            // 保留 messages[0]（system）和 messages[1]（assistant 上下文），清空其余
+            app.messages.truncate(2);
+            app.task_events.clear();
+            app.final_summary = None;
+            app.running = false;
+            app.llm_stream_preview.clear();
+            app.llm_preview_shown.clear();
+            screen.task_rendered.clear();
+            screen.task_lines = 0;
+            screen.emit(&["  会话历史已清除，重新开始对话。".to_string()]);
+        }
+
+        BuiltinCommand::Compact => {
+            let total = app.messages.len();
+            if total <= 4 {
+                screen.emit(&[format!("  /compact: 只有 {} 条消息，无需压缩。", total)]);
+            } else {
+                // 保留 messages[0..2]（system + assistant ctx）+ 最近 18 条
+                let keep = 18.min(total.saturating_sub(2));
+                let keep_from = total - keep;
+                let kept: Vec<_> = app.messages[keep_from..].to_vec();
+                app.messages.truncate(2);
+                app.messages.extend(kept);
+                screen.emit(&[format!(
+                    "  /compact: 已保留最近 {} 条消息（压缩前共 {} 条）。",
+                    keep, total
+                )]);
+            }
+        }
+
+        BuiltinCommand::Memory => {
+            let store = crate::memory::store::MemoryStore::new();
+            match store.build_memory_message() {
+                Some(mem) => {
+                    let lines: Vec<String> =
+                        mem.lines().map(|l| format!("  {}", l)).collect();
+                    screen.emit(&lines);
+                }
+                None => {
+                    screen.emit(&["  （暂无记忆内容）".to_string()]);
+                }
+            }
+        }
+
+        BuiltinCommand::Thinking => {
+            app.show_thinking = !app.show_thinking;
+            let state = if app.show_thinking { "ON" } else { "OFF" };
+            let label = format!("  Thinking: {}", state);
+            screen.emit(&[label]);
+        }
+
+        BuiltinCommand::Skills => {
+            if app.skills.is_empty() {
+                screen.emit(&["  未发现任何 Skill。".to_string()]);
+            } else {
+                let mut lines = vec![format!("  已发现 {} 个 Skill：", app.skills.len())];
+                for s in &app.skills {
+                    lines.push(format!("    - {}: {}", s.name, s.description));
+                }
+                screen.emit(&lines);
+            }
+        }
+
+        BuiltinCommand::Mcp => {
+            let status = app.mcp_registry.startup_status();
+            if status.ok.is_empty() && status.failed.is_empty() {
+                screen.emit(&["  未配置任何 MCP 服务器。".to_string()]);
+            } else {
+                let mut lines = vec!["  MCP 服务器：".to_string()];
+                for (server, tool_count) in &status.ok {
+                    lines.push(format!("    ✓ {}  ({} 个工具)", server, tool_count));
+                }
+                for server in &status.failed {
+                    lines.push(format!("    ✗ {}  (连接失败)", server));
+                }
+                screen.emit(&lines);
+            }
+        }
+
+        BuiltinCommand::Status => {
+            let ws = app.workspace.to_string_lossy().replace('\\', "/");
+            let model = std::env::var("BIGMODEL_MODEL")
+                .unwrap_or_else(|_| "GLM-4.7".to_string());
+            let mode_str = format!("{:?}", app.assist_mode);
+            let thinking = if app.show_thinking { "ON" } else { "OFF" };
+            screen.emit(&[
+                format!("  Workspace:  {}", ws),
+                format!("  Model:      {}", model),
+                format!("  Mode:       {}", mode_str),
+                format!("  Thinking:   {}", thinking),
+                format!("  Skills:     {}", app.skills.len()),
+                format!("  Commands:   {} 用户 + 8 内置", app.user_commands.len()),
+                format!("  Messages:   {}", app.messages.len()),
+            ]);
         }
     }
 }

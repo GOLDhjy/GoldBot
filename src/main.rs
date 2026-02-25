@@ -23,6 +23,7 @@ use crossterm::{
 };
 use memory::store::MemoryStore;
 use tokio::sync::mpsc;
+use tools::command::{Command as UserCommand, discover_commands, format_commands_status_line};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::{AssistMode, Event, Mode};
 use ui::ge::drain_ge_events;
@@ -85,6 +86,11 @@ pub(crate) struct App {
 
     // ── @ file picker ──────────────────────────────────────────────────────────
     pub at_file: AtFilePickerState,
+
+    // ── / command picker ───────────────────────────────────────────────────────
+    /// 用户通过 COMMAND.md 自定义的命令列表（启动时加载一次）。
+    pub user_commands: Vec<UserCommand>,
+    pub cmd_picker: CmdPickerState,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +105,16 @@ pub(crate) struct AtFileChunk {
     pub placeholder: String,
     /// Resolved path to the file (relative to workspace).
     pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CmdPickerState {
+    /// 当 `Some` 时，/ 命令选择器激活；值为 `/` 之后已输入的过滤字符串。
+    pub query: Option<String>,
+    /// 当前过滤后匹配的命令名列表（用于渲染面板）。
+    pub candidates: Vec<String>,
+    /// 当前选中的索引。
+    pub sel: usize,
 }
 
 #[derive(Debug, Default)]
@@ -195,6 +211,8 @@ impl App {
             backend: LlmBackend::from_env(),
             headless: false,
             at_file: AtFilePickerState::default(),
+            user_commands: Vec::new(),
+            cmd_picker: CmdPickerState::default(),
         }
     }
 
@@ -267,6 +285,12 @@ async fn main() -> anyhow::Result<()> {
     // Display discovered skills below the banner.
     let skill_names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();
     if let Some(line) = format_skills_status_line(&skill_names) {
+        screen.emit(&[line]);
+    }
+
+    // Discover user-defined slash commands and display count.
+    app.user_commands = discover_commands();
+    if let Some(line) = format_commands_status_line(&app.user_commands) {
         screen.emit(&[line]);
     }
 
