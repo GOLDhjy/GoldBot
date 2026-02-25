@@ -1,4 +1,4 @@
-# GoldBot - AI 终端自动化助手
+﻿# GoldBot - AI 终端自动化助手
 
 [![GitHub Release](https://img.shields.io/github/v/release/GOLDhjy/GoldBot?display_name=tag&style=flat-square)](https://github.com/GOLDhjy/GoldBot/releases) [![GitHub Actions](https://img.shields.io/github/actions/workflow/status/GOLDhjy/GoldBot/release.yml?style=flat-square)](https://github.com/GOLDhjy/GoldBot/actions/workflows/release.yml) [![GitHub Stars](https://img.shields.io/github/stars/GOLDhjy/GoldBot?style=flat-square)](https://github.com/GOLDhjy/GoldBot/stargazers) [![License](https://img.shields.io/github/license/GOLDhjy/GoldBot?style=flat-square)](https://github.com/GOLDhjy/GoldBot/blob/main/LICENSE)
 
@@ -399,3 +399,76 @@ src/
                                                                                                                                                                                                  
   regex = "1"      # 正则匹配，search 用                                                                                                                                                         
   walkdir = "2"    # 递归遍历，glob 用     
+
+
+  ## 临时
+
+    ✓ ## 重构建议
+    
+    1. main.rs (585行) - 巨型结构体
+    问题: App 结构体包含 30+ 字段，职责过于庞杂
+    rust
+    pub(crate) struct App {
+        // 分散在各处的大量字段...
+    }
+
+    建议: 拆分为多个子结构
+    rust
+    pub(crate) struct App {
+        pub llm: LlmState,        // LLM 相关状态
+        pub ui: UiState,          // UI 状态
+        pub task: TaskState,      // 任务状态
+        pub picker: PickerState,  // 各种 picker 状态
+        // ...
+    }
+
+    
+    ─────────────────────────────
+    
+    2. tools/mcp.rs (~63KB) - 最大的单一文件
+    问题: MCP 注册、发现、执行逻辑全在一起
+    建议: 拆分为
+    • mcp/registry.rs - 注册表管理
+    • mcp/discovery.rs - 动态发现
+    • mcp/executor.rs - 工具执行
+    • mcp/types.rs - 类型定义
+    
+    ─────────────────────────────
+    
+    4. ui/ 模块 (多文件 ~120KB)
+    问题: 输入、渲染、格式化耦合
+    ui/input.rs   (54KB)  - 输入处理 + 粘贴 + @文件选择
+    ui/screen.rs  (31KB)  - 屏幕渲染
+    ui/format.rs  (34KB)  - 格式化
+
+    建议
+    • 提取 ui/input/parser.rs - 输入解析
+    • 提取 ui/components.rs - 可复用 UI 组件
+    
+    ─────────────────────────────
+    
+    5. 重复代码模式
+    状态管理: 多个 PickerState 结构相似
+    rust
+    // CmdPickerState, AtFilePickerState, ModelPickerState 都有类似的:
+    // - query: Option<String>
+    // - candidates: Vec<...>
+    // - sel: usize
+
+    建议: 泛型化或提取公共 trait
+    
+    ─────────────────────────────
+    
+    6. types.rs (6KB) - 散落的类型
+    问题: 许多内联结构如 PasteChunk, AtFileChunk 分散在 main.rs
+    建议: 集中到 types/ 目录
+    
+    ─────────────────────────────
+    
+    优先级建议
+    优先级  │  重构项  │  收益
+    ─────────────────────────────
+    P0  │  main.rs App 拆分  │  降低复杂度
+    P1  │  mcp.rs 拆分  │  改善可维护性
+    P2  │  Picker 状态泛型化  │  减少重复
+    P3  │  ui/ 模块解耦  │  便于 UI 测试

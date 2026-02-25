@@ -12,7 +12,8 @@
       "WebFetch(domain:platform.minimaxi.com)",
       "Bash(powershell:*)",
       "Bash(cargo clippy:*)",
-      "Bash(cmd:*)"
+      "Bash(cmd:*)",
+      "Bash(Select-String error|warning|Finished:*)"
     ]
   }
 }

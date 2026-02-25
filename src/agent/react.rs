@@ -1,4 +1,7 @@
-﻿use crate::types::{AssistMode, LlmAction};
+use crate::{
+    agent::plan,
+    types::{AssistMode, LlmAction},
+};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
@@ -26,17 +29,6 @@ Task complete (required):
 
 ## Tools
 
-Question tool (use when clarification or a user choice is required; try to gather info yourself first):
-- Provide 3 preset options + 1 custom input option.
-- Put the question in `<question>` and each choice in an `<option>`.
-<thought>reasoning</thought>
-<tool>question</tool>
-<question>question text</question>
-<option>Option A</option>
-<option>Option B</option>
-<option>Option C</option>
-<option><user_input></option>
-
 Shell command:
 <thought>reasoning</thought>
 <tool>shell</tool>
@@ -48,14 +40,39 @@ Explorer (read-only, multiple commands in ONE single call):
 <thought>reasoning</thought>
 <tool>explorer</tool>
 <command>first read-only command</command>
-<command>second read-only command</command>
-<command>third read-only command</command>
 <command>more read-only command</command>
 CRITICAL rules for <tool>explorer</tool>:
 - You MUST include ALL read-only commands you need in a SINGLE <tool>explorer</tool> call. Never send explorer multiple times in a row.
 - All <command> tags are collected, executed in sequence, and ALL results returned to you at once in one message.
 - Only use for safe read-only commands (ls, cat, grep, git log, cargo check …).
 - Do NOT use for commands that write, delete, or depend on each other's output.
+
+Update file (replace an exact string in an existing file; fails if old_string not found or not unique):
+<thought>reasoning</thought>
+<tool>update</tool>
+<path>relative/or/absolute/path</path>
+<old_string>exact content to replace</old_string>
+<new_string>replacement content</new_string>
+
+Write file (create a new file; also overwrites existing):
+<thought>reasoning</thought>
+<tool>write</tool>
+<path>relative/or/absolute/path</path>
+<content>full file content here</content>
+
+Read file (read file contents; supports line range for large files):
+<thought>reasoning</thought>
+<tool>read</tool>
+<path>relative/or/absolute/path</path>
+<offset>start line, 1-indexed (optional)</offset>
+<limit>number of lines to read (optional)</limit>
+
+Search files (regex search across file contents; native, cross-platform):
+<thought>reasoning</thought>
+<tool>search</tool>
+<pattern>regex or literal string</pattern>
+<path>optional/path/to/search (default: .)</path>
+Output: file:line: matching-line for each match.
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>
@@ -71,46 +88,6 @@ Load a skill (only if listed later in this prompt):
 <thought>reasoning</thought>
 <skill>skill-name</skill>
 ";
-
-const PLAN_MODE_ASSIST_CONTEXT_APPENDIX: &str = "\
-Plan 模式已开启（你应主动使用 plan 流程）：
-任务信息不足或有歧义 → 使用 <tool>question</tool> 提问（每次只问一个关键问题），先收集信息。
-信息充足后，任务如果很复杂 → 使用 <tool>plan</tool> 输出完整计划；
-plan 之后必须紧跟 <tool>question</tool> 询问确认。
-用户确认计划后 → 在 <final> 中完整复述 plan 内容，不得改写为摘要。
-如果用户确认开始执行 → 先调用 <tool>set_mode</tool> 并设置 <mode>agent</mode>，再继续执行工具。
-set_mode（仅在 Plan 模式使用；非阻塞，只更新本地模式/UI）：
-<thought>reasoning</thought>
-<tool>set_mode</tool>
-<mode>agent</mode>
-`<mode>` 可选值：`agent` / `accept_edits` / `plan`
-如果是复杂任务,在执行的时候,就使用todo tool分解任务进度，格式如下：
-
-Plan 输出示例：
-<thought>reasoning</thought>
-<tool>plan</tool>
-<plan>## 计划
-1. 第一步：...
-2. 第二步：...
-</plan>
-
-
-Todo progress panel (shows a live checklist in the terminal):
-<thought>reasoning</thought>
-<tool>todo</tool>
-<todo>[{\"label\":\"Analyze code\",\"status\":\"done\"},{\"label\":\"Write tests\",\"status\":\"running\"},{\"label\":\"Run CI\",\"status\":\"pending\"}]</todo>
-Todo rules (CRITICAL — you MUST follow these):
-- status must be one of: pending / running / done
-- todo is NON-BLOCKING: you can include <tool>todo</tool> alongside another tool call in the same response. It does NOT count toward the tool limit.
-- For ANY task requiring 2 or more steps, you MUST emit a <tool>todo</tool> in your FIRST response, listing all planned steps (first step = running, rest = pending).
-- YOU are responsible for advancing todo progress. After a tool returns its result, you MUST emit an updated <tool>todo</tool> that: (1) marks the completed step as done, (2) marks the next step as running, and (3) keeps future steps as pending.
-- Before <final>, emit a final <tool>todo</tool> with ALL items set to done.
-- Never skip todo updates between steps. Every response that contains a tool call MUST also contain an updated <tool>todo</tool>.
-Example of a 3-step task progression:
-  Response 1: [{\"label\":\"Read file\",\"status\":\"running\"},{\"label\":\"Fix bug\",\"status\":\"pending\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
-  Response 2: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"running\"},{\"label\":\"Test\",\"status\":\"pending\"}] + <tool>shell</tool>
-  Response 3: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"running\"}] + <tool>shell</tool>
-  Response 4: [{\"label\":\"Read file\",\"status\":\"done\"},{\"label\":\"Fix bug\",\"status\":\"done\"},{\"label\":\"Test\",\"status\":\"done\"}] + <final>";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
 pub fn build_system_prompt() -> String {
@@ -165,7 +142,7 @@ pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistM
     );
     if assist_mode == AssistMode::Plan {
         out.push_str("\n\n");
-        out.push_str(PLAN_MODE_ASSIST_CONTEXT_APPENDIX);
+        out.push_str(plan::PLAN_MODE_ASSIST_CONTEXT_APPENDIX);
     }
     out
 }
@@ -222,6 +199,10 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
 }
 
 fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
+    if let Some(action) = plan::parse_tool_action(tool, text)? {
+        return Ok(action);
+    }
+
     match tool {
         "shell" => {
             let command = extract_last_tag(text, "command")
@@ -229,38 +210,43 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let file = extract_last_tag(text, "file");
             Ok(LlmAction::Shell { command, file })
         }
+        "update" => {
+            let path = extract_last_tag(text, "path")
+                .ok_or_else(|| anyhow!("missing <path> for update tool call"))?;
+            let old_string = extract_last_tag(text, "old_string")
+                .ok_or_else(|| anyhow!("missing <old_string> for update tool call"))?;
+            let new_string = extract_last_tag(text, "new_string").unwrap_or_default();
+            Ok(LlmAction::UpdateFile {
+                path,
+                old_string,
+                new_string,
+            })
+        }
+        "write" => {
+            let path = extract_last_tag(text, "path")
+                .ok_or_else(|| anyhow!("missing <path> for write tool call"))?;
+            let content = extract_last_tag(text, "content").unwrap_or_default();
+            Ok(LlmAction::WriteFile { path, content })
+        }
+        "read" => {
+            let path = extract_last_tag(text, "path")
+                .ok_or_else(|| anyhow!("missing <path> for read tool call"))?;
+            let offset = extract_last_tag(text, "offset")
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            let limit = extract_last_tag(text, "limit")
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            Ok(LlmAction::ReadFile { path, offset, limit })
+        }
+        "search" => {
+            let pattern = extract_last_tag(text, "pattern")
+                .ok_or_else(|| anyhow!("missing <pattern> for search tool call"))?;
+            let path = extract_last_tag(text, "path").unwrap_or_else(|| ".".to_string());
+            Ok(LlmAction::SearchFiles { pattern, path })
+        }
         "web_search" => {
             let query = extract_last_tag(text, "query")
                 .ok_or_else(|| anyhow!("missing <query> for web_search tool call"))?;
             Ok(LlmAction::WebSearch { query })
-        }
-        "plan" => {
-            let content = extract_last_tag(text, "plan")
-                .ok_or_else(|| anyhow!("missing <plan> for plan tool call"))?;
-            Ok(LlmAction::Plan {
-                content: strip_xml_tags(&content),
-            })
-        }
-        "question" => {
-            let text_q = extract_last_tag(text, "question")
-                .ok_or_else(|| anyhow!("missing <question> for question tool call"))?;
-            let options: Vec<String> = extract_all_tags(text, "option")
-                .into_iter()
-                .map(|o| {
-                    if o.trim().starts_with("<user_input") {
-                        "<user_input>".to_string()
-                    } else {
-                        o
-                    }
-                })
-                .collect();
-            if options.is_empty() {
-                return Err(anyhow!("missing <option> for question tool call"));
-            }
-            Ok(LlmAction::Question {
-                text: strip_xml_tags(&text_q),
-                options,
-            })
         }
         "set_mode" => {
             let raw_mode = extract_last_tag(text, "mode")
@@ -275,19 +261,6 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
                 return Err(anyhow!("missing <command> for explorer tool call"));
             }
             Ok(LlmAction::Explorer { commands })
-        }
-        "todo" => {
-            let raw = extract_last_tag(text, "todo")
-                .ok_or_else(|| anyhow!("missing <todo> for todo tool call"))?;
-            let items = parse_todo_json(&raw)?;
-            Ok(LlmAction::Todo { items })
-        }
-        "diff" => {
-            let content = extract_last_tag(text, "diff")
-                .ok_or_else(|| anyhow!("missing <diff> for diff tool call"))?;
-            Ok(LlmAction::Diff {
-                content: strip_xml_tags(&content),
-            })
         }
         t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
@@ -305,44 +278,6 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
     }
 }
 
-fn parse_todo_json(raw: &str) -> Result<Vec<crate::types::TodoItem>> {
-    use crate::types::{TodoItem, TodoStatus};
-    let arr: Vec<Value> =
-        serde_json::from_str(raw).map_err(|e| anyhow!("invalid <todo> JSON: {e}"))?;
-    let mut items = Vec::with_capacity(arr.len());
-    for val in arr {
-        let label = val
-            .get("label")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("todo item missing \"label\""))?
-            .to_string();
-        let status_str = val
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pending");
-        let status = match status_str {
-            "done" => TodoStatus::Done,
-            "running" => TodoStatus::Running,
-            _ => TodoStatus::Pending,
-        };
-        items.push(TodoItem { label, status });
-    }
-    Ok(items)
-}
-
-fn strip_xml_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for ch in s.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
-}
 
 fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}>");

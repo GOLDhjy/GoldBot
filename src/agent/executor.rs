@@ -1,6 +1,7 @@
 use crossterm::style::Stylize;
 use serde_json::Value;
 
+use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::store::MemoryStore;
@@ -121,10 +122,7 @@ pub(crate) fn process_llm_result(
     // Pre-check: if this response contains plan + final but no question, the LLM is echoing
     // the plan back after the user confirmed.  Skip re-rendering to avoid duplication and let
     // Final run immediately.  If there's a question too (user wants changes), always render.
-    let plan_is_echo = actions.iter().any(|a| matches!(a, LlmAction::Final { .. }))
-        && !actions
-            .iter()
-            .any(|a| matches!(a, LlmAction::Question { .. }));
+    let plan_is_echo = is_plan_echo(&actions);
 
     let mut plan_shown_without_followup = false;
     // Track whether we only saw non-blocking actions (Plan/Todo) without a
@@ -141,12 +139,6 @@ pub(crate) fn process_llm_result(
                     // even when a question follows in the same response.
                     app.messages.push(Message::user("[plan shown]".to_string()));
                 }
-                plan_shown_without_followup = true;
-                // Don't break — continue to next action in this response.
-            }
-            LlmAction::Diff { content } => {
-                render_diff(screen, &content);
-                app.messages.push(Message::user("[diff shown]".to_string()));
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
             }
@@ -219,6 +211,38 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 execute_explorer_batch(app, screen, &commands);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
+            LlmAction::UpdateFile {
+                path,
+                old_string,
+                new_string,
+            } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_update_file(app, screen, &path, &old_string, &new_string);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
+            LlmAction::WriteFile { path, content } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_write_file(app, screen, &path, &content);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
+            LlmAction::SearchFiles { pattern, path } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_search_files(app, screen, &pattern, &path);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
+            LlmAction::ReadFile { path, offset, limit } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_read_file(app, screen, &path, offset, limit);
                 app.needs_agent_executor = true;
                 break 'actions;
             }
@@ -586,6 +610,262 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
     )));
 }
 
+pub(crate) fn execute_update_file(
+    app: &mut App,
+    screen: &mut Screen,
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+) {
+    let call_ev = Event::ToolCall {
+        label: "Update".to_string(),
+        command: path.to_string(),
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let abs_path = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        app.workspace.join(path)
+    };
+
+    let result = (|| {
+        let raw = std::fs::read_to_string(&abs_path)?;
+        let crlf = raw.contains("\r\n");
+        // Normalize to LF for matching; the `read` tool also returns LF.
+        let content = if crlf { raw.replace("\r\n", "\n") } else { raw.clone() };
+        let norm_old = old_string.replace("\r\n", "\n");
+        let count = content.matches(norm_old.as_str()).count();
+        if count == 0 {
+            return Err(std::io::Error::other(
+                "old_string not found in file. \
+                 Use the `read` tool to get the exact current content, \
+                 then retry with the correct old_string \
+                 (check indentation and whitespace carefully).",
+            ));
+        }
+        if count > 1 {
+            return Err(std::io::Error::other(format!(
+                "old_string matched {count} times — add more surrounding context to make it unique.",
+            )));
+        }
+        let norm_new = new_string.replace("\r\n", "\n");
+        let new_normalized = content.replacen(norm_old.as_str(), norm_new.as_str(), 1);
+        // Restore original line endings if the file used CRLF.
+        let new_content = if crlf {
+            new_normalized.replace("\n", "\r\n")
+        } else {
+            new_normalized
+        };
+        std::fs::write(&abs_path, new_content)?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            let diff_text = crate::tools::shell::render_unified_diff(old_string, new_string);
+            render_diff(screen, &diff_text);
+            let store = MemoryStore::new();
+            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text)]);
+            let added = new_string.lines().count();
+            let deleted = old_string.lines().count();
+            app.messages.push(Message::user(format!(
+                "Tool result:\nFile updated: +{added} -{deleted}"
+            )));
+        }
+        Err(e) => {
+            let output = format!("更新失败: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result:\n{output}")));
+            let result_ev = Event::ToolResult {
+                exit_code: 1,
+                output,
+            };
+            emit_live_event(screen, &result_ev);
+            app.task_events.push(result_ev);
+        }
+    }
+}
+
+pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str, content: &str) {
+    let call_ev = Event::ToolCall {
+        label: "Write".to_string(),
+        command: path.to_string(),
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let abs_path = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        app.workspace.join(path)
+    };
+
+    let result = (|| {
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs_path, content)?;
+        Ok::<_, std::io::Error>(())
+    })();
+
+    match result {
+        Ok(()) => {
+            app.messages.push(Message::user(
+                "Tool result:\nFile written successfully.".to_string(),
+            ));
+        }
+        Err(e) => {
+            let output = format!("写入失败: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result:\n{output}")));
+            let result_ev = Event::ToolResult {
+                exit_code: 1,
+                output,
+            };
+            emit_live_event(screen, &result_ev);
+            app.task_events.push(result_ev);
+        }
+    }
+}
+
+pub(crate) fn execute_read_file(
+    app: &mut App,
+    screen: &mut Screen,
+    path: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) {
+    let label = match (offset, limit) {
+        (Some(o), Some(l)) => format!("Read({path}:{o}-{})", o + l - 1),
+        (Some(o), None) => format!("Read({path}:{o}-)"),
+        _ => format!("Read({path})"),
+    };
+    let call_ev = Event::ToolCall {
+        label,
+        command: path.to_string(),
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let abs_path = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        app.workspace.join(path)
+    };
+
+    let result: Result<(String, String), std::io::Error> = (|| {
+        let raw = std::fs::read_to_string(&abs_path)?;
+        // Strip UTF-8 BOM and normalize to LF so old_string matching works.
+        let content_owned = raw.trim_start_matches('\u{FEFF}').replace("\r\n", "\n");
+        let content = content_owned.as_str();
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+
+        let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0);
+        let end = limit
+            .map(|l| (start + l).min(total))
+            .unwrap_or(total);
+        let start = start.min(total);
+
+        let mut body = String::new();
+        for line in &lines[start..end] {
+            body.push_str(line);
+            body.push('\n');
+        }
+        let trailer = if end < total {
+            format!(
+                "... ({} more lines, use <offset>/<limit> to read further)\n",
+                total - end
+            )
+        } else {
+            String::new()
+        };
+        if body.is_empty() {
+            body = "(empty file)\n".to_string();
+        }
+        let output = format!("{body}{trailer}");
+        Ok((output.clone(), output))
+    })();
+
+    match result {
+        Ok((display, llm)) => {
+            app.messages
+                .push(Message::user(format!("Tool result:\n{llm}")));
+            let ev = Event::ToolResult {
+                exit_code: 0,
+                output: display,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+        Err(e) => {
+            let output = format!("读取失败: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result:\n{output}")));
+            let ev = Event::ToolResult {
+                exit_code: 1,
+                output,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+    }
+}
+
+pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: &str, path: &str) {
+    let display_path = if path == "." || path.is_empty() {
+        ".".to_string()
+    } else {
+        path.to_string()
+    };
+    let short_pattern = shorten_text(pattern, 40);
+    let call_ev = Event::ToolCall {
+        label: format!("Searching({short_pattern})"),
+        command: display_path,
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    match crate::tools::search::search_files(pattern, path) {
+        Ok(result) => {
+            let summary = format!(
+                "{} match{} in {} file{}",
+                result.match_count,
+                if result.match_count == 1 { "" } else { "es" },
+                result.file_count,
+                if result.file_count == 1 { "" } else { "s" },
+            );
+            app.messages.push(Message::user(format!(
+                "Tool result (exit=0):\n{}\n{}",
+                summary, result.output
+            )));
+            let ev = Event::ToolResult {
+                exit_code: 0,
+                output: format!("{}\n{}", summary, result.output),
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+        Err(e) => {
+            let err = format!("search failed: {e}");
+            app.messages
+                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            let ev = Event::ToolResult {
+                exit_code: -1,
+                output: err,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+    }
+}
+
 pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {
     let call_ev = Event::ToolCall {
         label: format!("WebSearch({query})"),
@@ -903,6 +1183,7 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
     screen.refresh();
 }
 
+//总结之后压缩记忆，发送重要结论
 fn summarize_for_compaction(messages: &[Message]) -> String {
     let mut items = Vec::new();
     for msg in messages.iter().rev() {

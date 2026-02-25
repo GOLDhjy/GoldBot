@@ -26,18 +26,12 @@ const MAX_DIFF_LINES: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
-    Search,
-    Read,
-    Update,
     Bash,
 }
 
 impl OperationKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Search => "Search",
-            Self::Read => "Read",
-            Self::Update => "Update",
             Self::Bash => "Bash",
         }
     }
@@ -73,123 +67,11 @@ struct FileSignature {
 
 pub fn classify_command(cmd: &str) -> CommandIntent {
     let trimmed = cmd.trim();
-    let lower = trimmed.to_lowercase();
-
-    if let Some(search_desc) = extract_search_descriptor(trimmed) {
-        return CommandIntent {
-            kind: OperationKind::Search,
-            target: Some(search_desc),
-        };
+    let target = extract_target(trimmed).map(|t| absolutize_target_for_display(&t));
+    CommandIntent {
+        kind: OperationKind::Bash,
+        target,
     }
-
-    let target = extract_target(trimmed);
-
-    let kind = if looks_read_only(trimmed, &lower) {
-        OperationKind::Read
-    } else if looks_update(trimmed, &lower) {
-        OperationKind::Update
-    } else {
-        OperationKind::Bash
-    };
-
-    let target = target
-        .or_else(|| matches!(kind, OperationKind::Read).then(|| ".".to_string()))
-        .map(|t| absolutize_target_for_display(&t));
-
-    CommandIntent { kind, target }
-}
-
-fn extract_search_descriptor(cmd: &str) -> Option<String> {
-    let tokens = tokenize_shell_like(cmd);
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let head = normalize_command_token(tokens.first()?);
-    match head.as_str() {
-        "rg" | "grep" => extract_grep_like_descriptor(&tokens),
-        "find" => extract_find_descriptor(&tokens),
-        _ => None,
-    }
-}
-
-fn normalize_command_token(token: &str) -> String {
-    token.rsplit('/').next().unwrap_or(token).to_lowercase()
-}
-
-fn extract_grep_like_descriptor(tokens: &[String]) -> Option<String> {
-    let mut args: Vec<&str> = Vec::new();
-    let mut i = 1usize;
-    while i < tokens.len() {
-        let t = tokens[i].as_str();
-        if t == "--" {
-            args.extend(tokens[i + 1..].iter().map(String::as_str));
-            break;
-        }
-
-        if t == "-e" || t == "--regexp" {
-            if let Some(pat) = tokens.get(i + 1) {
-                args.push(pat.as_str());
-                i += 2;
-                continue;
-            }
-            break;
-        }
-
-        if t.starts_with('-') {
-            i += 1;
-            continue;
-        }
-
-        args.push(t);
-        i += 1;
-    }
-
-    if args.is_empty() {
-        return Some(format!("path: {}", absolutize_target_for_display(".")));
-    }
-
-    let pattern = args[0];
-    let path = if args.len() >= 2 {
-        args[args.len() - 1]
-    } else {
-        "."
-    };
-    Some(format!(
-        "pattern: \"{}\", path: {}",
-        truncate_chars(pattern, 40),
-        absolutize_target_for_display(path)
-    ))
-}
-
-fn extract_find_descriptor(tokens: &[String]) -> Option<String> {
-    let mut i = 1usize;
-    let mut path = ".";
-    if i < tokens.len() && !tokens[i].starts_with('-') {
-        path = tokens[i].as_str();
-        i += 1;
-    }
-
-    let mut pattern: Option<&str> = None;
-    while i < tokens.len() {
-        let t = tokens[i].as_str();
-        if matches!(
-            t,
-            "-name" | "-iname" | "-path" | "-ipath" | "-regex" | "-iregex" | "-wholename"
-        ) {
-            if let Some(p) = tokens.get(i + 1) {
-                pattern = Some(p.as_str());
-            }
-            break;
-        }
-        i += 1;
-    }
-
-    let abs_path = absolutize_target_for_display(path);
-    Some(match pattern {
-        Some(p) => format!("pattern: \"{}\", path: {}", truncate_chars(p, 40), abs_path),
-        None => format!("path: {}", abs_path),
-    })
 }
 
 pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> {
@@ -305,49 +187,6 @@ pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> 
     })
 }
 
-fn looks_read_only(trimmed: &str, lower: &str) -> bool {
-    if contains_write_redirection(trimmed) {
-        return false;
-    }
-    if is_read_only_sed(trimmed) {
-        return true;
-    }
-    // Unix read commands
-    let unix_commands = [
-        "cat ",
-        "less ",
-        "more ",
-        "ls",
-        "pwd",
-        "find ",
-        "grep ",
-        "rg ",
-        "head ",
-        "tail ",
-        "wc ",
-        "stat ",
-        "du ",
-        "tree",
-        "git status",
-        "git log",
-        "git show",
-    ];
-    // Windows PowerShell read commands
-    let windows_commands = [
-        "get-content ",
-        "gc ",
-        "get-childitem ",
-        "gci ",
-        "get-item ",
-        "gi ",
-        "get-location ",
-        "gl ",
-        "select-string ",
-        "sls ",
-    ];
-    matches_any_prefix(lower, &unix_commands) || matches_any_prefix(lower, &windows_commands)
-}
-
 fn looks_update(trimmed: &str, lower: &str) -> bool {
     contains_write_redirection(trimmed)
         || lower.contains("<<")
@@ -389,20 +228,6 @@ fn looks_update(trimmed: &str, lower: &str) -> bool {
                 "clear-item ",
             ],
         )
-}
-
-fn is_read_only_sed(cmd: &str) -> bool {
-    let tokens = tokenize_shell_like(cmd);
-    if tokens.is_empty() {
-        return false;
-    }
-    if normalize_command_token(&tokens[0]) != "sed" {
-        return false;
-    }
-    !tokens
-        .iter()
-        .skip(1)
-        .any(|t| t == "-i" || t.starts_with("-i"))
 }
 
 fn matches_any_prefix(lower: &str, prefixes: &[&str]) -> bool {
@@ -617,47 +442,6 @@ fn normalize_target(s: &str) -> Option<String> {
         return None;
     }
     Some(cleaned.to_string())
-}
-
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let total = s.chars().count();
-    if total <= max_chars {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push_str(crate::ui::symbols::Symbols::current().ellipsis);
-    out
-}
-
-fn tokenize_shell_like(segment: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-
-    for ch in segment.chars() {
-        if escaped {
-            cur.push(ch);
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if !in_single => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
 }
 
 fn snapshot_files(root: &Path) -> HashMap<PathBuf, FileSignature> {
@@ -924,7 +708,7 @@ fn read_text_limited(path: &Path, limit: usize) -> Option<String> {
 }
 
 /// 生成 unified diff 文本，行内容不截断
-fn render_unified_diff(before: &str, after: &str) -> String {
+pub(crate) fn render_unified_diff(before: &str, after: &str) -> String {
     let diff = TextDiff::from_lines(before, after);
     let mut out = String::new();
     let mut total = 0usize;
@@ -972,84 +756,8 @@ mod tests {
     use super::{OperationKind, classify_command};
 
     #[test]
-    fn classify_read() {
-        let intent = classify_command("cat README.md");
-        assert_eq!(intent.kind, OperationKind::Read);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Read({cwd}/README.md)"));
-    }
-
-    #[test]
-    fn classify_write_redirect() {
-        let intent = classify_command("cat > README_EN.md << 'EOF'");
-        assert_eq!(intent.kind, OperationKind::Update);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Update({cwd}/README_EN.md)"));
-    }
-
-    #[test]
-    fn classify_update_rm() {
-        let intent = classify_command("rm README_EN.md");
-        assert_eq!(intent.kind, OperationKind::Update);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Update({cwd}/README_EN.md)"));
-    }
-
-    #[test]
-    fn classify_git_status_has_cwd_target() {
+    fn classify_any_command_is_bash() {
         let intent = classify_command("git status");
-        assert_eq!(intent.kind, OperationKind::Read);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Read({cwd})"));
-    }
-
-    #[test]
-    fn classify_rg_is_search() {
-        let intent = classify_command("rg plan_from_codex_or_sample src");
-        assert_eq!(intent.kind, OperationKind::Search);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(
-            intent.label(),
-            format!("Search(pattern: \"plan_from_codex_or_sample\", path: {cwd}/src)")
-        );
-    }
-
-    #[test]
-    fn classify_sed_print_is_read() {
-        let intent = classify_command("sed -n '738,920p' src/main.rs");
-        assert_eq!(intent.kind, OperationKind::Read);
-    }
-
-    #[test]
-    fn classify_sed_in_place_is_update() {
-        let intent = classify_command("sed -i '' 's/foo/bar/g' src/main.rs");
-        assert_eq!(intent.kind, OperationKind::Update);
-    }
-
-    #[test]
-    fn classify_ls_stderr_to_dev_null_is_read() {
-        let intent =
-            classify_command("ls -la .github/ 2>/dev/null || echo \"No .github directory\"");
-        assert_eq!(intent.kind, OperationKind::Read);
-        let cwd = std::env::current_dir()
-            .expect("cwd")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert_eq!(intent.label(), format!("Read({cwd}/.github/)"));
+        assert_eq!(intent.kind, OperationKind::Bash);
     }
 }

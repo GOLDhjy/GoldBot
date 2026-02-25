@@ -221,8 +221,23 @@ pub enum LlmAction {
     Todo {
         items: Vec<TodoItem>,
     },
-    Diff {
+    WriteFile {
+        path: String,
         content: String,
+    },
+    UpdateFile {
+        path: String,
+        old_string: String,
+        new_string: String,
+    },
+    SearchFiles {
+        pattern: String,
+        path: String,
+    },
+    ReadFile {
+        path: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
     },
     Final {
         summary: String,

@@ -928,18 +928,12 @@ fn update_at_file_candidates(app: &mut App, screen: &mut Screen, _query: &str) {
 /// 在已有索引上做内存过滤，刷新候选列表和 screen 标签。
 /// 由 update_at_file_candidates 和 run_loop（索引加载完成时）共同调用。
 pub(crate) fn apply_at_file_filter(app: &mut App, screen: &mut Screen) {
-    let query_lower = app
-        .at_file
-        .query
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+    let query_lower = app.at_file.query.as_deref().unwrap_or("").to_lowercase();
     let mut matched: Vec<_> = app
         .at_file_index
         .iter()
         .filter(|p| {
-            query_lower.is_empty()
-                || p.to_string_lossy().to_lowercase().contains(&query_lower)
+            query_lower.is_empty() || p.to_string_lossy().to_lowercase().contains(&query_lower)
         })
         .cloned()
         .collect();
