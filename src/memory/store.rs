@@ -225,36 +225,40 @@ fn derive_long_term_notes(task: &str, final_output: &str) -> Vec<String> {
     }
 
     let mut notes = Vec::new();
+    let mut out_seen = BTreeSet::new();
     let task_line = normalize_note(task);
 
+    if !task_line.is_empty() && out_seen.insert(canonicalize_note(&task_line)) {
+        notes.push(task_line);
+    }
+
+    if let Some(reply_note) = first_assistant_memory_note_line(final_output)
+        && out_seen.insert(canonicalize_note(&reply_note))
+    {
+        notes.push(reply_note);
+    }
+
+    notes
+}
+
+fn first_assistant_memory_note_line(final_output: &str) -> Option<String> {
     for line in final_output.lines() {
         let cleaned = line
             .trim_start_matches(|c: char| {
-                c.is_ascii_digit() || c.is_whitespace() || matches!(c, '-' | '*' | '•' | '.')
+                c.is_ascii_digit()
+                    || c.is_whitespace()
+                    || matches!(c, '-' | '*' | '•' | '.' | '✓' | '✔' | '☑')
             })
             .trim();
         if cleaned.is_empty() {
             continue;
         }
         let normalized = normalize_note(cleaned);
-        if normalized.is_empty() {
-            continue;
-        }
-        notes.push(normalized);
-        if notes.len() >= 3 {
-            break;
+        if !normalized.is_empty() {
+            return Some(normalized);
         }
     }
-
-    if notes.is_empty() && !task_line.is_empty() {
-        notes.push(task_line);
-    }
-
-    let mut uniq = BTreeSet::new();
-    notes
-        .into_iter()
-        .filter(|n| uniq.insert(n.clone()))
-        .collect::<Vec<_>>()
+    None
 }
 
 fn has_explicit_memory_intent(task: &str) -> bool {
@@ -662,6 +666,45 @@ mod tests {
         );
         assert!(!notes[0].is_empty());
         assert!(ends_with_sentence_punctuation(&notes[0]));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn derive_long_term_skips_follow_up_questions_and_off_topic_prompts() {
+        let base = unique_base();
+        fs::create_dir_all(&base).expect("mkdir");
+        let store = MemoryStore { base: base.clone() };
+
+        let notes = store.derive_long_term_notes(
+            "From now on, reply to me in Chinese.",
+            "✓ Got it, I will reply in Chinese from now on.\n\nAbout Unreal Engine MCP, do you have Unreal Engine installed? If so I can help configure it for GoldBot.",
+        );
+
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].to_lowercase().contains("chinese"));
+        assert!(notes[1].to_lowercase().contains("chinese"));
+        assert!(!notes[1].contains("Unreal"));
+        assert!(!notes[1].contains("GoldBot"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn derive_long_term_stores_first_assistant_line() {
+        let base = unique_base();
+        fs::create_dir_all(&base).expect("mkdir");
+        let store = MemoryStore { base: base.clone() };
+
+        let notes = store.derive_long_term_notes(
+            "Remember: use Chinese in future chats.",
+            "Got it! We will use Chinese from now on. What can I help you with next?",
+        );
+
+        assert_eq!(notes.len(), 2);
+        assert!(notes[1].contains("Got it"));
+        assert!(notes[1].to_lowercase().contains("chinese"));
+        assert!(notes[1].to_lowercase().contains("what can i help"));
 
         let _ = fs::remove_dir_all(base);
     }

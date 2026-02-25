@@ -58,6 +58,7 @@ Create a new MCP server:
 #[derive(Debug, Clone, Default)]
 pub struct McpRegistry {
     servers: BTreeMap<String, LocalServerSpec>,
+    remote_servers: BTreeMap<String, RemoteServerSpec>,
     tools: BTreeMap<String, McpToolSpec>,
     failed: Vec<String>,
 }
@@ -92,6 +93,12 @@ struct LocalServerSpec {
     cwd: Option<PathBuf>,
     /// Explicitly configured wire format; `None` means auto-detect.
     transport: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteServerSpec {
+    url: String,
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,16 +290,27 @@ impl McpRegistry {
                         continue;
                     }
                     let ty = cfg.r#type.to_lowercase();
-                    if ty != "local" {
-                        if ty == "remote" {
+                    if ty == "remote" {
+                        let Some(url) = cfg.url.clone() else {
                             warnings.push(format!(
-                                "MCP server `{server_name}` type `remote` is not supported yet (GoldBot currently supports local stdio only). Skipped."
+                                "MCP server `{server_name}` type `remote` is missing `url`. Skipped."
                             ));
-                        } else {
-                            warnings.push(format!(
-                                "MCP server `{server_name}` type `{ty}` is not supported yet (local stdio only). Skipped."
-                            ));
-                        }
+                            continue;
+                        };
+                        let headers: HashMap<String, String> = cfg
+                            .headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), resolve_env_var_refs(v)))
+                            .collect();
+                        registry.remote_servers.insert(
+                            server_name,
+                            RemoteServerSpec { url, headers },
+                        );
+                        continue;
+                    } else if ty != "local" {
+                        warnings.push(format!(
+                            "MCP server `{server_name}` type `{ty}` is not supported yet. Skipped."
+                        ));
                         continue;
                     }
                     let Some((command, args)) = extract_local_command_and_args(&cfg) else {
@@ -323,7 +341,7 @@ impl McpRegistry {
 
     /// Whether any MCP servers are configured (discovery not yet run).
     pub fn has_servers(&self) -> bool {
-        !self.servers.is_empty()
+        !self.servers.is_empty() || !self.remote_servers.is_empty()
     }
 
     /// 注入当前后端对应的内置 MCP 服务器。
@@ -332,6 +350,8 @@ impl McpRegistry {
     pub fn inject_builtin_for_backend(&mut self, backend_label: &str) {
         // 移除之前注入的内置服务器
         self.servers.retain(|k, _| !k.starts_with("builtin_"));
+        self.remote_servers
+            .retain(|k, _| !k.starts_with("builtin_"));
         self.tools
             .retain(|_, v| !v.server_name.starts_with("builtin_"));
         self.failed.retain(|k| !k.starts_with("builtin_"));
@@ -355,13 +375,51 @@ impl McpRegistry {
                     },
                 );
             }
+            "GLM" => {
+                // zai-mcp-server (local)
+                let mut env = HashMap::new();
+                if let Ok(key) = std::env::var("BIGMODEL_API_KEY") {
+                    env.insert("Z_AI_API_KEY".to_string(), key);
+                }
+                env.insert("Z_AI_MODE".to_string(), "ZHIPU".to_string());
+                self.servers.insert(
+                    "builtin_zai_mcp_server".to_string(),
+                    LocalServerSpec {
+                        command: "npx".to_string(),
+                        args: vec!["-y".to_string(), "@z_ai/mcp-server".to_string()],
+                        env,
+                        cwd: None,
+                        transport: None,
+                    },
+                );
+
+                // web-search-prime & zread (remote)
+                let mut headers = HashMap::new();
+                if let Ok(key) = std::env::var("BIGMODEL_API_KEY") {
+                    headers.insert("Authorization".to_string(), format!("Bearer {key}"));
+                }
+                self.remote_servers.insert(
+                    "builtin_web_search_prime".to_string(),
+                    RemoteServerSpec {
+                        url: "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp".to_string(),
+                        headers: headers.clone(),
+                    },
+                );
+                self.remote_servers.insert(
+                    "builtin_zread".to_string(),
+                    RemoteServerSpec {
+                        url: "https://open.bigmodel.cn/api/mcp/zread/mcp".to_string(),
+                        headers,
+                    },
+                );
+            }
             _ => {}
         }
     }
 
     /// Run tool discovery synchronously. Intended to be called from a background thread.
     pub fn run_discovery(mut self) -> (Self, Vec<String>) {
-        if self.servers.is_empty() {
+        if self.servers.is_empty() && self.remote_servers.is_empty() {
             return (self, Vec::new());
         }
         let warnings = self.discover_tools(mcp_discovery_timeout());
@@ -376,6 +434,7 @@ impl McpRegistry {
         let ok = self
             .servers
             .keys()
+            .chain(self.remote_servers.keys())
             .filter(|name| !self.failed.contains(*name))
             .map(|name| (name.clone(), *tool_counts.get(name.as_str()).unwrap_or(&0)))
             .collect();
@@ -450,16 +509,23 @@ impl McpRegistry {
             bail!("MCP <arguments> must be a JSON object");
         }
 
-        let Some(server) = self.servers.get(&tool.server_name) else {
-            bail!(
-                "MCP server `{}` is not available for tool `{}`",
-                tool.server_name,
-                action_name
-            );
-        };
-
         let normalized_arguments = normalize_arguments_for_tool(tool, arguments);
-        call_tool_once(server, &tool.tool_name, &normalized_arguments)
+        let tool_name = tool.tool_name.clone();
+        let server_name = tool.server_name.clone();
+
+        if let Some(server) = self.servers.get(&server_name) {
+            return call_tool_once(server, &tool_name, &normalized_arguments);
+        }
+
+        if let Some(server) = self.remote_servers.get(&server_name) {
+            return call_tool_remote(server, &tool_name, &normalized_arguments);
+        }
+
+        bail!(
+            "MCP server `{}` is not available for tool `{}`",
+            server_name,
+            action_name
+        );
     }
 
     fn resolve_tool_spec(&self, action_name: &str) -> Option<&McpToolSpec> {
@@ -501,6 +567,41 @@ impl McpRegistry {
 
         for (server_name, server) in &self.servers {
             match list_tools_with_timeout(server, timeout) {
+                Ok(tools) => {
+                    for tool in tools {
+                        let action_name =
+                            unique_action_name(server_name, &tool.tool_name, &mut used_names);
+                        self.tools.insert(
+                            action_name.clone(),
+                            McpToolSpec {
+                                action_name,
+                                server_name: server_name.clone(),
+                                tool_name: tool.tool_name,
+                                description: tool.description,
+                                read_only_hint: tool.read_only_hint,
+                                input_schema: tool.input_schema,
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    self.failed.push(server_name.clone());
+                    warnings.push(format!(
+                        "Failed to load MCP tools from `{server_name}`: {e}. Server skipped."
+                    ));
+                }
+            }
+        }
+
+        // Collect remote server entries first to avoid borrow conflicts.
+        let remote_entries: Vec<(String, RemoteServerSpec)> = self
+            .remote_servers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (server_name, server) in &remote_entries {
+            match list_tools_remote(&server, timeout) {
                 Ok(tools) => {
                     for tool in tools {
                         let action_name =
@@ -1336,6 +1437,317 @@ fn normalize_arguments_for_tool(tool: &McpToolSpec, arguments: &Value) -> Value 
     }
 
     Value::Object(normalized)
+}
+
+// ── Remote MCP (Streamable HTTP transport) ────────────────────────────────────
+
+/// Replace `${VAR_NAME}` placeholders in a string with environment variable values.
+fn resolve_env_var_refs(s: &str) -> String {
+    let mut result = s.to_string();
+    loop {
+        let Some(start) = result.find("${") else {
+            break;
+        };
+        let Some(rel_end) = result[start + 2..].find('}') else {
+            break;
+        };
+        let var_name = result[start + 2..start + 2 + rel_end].to_string();
+        let value = std::env::var(&var_name).unwrap_or_default();
+        result = format!(
+            "{}{}{}",
+            &result[..start],
+            value,
+            &result[start + 2 + rel_end + 1..]
+        );
+    }
+    result
+}
+
+struct RemoteMcpSession {
+    url: String,
+    headers: HashMap<String, String>,
+    client: reqwest::blocking::Client,
+    next_id: u64,
+    session_id: Option<String>,
+}
+
+impl RemoteMcpSession {
+    fn new(spec: &RemoteServerSpec, timeout: Duration) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("failed to build HTTP client for remote MCP")?;
+        Ok(Self {
+            url: spec.url.clone(),
+            headers: spec.headers.clone(),
+            client,
+            next_id: 1,
+            session_id: None,
+        })
+    }
+
+    fn initialize(&mut self) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "goldbot",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+        let response = self.do_request(&payload)?;
+        if let Some(msg) = extract_jsonrpc_error(&response) {
+            bail!("initialize error: {msg}");
+        }
+        // notifications/initialized — best-effort, no response expected
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        let _ = self.do_request(&notif);
+        Ok(())
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.do_request(&payload)
+    }
+
+    fn do_request(&mut self, payload: &Value) -> Result<Value> {
+        let mut req = self.client.post(&self.url);
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        req = req
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        if let Some(sid) = &self.session_id {
+            req = req.header("Mcp-Session-Id", sid.as_str());
+        }
+
+        let response = req
+            .json(payload)
+            .send()
+            .context("HTTP request to remote MCP server failed")?;
+
+        // Extract session-id before consuming response body.
+        let new_sid = response
+            .headers()
+            .get("Mcp-Session-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let status = response.status();
+        let body = response
+            .text()
+            .context("failed to read remote MCP response body")?;
+
+        if let Some(sid) = new_sid {
+            self.session_id = Some(sid);
+        }
+
+        // 202 Accepted or empty body → notification acknowledged, nothing to parse.
+        if status.as_u16() == 202 || body.trim().is_empty() {
+            return Ok(json!({}));
+        }
+
+        if !status.is_success() {
+            bail!(
+                "HTTP {} from remote MCP server: {}",
+                status.as_u16(),
+                &body[..body.len().min(300)]
+            );
+        }
+
+        if content_type.contains("text/event-stream") {
+            parse_sse_jsonrpc(&body)
+        } else {
+            serde_json::from_str::<Value>(&body).with_context(|| {
+                format!(
+                    "invalid JSON from remote MCP server: {}",
+                    &body[..body.len().min(200)]
+                )
+            })
+        }
+    }
+}
+
+/// Parse the first JSON-RPC response message from an SSE stream body.
+fn parse_sse_jsonrpc(body: &str) -> Result<Value> {
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                // We want a JSON-RPC response (has id + result/error) or a batch.
+                if v.get("id").is_some() && (v.get("result").is_some() || v.get("error").is_some())
+                {
+                    return Ok(v);
+                }
+            }
+        }
+    }
+    bail!("no valid JSON-RPC response found in SSE stream")
+}
+
+fn list_tools_remote(spec: &RemoteServerSpec, timeout: Duration) -> Result<Vec<DiscoveredTool>> {
+    let mut session = RemoteMcpSession::new(spec, timeout)?;
+    // Initialize: ignore errors — many remote servers are stateless and skip this step.
+    let _ = session.initialize();
+
+    let response = session.request("tools/list", json!({}))?;
+    if let Some(msg) = extract_jsonrpc_error(&response) {
+        bail!("tools/list error: {msg}");
+    }
+
+    let tools = response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .context("tools/list missing `result.tools` array")?;
+
+    let mut discovered = Vec::new();
+    for item in tools {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if name.trim().is_empty() {
+            continue;
+        }
+        let description = item
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let input_schema = item
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"object"}));
+        let read_only_hint = item
+            .pointer("/annotations/readOnlyHint")
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                item.pointer("/annotations/read_only_hint")
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false);
+        discovered.push(DiscoveredTool {
+            tool_name: name.to_string(),
+            description,
+            input_schema,
+            read_only_hint,
+        });
+    }
+    Ok(discovered)
+}
+
+fn call_tool_remote(
+    spec: &RemoteServerSpec,
+    tool_name: &str,
+    arguments: &Value,
+) -> Result<McpCallResult> {
+    // Tool calls may take longer than discovery; use a generous timeout.
+    let timeout = std::env::var("API_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(30));
+
+    let mut session = RemoteMcpSession::new(spec, timeout)?;
+    let _ = session.initialize();
+
+    let response = session.request(
+        "tools/call",
+        json!({
+            "name": tool_name,
+            "arguments": arguments
+        }),
+    )?;
+
+    if let Some(msg) = extract_jsonrpc_error(&response) {
+        return Ok(McpCallResult {
+            exit_code: 1,
+            output: truncate_chars(&format!("MCP tools/call error: {msg}"), MAX_OUTPUT_CHARS),
+        });
+    }
+
+    let result = response
+        .get("result")
+        .context("tools/call missing `result` field")?;
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut sections = Vec::new();
+    if let Some(content) = result.get("content").and_then(Value::as_array) {
+        for chunk in content {
+            if let Some(text) = chunk.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                sections.push(text.to_string());
+                continue;
+            }
+            let rendered = serde_json::to_string_pretty(chunk)
+                .unwrap_or_else(|_| chunk.to_string())
+                .trim()
+                .to_string();
+            if !rendered.is_empty() {
+                sections.push(rendered);
+            }
+        }
+    }
+
+    if let Some(structured) = result.get("structuredContent") {
+        sections.push(format!(
+            "structuredContent:\n{}",
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string())
+        ));
+    }
+
+    if sections.is_empty() {
+        sections.push(
+            serde_json::to_string_pretty(result)
+                .unwrap_or_else(|_| result.to_string())
+                .trim()
+                .to_string(),
+        );
+    }
+
+    let mut output = sections.join("\n");
+    if output.trim().is_empty() {
+        output = "(no output)".to_string();
+    }
+    output = truncate_chars(&output, MAX_OUTPUT_CHARS);
+
+    Ok(McpCallResult {
+        exit_code: if is_error { 1 } else { 0 },
+        output,
+    })
 }
 
 #[cfg(test)]

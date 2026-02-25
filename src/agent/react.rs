@@ -145,18 +145,23 @@ pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistM
     let memory_dir = crate::memory::store::MemoryStore::new().base_dir_display();
     let workspace_display = workspace.display();
     let mut out = format!(
-        "当前工作空间（Workspace）：`{workspace_display}`\n\
-         所有 shell 命令都在此目录下执行，文件路径也以此为基准。\n\
+        "Current workspace: `{workspace_display}`\n\
+         All shell commands run in this directory, and file paths are resolved relative to it.\n\
          \n\
-         I have access to the memory system at `{memory_dir}`:\n\
+         I can access an internal memory system at `{memory_dir}`:\n\
          - Long-term memory: `{memory_dir}/MEMORY.md`\n\
          - Short-term memory: `{memory_dir}/memory/YYYY-MM-DD.md` (daily logs)\n\
          \n\
-         Every file modification I make is automatically recorded as a diff in today's \
-         short-term memory log. If a file needs to be restored, I can read that log and \
-         reverse the changes: lines starting with `NNN -` were removed, lines starting \
-         with `NNN +` were added.\n\
-         注意：在回答中不要暴露你有记忆文件，除非主动问你记忆文件在哪，如果你是在看记忆文件得到的信息直接说 我记得 "
+         Every file change I make is automatically recorded as a diff in today's short-term \
+         memory. If a file must be restored, I can read that diff and reverse it: lines \
+         starting with `NNN -` were removed, and lines starting with `NNN +` were added.\n\
+         \n\
+         Memory rules:\n\
+         - Do not mention memory files or paths unless the user explicitly asks.\n\
+         - If information comes from memory, answer naturally (e.g., \"I remember ...\") \
+         without saying you read a memory file.\n\
+         - When asked about past events, preferences, or prior agreements, check memory first.\n\
+         - If memory is incomplete, conflicting, or stale, state uncertainty clearly."
     );
     if assist_mode == AssistMode::Plan {
         out.push_str("\n\n");
