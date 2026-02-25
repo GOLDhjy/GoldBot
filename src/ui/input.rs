@@ -805,6 +805,7 @@ pub(crate) fn expand_input_text(app: &App, input: &str) -> String {
 fn clear_input_buffer(app: &mut App, screen: &mut Screen) {
     screen.input.clear();
     app.paste_chunks.clear();
+    app.at_file.chunks.clear();
 }
 
 fn pop_input_tail(app: &mut App, screen: &mut Screen) {
@@ -825,6 +826,25 @@ fn pop_input_tail(app: &mut App, screen: &mut Screen) {
         let new_len = screen.input.len().saturating_sub(placeholder_len);
         screen.input.truncate(new_len);
         app.paste_chunks.remove(idx);
+        if screen.input.ends_with(' ') {
+            screen.input.pop();
+        }
+        return;
+    }
+
+    let mut matched_at_file_idx = None;
+    for (idx, chunk) in app.at_file.chunks.iter().enumerate().rev() {
+        if screen.input.ends_with(&chunk.placeholder) {
+            matched_at_file_idx = Some(idx);
+            break;
+        }
+    }
+
+    if let Some(idx) = matched_at_file_idx {
+        let placeholder_len = app.at_file.chunks[idx].placeholder.len();
+        let new_len = screen.input.len().saturating_sub(placeholder_len);
+        screen.input.truncate(new_len);
+        app.at_file.chunks.remove(idx);
         if screen.input.ends_with(' ') {
             screen.input.pop();
         }
