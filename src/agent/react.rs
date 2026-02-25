@@ -160,8 +160,8 @@ pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistM
          - Do not mention memory files or paths unless the user explicitly asks.\n\
          - If information comes from memory, answer naturally (e.g., \"I remember ...\") \
          without saying you read a memory file.\n\
-         - When asked about past events, preferences, or prior agreements, check memory first.\n\
-         - If memory is incomplete, conflicting, or stale, state uncertainty clearly."
+         - When asked about past events, preferences, or prior agreements, check memory first \
+         using case-insensitive search (prefer `rg -n -i`)."
     );
     if assist_mode == AssistMode::Plan {
         out.push_str("\n\n");
