@@ -20,6 +20,8 @@ pub(crate) const TITLE_BANNER: [&str; 5] = [
 
 pub(crate) struct Screen {
     stdout: io::Stdout,
+    /// When true, all TUI rendering is suppressed (used with -p headless mode).
+    pub headless: bool,
     pub status: String,
     pub input: String,
     pub task_lines: usize,
@@ -58,9 +60,38 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
+    pub(crate) fn new_headless() -> io::Result<Self> {
+        Ok(Self {
+            stdout: io::stdout(),
+            headless: true,
+            status: String::new(),
+            input: String::new(),
+            task_lines: 0,
+            task_rendered: Vec::new(),
+            managed_lines: 2,
+            confirm_selected: None,
+            input_focused: true,
+            question_labels: Vec::new(),
+            todo_items: Vec::new(),
+            assist_mode: AssistMode::Off,
+            workspace: String::new(),
+            is_running: false,
+            spinner_tick: 0,
+            cursor_at_prompt: false,
+            last_status_rows: 1,
+            at_file_labels: Vec::new(),
+            at_file_sel: 0,
+            command_labels: Vec::new(),
+            command_sel: 0,
+            model_picker_labels: Vec::new(),
+            model_picker_sel: 0,
+        })
+    }
+
     pub(crate) fn new() -> io::Result<Self> {
         let mut s = Self {
             stdout: io::stdout(),
+            headless: false,
             status: String::new(),
             input: String::new(),
             task_lines: 0,
@@ -133,6 +164,9 @@ impl Screen {
     }
 
     pub(crate) fn clear_managed(&mut self) {
+        if self.headless {
+            return;
+        }
         // 如果光标已上移到 prompt 行，先移回 hint 行（managed 区底部）
         if self.cursor_at_prompt {
             let _ = execute!(self.stdout, cursor::MoveDown(1));
@@ -148,6 +182,9 @@ impl Screen {
     }
 
     pub(crate) fn draw_managed(&mut self) {
+        if self.headless {
+            return;
+        }
         let cols = crossterm::terminal::size()
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
@@ -459,6 +496,9 @@ impl Screen {
     }
 
     pub(crate) fn emit(&mut self, lines: &[String]) {
+        if self.headless {
+            return;
+        }
         self.task_lines += lines.iter().map(|l| self.rendered_rows(l)).sum::<usize>();
         self.task_rendered.extend(lines.iter().cloned());
         self.clear_managed();
@@ -469,6 +509,9 @@ impl Screen {
     }
 
     pub(crate) fn refresh(&mut self) {
+        if self.headless {
+            return;
+        }
         self.clear_managed();
         self.draw_managed();
     }
@@ -491,6 +534,9 @@ impl Screen {
     /// 仅适用于 spinner 跳帧和思考预览更新场景。
     /// 若行数发生变化或处于确认/todo 界面，则回退到完整 refresh()。
     pub(crate) fn refresh_status_only(&mut self) {
+        if self.headless {
+            return;
+        }
         if self.confirm_selected.is_some()
             || !self.todo_items.is_empty()
             || !self.at_file_labels.is_empty()
@@ -587,6 +633,9 @@ impl Screen {
     }
 
     pub(crate) fn collapse_to(&mut self, kept: &[String]) {
+        if self.headless {
+            return;
+        }
         let rendered_rows = self
             .task_rendered
             .iter()

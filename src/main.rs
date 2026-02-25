@@ -289,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (cli_prompt, cli_yes) = parse_cli_args();
+    let headless = cli_prompt.is_some();
 
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
     ensure_dot_env();
@@ -299,9 +300,15 @@ async fn main() -> anyhow::Result<()> {
     let http_client = build_http_client()?;
     let mut app = App::new();
 
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnableBracketedPaste)?;
-    let mut screen = Screen::new()?;
+    if !headless {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnableBracketedPaste)?;
+    }
+    let mut screen = if headless {
+        Screen::new_headless()?
+    } else {
+        Screen::new()?
+    };
     screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
     screen.assist_mode = app.assist_mode;
 
@@ -340,17 +347,14 @@ async fn main() -> anyhow::Result<()> {
 
     let run_result = run_loop(&mut app, &mut screen, http_client, cli_prompt, cli_yes).await;
 
-    let _ = execute!(io::stdout(), DisableBracketedPaste);
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), crossterm::cursor::Show, Print("\r\n"));
-    // headless 模式：清除当前行残留的 TUI 内容，然后把最终答案打印到 stdout
+    if !headless {
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), crossterm::cursor::Show, Print("\r\n"));
+    }
+    // headless 模式：直接把最终答案打印到 stdout
     if app.headless {
         if let Some(summary) = &app.final_summary {
-            let _ = execute!(
-                io::stdout(),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                Print("\r")
-            );
             println!("{summary}");
         }
     }
