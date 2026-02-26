@@ -8,7 +8,9 @@
 
 ## 特性
 
-- ReAct 循环：思考-执行-观察-再思考，支持 shell / plan / question / web_search / MCP 多种动作
+- ReAct 循环：思考-执行-观察-再思考，支持 shell / plan / question / web_search / MCP / SubAgent 多种动作
+- SubAgent 子代理：DAG 任务图调度，拓扑排序自动并行/串行，依赖节点输出自动合并，支持 role 角色预设（search/coding/analysis/writer/reviewer）
+- 三级安全控制：Safe/Confirm/Block，heredoc 内容不误判
 - 三级安全控制：Safe/Confirm/Block，heredoc 内容不误判
 - 文件变更 diff：命令执行后自动对比前后内容，行号级红绿高亮显示
 - 实时 TUI：流式显示思考过程，完成后默认折叠
@@ -259,10 +261,14 @@ description: 整理和处理 PDF 文件
 ```text
 用户输入 → start_task() → LLM 调用 → process_llm_result()
 
-  ├─ shell    → execute_command()
+├─ shell    → execute_command()
   │     ├─ Safe    → 直接执行，捕获前后文件内容生成 diff
   │     ├─ Confirm → 弹出确认菜单
   │     └─ Block   → 显示被拦截命令，返回错误给 LLM
+  ├─ SubAgent  → DAG 调度器
+  │     ├─ 拓扑排序 → 自动并行/串行
+  │     ├─ 依赖合并 → InputMerge (Concat/Structured)
+  │     └─ 输出汇总 → OutputMerge (All/First/Concat)
   ├─ web_search → Bocha AI → 返回摘要继续循环
   ├─ plan       → 渲染 markdown 计划
   ├─ question   → 显示选项菜单，等待用户回答
