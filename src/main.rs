@@ -10,7 +10,7 @@ use std::{io, time::Duration};
 use agent::{
     executor::{
         handle_llm_stream_delta, handle_llm_thinking_delta, maybe_flush_and_compact_before_call,
-        process_llm_result, start_task,
+        process_llm_result, refresh_llm_status, start_task,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
@@ -41,6 +41,8 @@ pub(crate) struct App {
     pub task: String,
     pub steps_taken: usize,
     pub llm_calling: bool,
+    /// Start time of the current in-flight LLM request (for status elapsed display).
+    pub llm_call_started_at: Option<std::time::Instant>,
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
     pub needs_agent_executor: bool,
@@ -220,6 +222,7 @@ impl App {
             task: String::new(),
             steps_taken: 0,
             llm_calling: false,
+            llm_call_started_at: None,
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
             needs_agent_executor: false,
@@ -450,6 +453,7 @@ async fn run_loop(
                 LlmWorkerEvent::Done(result) => {
                     llm_task_handle = None;
                     app.llm_calling = false;
+                    app.llm_call_started_at = None;
                     app.llm_stream_preview.clear();
                     app.llm_preview_shown.clear();
                     screen.status.clear();
@@ -469,10 +473,10 @@ async fn run_loop(
             maybe_flush_and_compact_before_call(app, screen);
             app.needs_agent_executor = false;
             app.llm_calling = true;
+            app.llm_call_started_at = Some(std::time::Instant::now());
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
-            screen.status = "Thinking...".to_string();
-            screen.refresh();
+            refresh_llm_status(app, screen);
 
             let tx_done = tx.clone();
             let tx_delta = tx.clone();
@@ -503,7 +507,11 @@ async fn run_loop(
         screen.is_running = app.running;
         if app.running && last_spinner_refresh.elapsed() >= Duration::from_millis(400) {
             screen.spinner_tick = screen.spinner_tick.wrapping_add(1);
-            screen.refresh_status_only();
+            if app.llm_calling {
+                refresh_llm_status(app, screen);
+            } else {
+                screen.refresh_status_only();
+            }
             last_spinner_refresh = std::time::Instant::now();
         }
 
@@ -549,8 +557,10 @@ fn interrupt_active_llm_loop(
     app.running = false;
     app.needs_agent_executor = false;
     app.llm_calling = false;
+    app.llm_call_started_at = None;
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
+    screen.status.clear();
     if let Some(handle) = llm_task_handle.take() {
         handle.abort();
     }

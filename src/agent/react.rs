@@ -209,7 +209,8 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let line_end = extract_last_tag(text, "line_end")
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .ok_or_else(|| anyhow!("missing or invalid <line_end> for update tool call"))?;
-            let new_string = extract_last_tag(text, "new_string").unwrap_or_default();
+            let new_string =
+                extract_last_tag_preserve_block(text, "new_string").unwrap_or_default();
             Ok(LlmAction::UpdateFile {
                 path,
                 line_start,
@@ -220,7 +221,7 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "write" => {
             let path = extract_last_tag(text, "path")
                 .ok_or_else(|| anyhow!("missing <path> for write tool call"))?;
-            let content = extract_last_tag(text, "content").unwrap_or_default();
+            let content = extract_last_tag_preserve_block(text, "content").unwrap_or_default();
             Ok(LlmAction::WriteFile { path, content })
         }
         "read" => {
@@ -377,12 +378,41 @@ fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
 }
 
 fn extract_last_tag(text: &str, tag: &str) -> Option<String> {
+    extract_last_tag_raw(text, tag).map(|s| s.trim().to_string())
+}
+
+fn extract_last_tag_raw(text: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let end = text.rfind(&close)?;
     let head = &text[..end];
     let start = head.rfind(&open)? + open.len();
-    Some(head[start..].trim().to_string())
+    Some(head[start..].to_string())
+}
+
+/// Preserve leading indentation for code/file content blocks while still stripping
+/// the common wrapper newline introduced by pretty-printed XML tags.
+fn extract_last_tag_preserve_block(text: &str, tag: &str) -> Option<String> {
+    let mut s = extract_last_tag_raw(text, tag)?;
+    let had_leading_wrapper_newline = if s.starts_with("\r\n") {
+        s.drain(..2);
+        true
+    } else if s.starts_with('\n') {
+        s.drain(..1);
+        true
+    } else {
+        false
+    };
+
+    if had_leading_wrapper_newline {
+        if s.ends_with("\r\n") {
+            s.truncate(s.len().saturating_sub(2));
+        } else if s.ends_with('\n') {
+            s.pop();
+        }
+    }
+
+    Some(s)
 }
 
 #[cfg(test)]
@@ -483,6 +513,38 @@ mod tests {
                 assert_eq!(items[2].status, crate::types::TodoStatus::Pending);
             }
             _ => panic!("expected Todo action"),
+        }
+    }
+
+    #[test]
+    fn parse_update_preserves_new_string_indentation() {
+        let raw = "<tool>update</tool>\
+            <path>src/main.rs</path>\
+            <line_start>10</line_start>\
+            <line_end>12</line_end>\
+            <new_string>\n    if cond {\n        work();\n    }\n</new_string>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse update");
+        match &actions[0] {
+            LlmAction::UpdateFile { new_string, .. } => {
+                assert!(new_string.starts_with("    if cond {"));
+                assert!(new_string.contains("\n        work();\n"));
+                assert!(!new_string.starts_with('\n'));
+            }
+            _ => panic!("expected UpdateFile action"),
+        }
+    }
+
+    #[test]
+    fn parse_write_preserves_content_indentation() {
+        let raw = "<tool>write</tool>\
+            <path>tmp.txt</path>\
+            <content>\n  alpha\n    beta\n</content>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse write");
+        match &actions[0] {
+            LlmAction::WriteFile { content, .. } => {
+                assert_eq!(content, "  alpha\n    beta");
+            }
+            _ => panic!("expected WriteFile action"),
         }
     }
     #[test]

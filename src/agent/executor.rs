@@ -27,6 +27,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.running = true;
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
+    app.llm_call_started_at = None;
     app.needs_agent_executor = true;
     app.interrupt_llm_loop_requested = false;
     app.interjection_mode = false;
@@ -1060,9 +1061,8 @@ pub(crate) fn handle_llm_thinking_delta(app: &mut App, screen: &mut Screen, chun
         return;
     }
 
-    app.llm_preview_shown = preview.clone();
-    screen.status = preview;
-    screen.refresh_status_only();
+    app.llm_preview_shown = preview;
+    refresh_llm_status(app, screen);
 }
 
 pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta: &str) {
@@ -1097,9 +1097,45 @@ pub(crate) fn handle_llm_stream_delta(app: &mut App, screen: &mut Screen, delta:
         return;
     }
 
-    app.llm_preview_shown = preview.clone();
-    screen.status = preview;
+    app.llm_preview_shown = preview;
+    refresh_llm_status(app, screen);
+}
+
+pub(crate) fn refresh_llm_status(app: &mut App, screen: &mut Screen) {
+    if !app.llm_calling {
+        return;
+    }
+    let base = if app.llm_preview_shown.is_empty() {
+        "Thinking..."
+    } else {
+        &app.llm_preview_shown
+    };
+    screen.status = format_llm_status_with_elapsed(base, app.llm_call_started_at);
     screen.refresh_status_only();
+}
+
+fn format_llm_status_with_elapsed(base: &str, started_at: Option<std::time::Instant>) -> String {
+    let Some(started_at) = started_at else {
+        return base.to_string();
+    };
+    let elapsed = format_elapsed_short(started_at.elapsed());
+    format!("{base} ({elapsed} • esc to interrupt)")
+}
+
+fn format_elapsed_short(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        return format!("{m}m {s:02}s");
+    }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h}h {m:02}m {s:02}s")
 }
 
 fn extract_live_preview(raw: &str) -> String {
