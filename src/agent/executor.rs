@@ -31,12 +31,15 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     app.llm_call_started_at = None;
+    app.task_started_at = Some(std::time::Instant::now());
+    app.last_task_elapsed = None;
     app.needs_agent_executor = true;
     app.interrupt_llm_loop_requested = false;
     app.interjection_mode = false;
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
+    app.current_phase = None;
     screen.confirm_selected = None;
     screen.input_focused = true;
     app.task_events.clear();
@@ -146,6 +149,13 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
             }
+            LlmAction::Phase { text } => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    emit_phase_event(app, screen, text);
+                }
+                had_non_blocking_only = true;
+            }
             LlmAction::Shell { command } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
@@ -197,8 +207,7 @@ pub(crate) fn process_llm_result(
                         app.task_events.push(call_ev);
 
                         let msg = "Command blocked by safety policy";
-                        app.messages
-                            .push(Message::user(format!("Tool result:\n{msg}")));
+                        push_tool_result_to_llm(app, "Tool result:", msg);
                         let ev = Event::ToolResult {
                             exit_code: -1,
                             output: msg.to_string(),
@@ -478,6 +487,36 @@ fn render_plan(screen: &mut Screen, content: &str) {
     screen.emit(&lines);
 }
 
+pub(crate) fn emit_phase_event(app: &mut App, screen: &mut Screen, text: &str) {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = shorten_text(&normalized, 180);
+    if normalized.is_empty() {
+        return;
+    }
+    if app.current_phase.as_deref() == Some(normalized.as_str()) {
+        return;
+    }
+    app.current_phase = Some(normalized.clone());
+    let ev = Event::Phase { text: normalized };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+}
+
+pub(crate) fn push_tool_result_to_llm(app: &mut App, header: &str, body: &str) {
+    let mut msg = String::new();
+    msg.push_str(header);
+    msg.push('\n');
+    if let Some(phase) = app.current_phase.as_deref().map(str::trim) {
+        if !phase.is_empty() {
+            msg.push_str("Current phase: ");
+            msg.push_str(phase);
+            msg.push_str("\nResult:\n");
+        }
+    }
+    msg.push_str(body);
+    app.messages.push(Message::user(msg));
+}
+
 pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     let intent = crate::tools::shell::classify_command(cmd);
     let call_ev = Event::ToolCall {
@@ -495,10 +534,8 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
 
     match crate::tools::shell::run_command(cmd) {
         Ok(out) => {
-            app.messages.push(Message::user(format!(
-                "Tool result (exit={}):\n{}",
-                out.exit_code, out.output
-            )));
+            let header = format!("Tool result (exit={}):", out.exit_code);
+            push_tool_result_to_llm(app, &header, &out.output);
             let ev = Event::ToolResult {
                 exit_code: out.exit_code,
                 output: out.output,
@@ -508,8 +545,7 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
         }
         Err(e) => {
             let err = format!("execution failed: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
             let ev = Event::ToolResult {
                 exit_code: -1,
                 output: err,
@@ -532,10 +568,8 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
 
     match app.mcp_registry.execute_tool(tool, arguments) {
         Ok(out) => {
-            app.messages.push(Message::user(format!(
-                "Tool result (exit={}):\n{}",
-                out.exit_code, out.output
-            )));
+            let header = format!("Tool result (exit={}):", out.exit_code);
+            push_tool_result_to_llm(app, &header, &out.output);
             let ev = Event::ToolResult {
                 exit_code: out.exit_code,
                 output: out.output,
@@ -545,8 +579,7 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
         }
         Err(e) => {
             let err = format!("MCP execution failed: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
             let ev = Event::ToolResult {
                 exit_code: -1,
                 output: err,
@@ -615,9 +648,8 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
 
     // Push full output to LLM only; no separate ToolResult UI event.
     let llm_combined = llm_parts.join("\n\n");
-    app.messages.push(Message::user(format!(
-        "Tool result (exit={final_exit}):\n{llm_combined}"
-    )));
+    let header = format!("Tool result (exit={final_exit}):");
+    push_tool_result_to_llm(app, &header, &llm_combined);
 }
 
 pub(crate) fn execute_update_file(
@@ -700,9 +732,10 @@ pub(crate) fn execute_update_file(
             let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
-            app.messages.push(Message::user(format!(
-                "Tool result:\nFile updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})"
-            )));
+            let llm_msg = format!(
+                "File updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})"
+            );
+            push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
             let mut tool_output = format!(
                 "Added {added} {}, removed {deleted} {}\nDiff {path}:\n",
@@ -721,8 +754,7 @@ pub(crate) fn execute_update_file(
         }
         Err(e) => {
             let output = format!("更新失败: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result:\n{output}")));
+            push_tool_result_to_llm(app, "Tool result:", &output);
             let result_ev = Event::ToolResult {
                 exit_code: 1,
                 output,
@@ -758,14 +790,11 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
 
     match result {
         Ok(()) => {
-            app.messages.push(Message::user(
-                "Tool result:\nFile written successfully.".to_string(),
-            ));
+            push_tool_result_to_llm(app, "Tool result:", "File written successfully.");
         }
         Err(e) => {
             let output = format!("写入失败: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result:\n{output}")));
+            push_tool_result_to_llm(app, "Tool result:", &output);
             let result_ev = Event::ToolResult {
                 exit_code: 1,
                 output,
@@ -838,8 +867,7 @@ pub(crate) fn execute_read_file(
 
     match result {
         Ok(output) => {
-            app.messages
-                .push(Message::user(format!("Tool result:\n{output}")));
+            push_tool_result_to_llm(app, "Tool result:", &output);
             let ev = Event::ToolResult {
                 exit_code: 0,
                 output,
@@ -849,8 +877,7 @@ pub(crate) fn execute_read_file(
         }
         Err(e) => {
             let output = format!("读取失败: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result:\n{output}")));
+            push_tool_result_to_llm(app, "Tool result:", &output);
             let ev = Event::ToolResult {
                 exit_code: 1,
                 output,
@@ -885,10 +912,8 @@ pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: 
                 result.file_count,
                 if result.file_count == 1 { "" } else { "s" },
             );
-            app.messages.push(Message::user(format!(
-                "Tool result (exit=0):\n{}\n{}",
-                summary, result.output
-            )));
+            let llm_msg = format!("{}\n{}", summary, result.output);
+            push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
             let ev = Event::ToolResult {
                 exit_code: 0,
                 output: format!("{}\n{}", summary, result.output),
@@ -898,8 +923,7 @@ pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: 
         }
         Err(e) => {
             let err = format!("search failed: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
             let ev = Event::ToolResult {
                 exit_code: -1,
                 output: err,
@@ -921,10 +945,7 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
 
     match crate::tools::web_search::search(query) {
         Ok(result) => {
-            app.messages.push(Message::user(format!(
-                "Tool result (exit=0):\n{}",
-                result.output
-            )));
+            push_tool_result_to_llm(app, "Tool result (exit=0):", &result.output);
             let ev = Event::ToolResult {
                 exit_code: 0,
                 output: result.output,
@@ -934,8 +955,7 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
         }
         Err(e) => {
             let err = format!("web search failed: {e}");
-            app.messages
-                .push(Message::user(format!("Tool result (exit=-1):\n{err}")));
+            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
             let ev = Event::ToolResult {
                 exit_code: -1,
                 output: err,
@@ -996,8 +1016,7 @@ pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json
     };
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
-    app.messages
-        .push(Message::user(format!("Tool result:\n{result_msg}")));
+    push_tool_result_to_llm(app, "Tool result:", &result_msg);
 }
 
 pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
@@ -1014,15 +1033,25 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     }
     let _ = store.promote_repeated_short_term_to_long_term();
 
+    let total_elapsed = app.task_started_at.map(|t| t.elapsed());
+    app.last_task_elapsed = total_elapsed;
+    app.task_started_at = None;
+
     app.running = false;
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
+    app.current_phase = None;
     screen.confirm_selected = None;
     screen.input_focused = true;
-    screen.status = "[Ctrl+d] full details".grey().to_string();
+    screen.status = match total_elapsed {
+        Some(d) => format!("[Ctrl+d] full details · 总耗时 {}", format_elapsed_short(d))
+            .grey()
+            .to_string(),
+        None => "[Ctrl+d] full details".grey().to_string(),
+    };
     // headless 模式（-p 启动）：任务完成后自动退出
     if app.headless {
         app.quit = true;
@@ -1113,7 +1142,8 @@ pub(crate) fn refresh_llm_status(app: &mut App, screen: &mut Screen) {
     } else {
         &app.llm_preview_shown
     };
-    screen.status = format_llm_status_with_elapsed(base, app.llm_call_started_at);
+    let started_at = app.task_started_at.or(app.llm_call_started_at);
+    screen.status = format_llm_status_with_elapsed(base, started_at);
     screen.refresh_status_only();
 }
 

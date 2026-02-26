@@ -43,6 +43,10 @@ pub(crate) struct App {
     pub llm_calling: bool,
     /// Start time of the current in-flight LLM request (for status elapsed display).
     pub llm_call_started_at: Option<std::time::Instant>,
+    /// Start time of the current task (persists across multiple LLM/tool rounds until final).
+    pub task_started_at: Option<std::time::Instant>,
+    /// Total elapsed time of the last finished task, for post-final UI display.
+    pub last_task_elapsed: Option<std::time::Duration>,
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
     pub needs_agent_executor: bool,
@@ -54,6 +58,8 @@ pub(crate) struct App {
     pub quit: bool,
     pub pending_confirm: Option<String>,
     pub pending_confirm_note: bool,
+    /// Current user-visible phase summary set by the LLM via the phase tool.
+    pub current_phase: Option<String>,
     pub task_events: Vec<Event>,
     pub final_summary: Option<String>,
     pub task_collapsed: bool,
@@ -223,6 +229,8 @@ impl App {
             steps_taken: 0,
             llm_calling: false,
             llm_call_started_at: None,
+            task_started_at: None,
+            last_task_elapsed: None,
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
             needs_agent_executor: false,
@@ -233,6 +241,7 @@ impl App {
             pending_confirm: None,
 
             pending_confirm_note: false,
+            current_phase: None,
             task_events: Vec::new(),
             final_summary: None,
             task_collapsed: false,

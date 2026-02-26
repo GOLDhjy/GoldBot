@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
@@ -14,7 +14,18 @@ const AGENTS_SUMMARY_MAX_LINES: usize = 28;
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
 You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below, Think before Act.
 
-## Response format
+# Response format
+
+## Rules
+- One blocking tool call per response. <tool>phase</tool> are non-blocking and may be included too. Use <tool>explorer</tool> to batch read-only lookups with multiple <command> tags.
+- Use <tool>phase</tool> to write what to do next (one short sentence). Update it when the stage changes; omit it if unchanged.
+- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.
+- Use <final> as soon as done; avoid extra commands.
+- The current phase is shown in the running UI and fed back with later tool results, so you must maintain it yourself when the task enters a new stage.
+- On failure, diagnose from output and try a different approach.
+- Shell: {SHELL_HINT}.
+
+## Tools
 
 ### completed task
 Task complete (required):
@@ -23,17 +34,9 @@ Task complete (required):
 <final> guidelines:
 - Start with the conclusion, then add brief details.
 - If files were changed, include the file paths.
-- 不要用Emoji
+- No Emoji
 
-## Rules
-- One tool call per response; wait for the result before proceeding. Exceptions: <tool>todo</tool> is non-blocking and can always be included alongside another tool call. <tool>explorer</tool> accepts multiple <command> tags and is the preferred way to batch read-only lookups into a single round-trip.
-- Use <final> as soon as done; avoid extra commands.
-- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity.
-- On failure, diagnose from output and try a different approach.
-- Shell: {SHELL_HINT}.
-- 修改文件时注意文件原本编码格式，避免乱码。
-
-## Tools
+### Process Tools
 
 Shell command:
 <thought>reasoning</thought>
@@ -46,6 +49,11 @@ Explorer (batch read-only commands; all results returned at once — put everyth
 <command>first read-only command</command>
 <command>more read-only command</command>
 Only for safe read-only commands (ls, cat, grep, git log …). Do NOT use for writes or commands that depend on each other's output.
+
+Phase update (non-blocking; write what to do next):
+<thought>reasoning</thought>
+<tool>phase</tool>
+<phase>what to do next (one short sentence)</phase>
 
 Update file (replace lines by line number; always use <tool>read</tool> first to get line numbers):
 <thought>reasoning</thought>
@@ -311,6 +319,11 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let command = extract_last_tag(text, "command")
                 .ok_or_else(|| anyhow!("missing <command> for shell tool call"))?;
             Ok(LlmAction::Shell { command })
+        }
+        "phase" => {
+            let text = extract_last_tag(text, "phase")
+                .ok_or_else(|| anyhow!("missing <phase> for phase tool call"))?;
+            Ok(LlmAction::Phase { text })
         }
         "update" => {
             let path = extract_last_tag(text, "path")
@@ -628,6 +641,17 @@ mod tests {
                 assert_eq!(items[2].status, crate::types::TodoStatus::Pending);
             }
             _ => panic!("expected Todo action"),
+        }
+    }
+
+    #[test]
+    fn parse_phase_tool_call() {
+        let raw = "<thought>switch stage</thought><tool>phase</tool><phase>我先收集上下文，确认当前实现。</phase>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse phase");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LlmAction::Phase { text } => assert!(text.contains("收集上下文")),
+            _ => panic!("expected Phase action"),
         }
     }
 

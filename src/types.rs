@@ -163,6 +163,9 @@ pub enum Event {
     Thinking {
         text: String,
     },
+    Phase {
+        text: String,
+    },
     ToolCall {
         label: String,
         command: String,
@@ -199,6 +202,9 @@ pub enum LlmAction {
     },
     Plan {
         content: String,
+    },
+    Phase {
+        text: String,
     },
     Question {
         text: String,

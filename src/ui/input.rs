@@ -1,6 +1,6 @@
 use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
-use crate::agent::executor::{execute_command, finish};
+use crate::agent::executor::{execute_command, finish, push_tool_result_to_llm};
 use crate::agent::provider::BACKEND_PRESETS;
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
@@ -203,8 +203,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                             return;
                         };
                         let msg = format!("User chose to skip this command: {cmd}");
-                        app.messages
-                            .push(Message::user(format!("Tool result:\n{msg}")));
+                        push_tool_result_to_llm(app, "Tool result:", &msg);
                         let ev = Event::ToolResult {
                             exit_code: 0,
                             output: msg,

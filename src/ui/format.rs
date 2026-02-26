@@ -19,6 +19,13 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
         Event::Thinking { text } => {
             lines_with(text, |_, line| format!("  {}", line).grey().to_string())
         }
+        Event::Phase { text } => lines_with(text, |i, line| {
+            if i == 0 {
+                format!("  {} {}", sym.bullet, line).grey().to_string()
+            } else {
+                format!("    {}", line).grey().to_string()
+            }
+        }),
         Event::ToolCall { label, command, .. } => {
             let mut lines = vec![format!("  {} {}", sym.record, label).cyan().to_string()];
             lines.extend(lines_with(command, |_, line| {
@@ -73,6 +80,11 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
             .take(3)
             .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
             .collect(),
+        Event::Phase { text } => vec![
+            format!("  {} {}", sym.bullet, shorten_text(text, 110))
+                .grey()
+                .to_string(),
+        ],
         Event::ToolCall {
             label,
             command,
@@ -101,6 +113,13 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
     let sym = Symbols::current();
     match event {
         Event::Thinking { .. } => Vec::new(),
+        Event::Phase { text } => {
+            vec![
+                format!("  {} {}", sym.bullet, shorten_text(text, 110))
+                    .grey()
+                    .to_string(),
+            ]
+        }
         Event::ToolCall { label, .. } => {
             vec![format!("  {} {}", sym.bullet, label).cyan().to_string()]
         }
@@ -864,6 +883,7 @@ pub(crate) fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
                             j += 1;
                         }
                         Event::Thinking { .. } => j += 1,
+                        Event::Phase { .. } => break,
                         Event::NeedsConfirmation { .. }
                         | Event::Final { .. }
                         | Event::UserTask { .. } => break,
