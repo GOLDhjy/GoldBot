@@ -4,14 +4,15 @@ use serde_json::Value;
 use crate::types::{LlmAction, TodoItem, TodoStatus};
 
 pub(crate) const PLAN_MODE_ASSIST_CONTEXT_APPENDIX: &str = "\
-注意：Plan 模式已开启（你应主动使用 plan 流程）：
+Plan mode is enabled. Use the plan workflow proactively.
 ## Plan Mode Rules
-任务信息不足或有歧义 → 使用 <tool>question</tool> 提问（每次只问一个关键问题），先收集信息。
-信息充足后，任务如果很复杂 → 使用 <tool>plan</tool> 输出完整计划,计划中一定要有todo步骤拆分;
-plan 之后必须紧跟 <tool>question</tool> 询问确认。
-用户确认计划后 → 在 <final> 中完整复述 plan 内容，不得改写为摘要。
-如果用户确认开始执行 → 先调用 <tool>set_mode</tool> 并设置 <mode>accept_edits</mode>，再继续执行工具。
-set_mode（仅在 Plan 模式使用；非阻塞，只更新本地模式/UI）:
+- If information is missing or the task is ambiguous, use <tool>question</tool> first (ask one key question at a time).
+- Once information is sufficient and the task is complex, use <tool>plan</tool> to produce a complete plan with todo-style step breakdowns.
+- After <tool>plan</tool>, immediately ask for confirmation with <tool>question</tool>.
+- If the user confirms the plan content only (not execution), reply in <final> with the full plan content (do not summarize or rewrite it).
+- If the user confirms execution, your NEXT response MUST include <tool>set_mode</tool> before any execution tool call or <final>.
+- Default execution mode after confirmation is <mode>agent</mode> unless the user explicitly requests another mode.
+- <tool>set_mode</tool> is non-blocking and only updates local mode/UI.
 
 ## Plan Tools
 
