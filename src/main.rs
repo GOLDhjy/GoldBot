@@ -14,6 +14,7 @@ use agent::{
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
+    sub_agent::{SubAgentHandle, SubAgentIdGen},
 };
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyEventKind},
@@ -99,6 +100,12 @@ pub(crate) struct App {
 
     // ── /model picker ──────────────────────────────────────────────────────────
     pub model_picker: ModelPickerState,
+
+    // ── Sub-Agent ────────────────────────────────────────────────────────────
+    /// SubAgent ID 生成器
+    pub sub_agent_id_gen: SubAgentIdGen,
+    /// 当前活跃的 SubAgent 句柄
+    pub sub_agent_handles: Vec<SubAgentHandle>,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +258,8 @@ impl App {
             user_commands: Vec::new(),
             cmd_picker: CmdPickerState::default(),
             model_picker: ModelPickerState::default(),
+            sub_agent_id_gen: SubAgentIdGen::new(),
+            sub_agent_handles: Vec::new(),
         }
     }
 

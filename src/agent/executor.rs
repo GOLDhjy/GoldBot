@@ -239,7 +239,11 @@ pub(crate) fn process_llm_result(
                 app.needs_agent_executor = true;
                 break 'actions;
             }
-            LlmAction::ReadFile { path, offset, limit } => {
+            LlmAction::ReadFile {
+                path,
+                offset,
+                limit,
+            } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 execute_read_file(app, screen, &path, offset, limit);
@@ -317,6 +321,44 @@ pub(crate) fn process_llm_result(
                     .push(Message::user("[todo updated]".to_string()));
                 // Don't break — continue to next action (todo is non-blocking).
                 had_non_blocking_only = true;
+            }
+            LlmAction::SubAgent { graph } => {
+                // Sub-agent 调度尚未实现；记录 DAG 摘要并通知 LLM
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                // 构造摘要：显示节点 ID、依赖关系和最终输出节点
+                let node_summary: Vec<String> = graph
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        if n.depends_on.is_empty() {
+                            n.id.clone()
+                        } else {
+                            format!("{}←[{}]", n.id, n.depends_on.join(","))
+                        }
+                    })
+                    .collect();
+                let outputs = if graph.output_nodes.is_empty() {
+                    "all leaves".to_string()
+                } else {
+                    graph.output_nodes.join(",")
+                };
+                let ev = Event::Thinking {
+                    text: format!(
+                        "sub_agent DAG: {} — output: {}",
+                        node_summary.join(" → "),
+                        outputs
+                    ),
+                };
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+                app.messages.push(Message::user(
+                    "[sub_agent dispatch not yet implemented; \
+                     please use direct tool calls for now]"
+                        .to_string(),
+                ));
+                app.needs_agent_executor = true;
+                break 'actions;
             }
             LlmAction::Final { summary } => {
                 // Clear the todo panel when task finishes.
@@ -431,7 +473,6 @@ fn render_plan(screen: &mut Screen, content: &str) {
     lines.push(String::new());
     screen.emit(&lines);
 }
-
 
 pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     let intent = crate::tools::shell::classify_command(cmd);
@@ -584,7 +625,7 @@ pub(crate) fn execute_update_file(
     new_string: &str,
 ) {
     let call_ev = Event::ToolCall {
-        label: "Update".to_string(),
+        label: format!("Update({path})"),
         command: path.to_string(),
         multiline: false,
     };
@@ -601,7 +642,11 @@ pub(crate) fn execute_update_file(
     let result: Result<(String, String), std::io::Error> = (|| {
         let raw = std::fs::read_to_string(&abs_path)?;
         let crlf = raw.contains("\r\n");
-        let content = if crlf { raw.replace("\r\n", "\n") } else { raw.clone() };
+        let content = if crlf {
+            raw.replace("\r\n", "\n")
+        } else {
+            raw.clone()
+        };
         let mut lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
@@ -618,7 +663,7 @@ pub(crate) fn execute_update_file(
         }
 
         let s = line_start - 1; // 转 0-based
-        let e = line_end;       // lines[s..e]
+        let e = line_end; // lines[s..e]
 
         // 旧内容（用于 diff）
         let old_content = lines[s..e].join("\n");
@@ -655,7 +700,11 @@ pub(crate) fn execute_update_file(
                 "Tool result:\nFile updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})"
             )));
             // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
-            let mut tool_output = format!("Diff {path}:\n");
+            let mut tool_output = format!(
+                "Added {added} {}, removed {deleted} {}\nDiff {path}:\n",
+                if added == 1 { "line" } else { "lines" },
+                if deleted == 1 { "line" } else { "lines" }
+            );
             for line in diff_text.lines() {
                 tool_output.push_str(&format!("  {line}\n"));
             }
@@ -757,9 +806,7 @@ pub(crate) fn execute_read_file(
         let total = lines.len();
 
         let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0);
-        let end = limit
-            .map(|l| (start + l).min(total))
-            .unwrap_or(total);
+        let end = limit.map(|l| (start + l).min(total)).unwrap_or(total);
         let start = start.min(total);
 
         if start >= end && total > 0 {

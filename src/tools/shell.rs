@@ -698,8 +698,7 @@ pub(crate) fn render_unified_diff(before: &str, after: &str, line_offset: usize)
     let mut truncated = false;
 
     // 计算最大行号位数，保证列对齐（含 offset 后的最大行号）
-    let max_line = (before.lines().count() + line_offset)
-        .max(after.lines().count() + line_offset);
+    let max_line = (before.lines().count() + line_offset).max(after.lines().count() + line_offset);
     let num_width = max_line.to_string().len().max(3);
 
     'outer: for group in diff.grouped_ops(3) {

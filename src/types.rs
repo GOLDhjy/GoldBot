@@ -239,6 +239,10 @@ pub enum LlmAction {
         offset: Option<usize>,
         limit: Option<usize>,
     },
+    /// 派发子Agent任务 DAG（一次性提交完整依赖图）
+    SubAgent {
+        graph: crate::agent::sub_agent::TaskGraph,
+    },
     Final {
         summary: String,
     },

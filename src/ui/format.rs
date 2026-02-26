@@ -1033,4 +1033,26 @@ mod tests {
         assert!(lines.contains("Read(/tmp/only.rs)"));
         assert!(!lines.contains("Reading 1 files"));
     }
+
+    #[test]
+    fn collapsed_update_shows_target_and_line_counts() {
+        let events = vec![
+            Event::ToolCall {
+                label: "Update(README.md)".to_string(),
+                command: "README.md".to_string(),
+                multiline: false,
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output:
+                    "Added 1 line, removed 4 lines\nDiff README.md:\n  @@ -1,4 +1,1 @@\n  -a\n  +b"
+                        .to_string(),
+            },
+        ];
+
+        let lines = collapsed_task_event_lines(&events).join("\n");
+        assert!(lines.contains("Update(README.md)"));
+        assert!(lines.contains("Added 1 line, removed 4 lines"));
+        assert!(!lines.contains("Diff README.md:"));
+    }
 }

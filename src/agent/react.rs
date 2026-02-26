@@ -1,5 +1,8 @@
-﻿use crate::{
-    agent::plan,
+use crate::{
+    agent::{
+        plan,
+        sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
+    },
     types::{AssistMode, LlmAction},
 };
 use anyhow::{Result, anyhow};
@@ -81,6 +84,97 @@ MCP tool (only if listed later in this prompt):
 Load a skill (only if listed later in this prompt):
 <thought>reasoning</thought>
 <skill>skill-name</skill>
+
+Sub-agent (delegate a task DAG to sub-agents; scheduler derives execution order automatically from dependencies):
+<thought>reasoning</thought>
+<tool>sub_agent</tool>
+<graph>{
+  \"nodes\": [
+    {\"id\": \"a\", \"task\": \"...\"},
+    {\"id\": \"b\", \"task\": \"...\"},
+    {\"id\": \"c\", \"task\": \"...\", \"depends_on\": [\"a\", \"b\"], \"input_merge\": \"concat\"},
+    {\"id\": \"d\", \"task\": \"...\"}
+  ],
+  \"output_nodes\": [\"c\", \"d\"],
+  \"output_merge\": \"all\"
+}</graph>
+
+## When to use sub_agent
+Use this tool whenever a task can be decomposed into independent or dependent sub-tasks that benefit from isolation or parallel execution. Choose the pattern that fits the task structure:
+
+**Parallel fan-out** — independent sub-tasks with no data dependency; all start immediately and results are merged:
+nodes with no `depends_on`, `output_merge: \"all\"` or `\"concat\"`.
+Example: summarize 5 documents simultaneously.
+
+**Sequential pipeline** — output of one node feeds the next; express as a chain of `depends_on`:
+A → B → C. Each node receives the previous node's output as its input.
+Example: fetch data → clean → analyze → write report.
+
+**DAG (mixed)** — combination of parallel and sequential; most real tasks fall here:
+A and B run in parallel, both feed C, C and independent D are merged for the final answer.
+Example: research two topics in parallel, synthesize, then generate a report alongside a separate code snippet.
+
+**Racing / competitive** — same task given to multiple nodes with different models or strategies; take the fastest or best result:
+Identical or similar tasks, `output_merge: \"first\"`. Useful when quality or latency is unpredictable.
+Example: generate a solution with model X and model Y simultaneously, return whichever finishes first.
+
+**Evaluate loop** — generator node produces output, evaluator node critiques it; chain them sequentially; repeat if needed:
+A (generate) → B (evaluate/score). If B's output indicates failure, you may issue a new sub_agent call to retry.
+Example: write code → review code → (if rejected) rewrite.
+
+**Fallback chain** — try the preferred approach first; if it fails, the next node handles recovery:
+Model this as sequential nodes where each node's task description includes \"if upstream failed, do X instead\".
+
+**Map-Reduce** — split a large input into shards (parallel map nodes), then aggregate with a reduce node:
+N map nodes (no `depends_on`) all feed one reduce node (`depends_on` all map node ids, `input_merge: \"structured\"`).
+Example: analyze 20 files in parallel, then summarize all findings.
+
+## Reviewing results and retrying
+After a sub_agent call completes, the scheduler returns results in a tool-result message formatted as:
+```
+[sub_agent result]
+node \"a\": <output>
+node \"b\": <output>
+...
+```
+You MUST review every returned result before proceeding. Apply these criteria:
+
+**Accept** the result when:
+- The output directly and completely answers the node's task.
+- Factual claims are internally consistent and plausible.
+- No obvious errors, omissions, or contradictions are present.
+
+**Reject and retry** the result when:
+- The output is incomplete, off-topic, or clearly wrong.
+- A node failed or timed out (status will say so).
+- The quality is insufficient for the downstream task that depends on it.
+
+**How to retry**:
+1. In your `<thought>`, explicitly state which nodes failed and why.
+2. Issue a new `<tool>sub_agent</tool>` call. You have three options:
+   - **Full retry**: resubmit the same DAG with a more precise task description.
+   - **Partial retry**: only re-run the failed nodes; reference the already-accepted results from the previous round in the new node's `task` field so the sub-agent has full context.
+   - **Escalate strategy**: if two retries fail, switch patterns — e.g., break the failing node into smaller sub-nodes, or switch to a different model via the `model` field.
+3. Limit retries to **3 rounds** per logical sub-task. After 3 failed attempts, use `<final>` to report what succeeded and what could not be completed, so the user can intervene.
+
+**Iteration example**:
+- Round 1: nodes a, b, c — c's result is poor.
+- Round 2: `<thought>c failed: output was too vague. Retrying c with a more specific task, passing accepted outputs of a and b as context.</thought>` → new sub_agent with only node c, task description includes a and b's outputs.
+- Round 3 (if needed): switch model or decompose c further.
+
+## DAG field reference
+- `id`: unique node identifier within this graph (string).
+- `task`: full task description sent to the sub-agent.
+- `model` *(optional)*: override backend model for this node; omit to inherit current model.
+- `depends_on` *(optional)*: list of node ids to wait for; omit or `[]` = starts immediately.
+- `input_merge` *(optional)*: how upstream outputs are combined into this node's input context.
+  - `\"concat\"` *(default)*: plain text, each upstream result appended in order.
+  - `\"structured\"`: JSON array `[{\"from\":\"node-id\",\"output\":\"...\"}]` — use when the node needs to distinguish which result came from which upstream.
+- `output_nodes` *(optional)*: which nodes' results are returned to MainAgent; omit = all leaf nodes.
+- `output_merge` *(optional)*: how output_nodes results are combined before returning.
+  - `\"all\"` *(default)*: each result returned with its node id as a label.
+  - `\"concat\"`: results joined into a single text block.
+  - `\"first\"`: only the result of whichever output node finishes first (racing).
 ";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
@@ -178,10 +272,7 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
 
     // Backward compatibility: bare <command> without a wrapping <tool>.
     if let Some(command) = extract_last_tag(text, "command") {
-        return Ok((
-            thought,
-            vec![LlmAction::Shell { command }],
-        ));
+        return Ok((thought, vec![LlmAction::Shell { command }]));
     }
 
     Err(anyhow!(
@@ -226,11 +317,15 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "read" => {
             let path = extract_last_tag(text, "path")
                 .ok_or_else(|| anyhow!("missing <path> for read tool call"))?;
-            let offset = extract_last_tag(text, "offset")
-                .and_then(|s| s.trim().parse::<usize>().ok());
-            let limit = extract_last_tag(text, "limit")
-                .and_then(|s| s.trim().parse::<usize>().ok());
-            Ok(LlmAction::ReadFile { path, offset, limit })
+            let offset =
+                extract_last_tag(text, "offset").and_then(|s| s.trim().parse::<usize>().ok());
+            let limit =
+                extract_last_tag(text, "limit").and_then(|s| s.trim().parse::<usize>().ok());
+            Ok(LlmAction::ReadFile {
+                path,
+                offset,
+                limit,
+            })
         }
         "search" => {
             let pattern = extract_last_tag(text, "pattern")
@@ -257,6 +352,74 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             }
             Ok(LlmAction::Explorer { commands })
         }
+        "sub_agent" => {
+            let raw = extract_last_tag(text, "graph")
+                .ok_or_else(|| anyhow!("missing <graph> for sub_agent tool call"))?;
+            let obj: Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow!("invalid <graph> JSON for sub_agent: {e}"))?;
+
+            // Parse nodes array
+            let raw_nodes = obj
+                .get("nodes")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow!("<graph> missing \"nodes\" array"))?;
+            if raw_nodes.is_empty() {
+                return Err(anyhow!("<graph>.nodes is empty"));
+            }
+            let mut nodes: Vec<TaskNode> = Vec::with_capacity(raw_nodes.len());
+            for n in raw_nodes {
+                let id: NodeId = n
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("sub_agent node missing \"id\""))?
+                    .to_string();
+                let task = n
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("sub_agent node \"{id}\" missing \"task\""))?
+                    .to_string();
+                let model = n.get("model").and_then(|v| v.as_str()).map(str::to_string);
+                let role = n.get("role").and_then(|v| v.as_str()).map(str::to_string);
+                let system_prompt =
+                    n.get("system_prompt").and_then(|v| v.as_str()).map(str::to_string);
+                let depends_on: Vec<NodeId> = n
+                    .get("depends_on")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let input_merge = n
+                    .get("input_merge")
+                    .and_then(|v| v.as_str())
+                    .map(InputMerge::from_str)
+                    .unwrap_or_default();
+                nodes.push(TaskNode { id, task, model, role, system_prompt, depends_on, input_merge });
+            }
+
+            // Parse output_nodes (optional; defaults to all leaf nodes)
+            let output_nodes: Vec<NodeId> = obj
+                .get("output_nodes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let output_merge = obj
+                .get("output_merge")
+                .and_then(|v| v.as_str())
+                .map(OutputMerge::from_str)
+                .unwrap_or_default();
+
+            Ok(LlmAction::SubAgent {
+                graph: TaskGraph { nodes, output_nodes, output_merge },
+            })
+        }
         t if t.starts_with("mcp_") => {
             let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)
@@ -272,7 +435,6 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         t => Err(anyhow!("unsupported tool `{t}`")),
     }
 }
-
 
 fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}>");
