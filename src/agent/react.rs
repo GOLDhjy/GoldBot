@@ -289,8 +289,10 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
                     .to_string();
                 let model = n.get("model").and_then(|v| v.as_str()).map(str::to_string);
                 let role = n.get("role").and_then(|v| v.as_str()).map(str::to_string);
-                let system_prompt =
-                    n.get("system_prompt").and_then(|v| v.as_str()).map(str::to_string);
+                let system_prompt = n
+                    .get("system_prompt")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let depends_on: Vec<NodeId> = n
                     .get("depends_on")
                     .and_then(|v| v.as_array())
@@ -305,7 +307,15 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
                     .and_then(|v| v.as_str())
                     .map(InputMerge::from_str)
                     .unwrap_or_default();
-                nodes.push(TaskNode { id, task, model, role, system_prompt, depends_on, input_merge });
+                nodes.push(TaskNode {
+                    id,
+                    task,
+                    model,
+                    role,
+                    system_prompt,
+                    depends_on,
+                    input_merge,
+                });
             }
 
             // Parse output_nodes (optional; defaults to all leaf nodes)
@@ -326,7 +336,11 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
                 .unwrap_or_default();
 
             Ok(LlmAction::SubAgent {
-                graph: TaskGraph { nodes, output_nodes, output_merge },
+                graph: TaskGraph {
+                    nodes,
+                    output_nodes,
+                    output_merge,
+                },
             })
         }
         t if t.starts_with("mcp_") => {
