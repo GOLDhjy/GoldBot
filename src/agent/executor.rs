@@ -566,7 +566,7 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    match app.mcp_registry.execute_tool(tool, arguments) {
+    match run_blocking_compat(|| app.mcp_registry.execute_tool(tool, arguments)) {
         Ok(out) => {
             let header = format!("Tool result (exit={}):", out.exit_code);
             push_tool_result_to_llm(app, &header, &out.output);
@@ -943,7 +943,7 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    match crate::tools::web_search::search(query) {
+    match run_blocking_compat(|| crate::tools::web_search::search(query)) {
         Ok(result) => {
             push_tool_result_to_llm(app, "Tool result (exit=0):", &result.output);
             let ev = Event::ToolResult {
@@ -1169,6 +1169,15 @@ fn format_elapsed_short(d: std::time::Duration) -> String {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     format!("{h}h {m:02}m {s:02}s")
+}
+
+fn run_blocking_compat<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 fn extract_live_preview(raw: &str) -> String {

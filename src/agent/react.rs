@@ -1,4 +1,4 @@
-﻿use crate::{
+use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
@@ -470,7 +470,9 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             })
         }
         t if t.starts_with("mcp_") => {
-            let raw_args = extract_last_tag(text, "arguments").unwrap_or_else(|| "{}".to_string());
+            let raw_args = extract_last_tag(text, "arguments")
+                .or_else(|| extract_last_tag(text, "args"))
+                .unwrap_or_else(|| "{}".to_string());
             let arguments: Value = serde_json::from_str(&raw_args)
                 .map_err(|e| anyhow!("invalid <arguments> JSON for MCP tool call: {e}"))?;
             if !arguments.is_object() {
@@ -492,11 +494,20 @@ fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
     let mut pos = 0;
     while let Some(start) = text[pos..].find(&open) {
         let abs_start = pos + start + open.len();
-        if let Some(end) = text[abs_start..].find(&close) {
-            results.push(text[abs_start..abs_start + end].trim().to_string());
-            pos = abs_start + end + close.len();
-        } else {
-            break;
+        let next_close = text[abs_start..].find(&close).map(|i| abs_start + i);
+        let next_open = text[abs_start..].find(&open).map(|i| abs_start + i);
+        match (next_close, next_open) {
+            // Malformed current tag (missing close) and a later sibling tag starts first.
+            // Skip this opening tag and resync at the next one instead of swallowing everything
+            // until a later closing tag.
+            (Some(close_pos), Some(open_pos)) if open_pos < close_pos => {
+                pos = open_pos;
+            }
+            (Some(close_pos), _) => {
+                results.push(text[abs_start..close_pos].trim().to_string());
+                pos = close_pos + close.len();
+            }
+            (None, _) => break,
         }
     }
     results
@@ -580,6 +591,31 @@ mod tests {
                 assert_eq!(*arguments, json!({"libraryName":"tokio"}));
             }
             _ => panic!("expected MCP action"),
+        }
+    }
+
+    #[test]
+    fn parse_mcp_tool_call_accepts_args_alias() {
+        let raw = "<tool>mcp_context7_resolve_library</tool><args>{\"libraryName\":\"tokio\",\"query\":\"runtime\"}</args>";
+        let (_, actions) =
+            parse_llm_response(raw).expect("should parse MCP action with args alias");
+        match &actions[0] {
+            LlmAction::Mcp { arguments, .. } => {
+                assert_eq!(*arguments, json!({"libraryName":"tokio","query":"runtime"}));
+            }
+            _ => panic!("expected MCP action"),
+        }
+    }
+
+    #[test]
+    fn parse_tools_recovers_after_unclosed_tool_tag() {
+        let raw = "<tool>mcp_builtin_zread_read_file>\n<args>{\"file_path\":\"README.md\"}</args>\n\
+                   <tool>read</tool><path>README.md</path>";
+        let (_, actions) = parse_llm_response(raw).expect("should recover and parse later tool");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LlmAction::ReadFile { path, .. } => assert_eq!(path, "README.md"),
+            _ => panic!("expected ReadFile action"),
         }
     }
 

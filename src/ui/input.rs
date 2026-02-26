@@ -1145,8 +1145,12 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             app.task_events.clear();
             app.final_summary = None;
             app.running = false;
+            app.current_phase = None;
+            app.task_started_at = None;
+            app.last_task_elapsed = None;
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
+            screen.status.clear();
             screen.clear_screen();
         }
 

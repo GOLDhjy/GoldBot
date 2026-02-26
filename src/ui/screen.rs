@@ -518,14 +518,18 @@ impl Screen {
 
     /// 清空整个终端屏幕，重置任务记录，重新绘制底部管理区。
     pub(crate) fn clear_screen(&mut self) {
+        let reserve_rows = self.managed_lines.max(3);
         self.task_lines = 0;
         self.task_rendered.clear();
-        self.managed_lines = 2;
+        self.managed_lines = 3;
         self.cursor_at_prompt = false;
+        let target_row = crossterm::terminal::size()
+            .map(|(_, rows)| rows.saturating_sub(reserve_rows.min(u16::MAX as usize) as u16))
+            .unwrap_or(0);
         let _ = execute!(
             self.stdout,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-            cursor::MoveTo(0, 0)
+            cursor::MoveTo(0, target_row)
         );
         self.draw_managed();
     }
