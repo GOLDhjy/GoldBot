@@ -553,7 +553,7 @@ fn build_fs_summary(
             let before_text = before_compare.get(p.as_path());
             let after_text = read_text_limited(&root.join(p), MAX_COMPARE_CAPTURE_BYTES);
             if let (Some(before_text), Some(after_text)) = (before_text, after_text) {
-                let diff = render_unified_diff(before_text, &after_text);
+                let diff = render_unified_diff(before_text, &after_text, 0);
                 // 同一份完整 diff 用于 TUI 显示和写入短期记忆
                 collected_diffs.push((path_label.clone(), diff.clone()));
                 lines.push(format!("Diff {}:", path_label));
@@ -707,15 +707,17 @@ fn read_text_limited(path: &Path, limit: usize) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-/// 生成 unified diff 文本，行内容不截断
-pub(crate) fn render_unified_diff(before: &str, after: &str) -> String {
+/// 生成 unified diff 文本，行内容不截断。
+/// `line_offset` 为 old_string 在原文件中的起始行号（0-based），用于显示真实行号。
+pub(crate) fn render_unified_diff(before: &str, after: &str, line_offset: usize) -> String {
     let diff = TextDiff::from_lines(before, after);
     let mut out = String::new();
     let mut total = 0usize;
     let mut truncated = false;
 
-    // 计算最大行号位数，保证列对齐
-    let max_line = before.lines().count().max(after.lines().count());
+    // 计算最大行号位数，保证列对齐（含 offset 后的最大行号）
+    let max_line = (before.lines().count() + line_offset)
+        .max(after.lines().count() + line_offset);
     let num_width = max_line.to_string().len().max(3);
 
     'outer: for group in diff.grouped_ops(3) {
@@ -731,9 +733,9 @@ pub(crate) fn render_unified_diff(before: &str, after: &str) -> String {
                     break 'outer;
                 }
                 let (lineno, marker) = match change.tag() {
-                    ChangeTag::Delete => (change.old_index().unwrap_or(0) + 1, '-'),
-                    ChangeTag::Insert => (change.new_index().unwrap_or(0) + 1, '+'),
-                    ChangeTag::Equal => (change.old_index().unwrap_or(0) + 1, ' '),
+                    ChangeTag::Delete => (change.old_index().unwrap_or(0) + 1 + line_offset, '-'),
+                    ChangeTag::Insert => (change.new_index().unwrap_or(0) + 1 + line_offset, '+'),
+                    ChangeTag::Equal => (change.old_index().unwrap_or(0) + 1 + line_offset, ' '),
                 };
                 let value = change.value().trim_end_matches('\n');
                 out.push_str(&format!("{lineno:>num_width$} {marker} {value}\n"));

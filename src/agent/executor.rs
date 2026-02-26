@@ -432,36 +432,6 @@ fn render_plan(screen: &mut Screen, content: &str) {
     screen.emit(&lines);
 }
 
-fn render_diff(screen: &mut Screen, content: &str) {
-    let mut lines = vec![String::new()];
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let styled = if trimmed.starts_with("-") {
-            // Removed line
-            format!("  {}", line.red())
-        } else if trimmed.starts_with("+") {
-            // Added line
-            format!("  {}", line.green())
-        } else if trimmed.starts_with("@@") {
-            // Diff header
-            format!("  {}", line.cyan())
-        } else if trimmed.starts_with(|c: char| c.is_numeric()) {
-            // Line number (e.g., "20  - original line")
-            if trimmed.contains(" - ") {
-                format!("  {}", line.red())
-            } else if trimmed.contains(" + ") {
-                format!("  {}", line.green())
-            } else {
-                format!("  {}", line)
-            }
-        } else {
-            format!("  {}", line)
-        };
-        lines.push(styled);
-    }
-    lines.push(String::new());
-    screen.emit(&lines);
-}
 
 pub(crate) fn execute_command(
     app: &mut App,
@@ -631,7 +601,8 @@ pub(crate) fn execute_update_file(
         app.workspace.join(path)
     };
 
-    let result = (|| {
+    // 返回 start_line（old_string 在文件中的起始行号，0-based），用于 diff 行号对齐
+    let result: Result<usize, std::io::Error> = (|| {
         let raw = std::fs::read_to_string(&abs_path)?;
         let crlf = raw.contains("\r\n");
         // Normalize to LF for matching; the `read` tool also returns LF.
@@ -651,6 +622,11 @@ pub(crate) fn execute_update_file(
                 "old_string matched {count} times — add more surrounding context to make it unique.",
             )));
         }
+        // 计算 old_string 在文件中的实际起始行号（0-based offset）
+        let start_line = content
+            .find(norm_old.as_str())
+            .map(|pos| content[..pos].lines().count())
+            .unwrap_or(0);
         let norm_new = new_string.replace("\r\n", "\n");
         let new_normalized = content.replacen(norm_old.as_str(), norm_new.as_str(), 1);
         // Restore original line endings if the file used CRLF.
@@ -660,20 +636,31 @@ pub(crate) fn execute_update_file(
             new_normalized
         };
         std::fs::write(&abs_path, new_content)?;
-        Ok(())
+        Ok(start_line)
     })();
 
     match result {
-        Ok(()) => {
-            let diff_text = crate::tools::shell::render_unified_diff(old_string, new_string);
-            render_diff(screen, &diff_text);
+        Ok(start_line) => {
+            let diff_text =
+                crate::tools::shell::render_unified_diff(old_string, new_string, start_line);
             let store = MemoryStore::new();
-            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text)]);
+            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
             let added = new_string.lines().count();
             let deleted = old_string.lines().count();
             app.messages.push(Message::user(format!(
                 "Tool result:\nFile updated: +{added} -{deleted}"
             )));
+            // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
+            let mut tool_output = format!("Diff {path}:\n");
+            for line in diff_text.lines() {
+                tool_output.push_str(&format!("  {line}\n"));
+            }
+            let result_ev = Event::ToolResult {
+                exit_code: 0,
+                output: tool_output,
+            };
+            emit_live_event(screen, &result_ev);
+            app.task_events.push(result_ev);
         }
         Err(e) => {
             let output = format!("更新失败: {e}");
