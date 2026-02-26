@@ -13,7 +13,10 @@
       "Bash(powershell:*)",
       "Bash(cargo clippy:*)",
       "Bash(cmd:*)",
-      "Bash(Select-String error|warning|Finished:*)"
+      "Bash(Select-String error|warning|Finished:*)",
+      "Bash(wc:*)",
+      "Bash(cd:*)",
+      "Bash(cd /e/GoldBot && sed -i 's/run_command\\(cmd, None\\)/run_command\\(cmd\\)/g; s/run_command\\(\\\\&commit_cmd, None\\)/run_command\\(\\\\&commit_cmd\\)/g; s/run_command\\(\"git rev-parse --is-inside-work-tree\", None\\)/run_command\\(\"git rev-parse --is-inside-work-tree\"\\)/g; s/run_command\\(\"git diff --check\", None\\)/run_command\\(\"git diff --check\"\\)/g; s/run_command\\(\"git status --short\", None\\)/run_command\\(\"git status --short\"\\)/g; s/run_command\\(\"git diff --stat\", None\\)/run_command\\(\"git diff --stat\"\\)/g; s/run_command\\(\"git add -A -- . '\"'\"':\\(exclude\\)GE_LOG.jsonl'\"'\"'\", None\\)/run_command\\(\"git add -A -- . '\"'\"':\\(exclude\\)GE_LOG.jsonl'\"'\"'\"\\)/g; s/run_command\\(\"git show --stat --oneline --no-color -1\", None\\)/run_command\\(\"git show --stat --oneline --no-color -1\"\\)/g' src/consensus/evaluate.rs src/agent/executor.rs src/agent/react.rs 2>&1)"
     ]
   }
 }

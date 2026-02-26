@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     agent::plan,
     types::{AssistMode, LlmAction},
 };
@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
-You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below.
+You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below, Think before Act.
 
 ## Response format
 
@@ -32,27 +32,22 @@ Task complete (required):
 Shell command:
 <thought>reasoning</thought>
 <tool>shell</tool>
-<file>path/to/file</file>
 <command>bash command</command>
-The optional <file> tag names the primary file being created or modified (relative or absolute path). Omit it for read-only or multi-file commands. It is used to capture a before-diff.
 
-Explorer (read-only, multiple commands in ONE single call):
+Explorer (batch read-only commands; all results returned at once — put everything into ONE call, never repeat):
 <thought>reasoning</thought>
 <tool>explorer</tool>
 <command>first read-only command</command>
 <command>more read-only command</command>
-CRITICAL rules for <tool>explorer</tool>:
-- You MUST include ALL read-only commands you need in a SINGLE <tool>explorer</tool> call. Never send explorer multiple times in a row.
-- All <command> tags are collected, executed in sequence, and ALL results returned to you at once in one message.
-- Only use for safe read-only commands (ls, cat, grep, git log, cargo check …).
-- Do NOT use for commands that write, delete, or depend on each other's output.
+Only for safe read-only commands (ls, cat, grep, git log …). Do NOT use for writes or commands that depend on each other's output.
 
-Update file (replace an exact string in an existing file; fails if old_string not found or not unique):
+Update file (replace lines by line number; always use <tool>read</tool> first to get line numbers):
 <thought>reasoning</thought>
 <tool>update</tool>
 <path>relative/or/absolute/path</path>
-<old_string>exact content to replace</old_string>
-<new_string>replacement content</new_string>
+<line_start>first line to replace, 1-indexed</line_start>
+<line_end>last line to replace, 1-indexed, inclusive</line_end>
+<new_string>replacement content (empty = delete those lines)</new_string>
 
 Write file (create a new file; also overwrites existing):
 <thought>reasoning</thought>
@@ -60,7 +55,7 @@ Write file (create a new file; also overwrites existing):
 <path>relative/or/absolute/path</path>
 <content>full file content here</content>
 
-Read file (read file contents; supports line range for large files):
+Read file (each line prefixed with its line number `N: content`; use these numbers with <tool>update</tool>):
 <thought>reasoning</thought>
 <tool>read</tool>
 <path>relative/or/absolute/path</path>
@@ -72,7 +67,6 @@ Search files (regex search across file contents; native, cross-platform):
 <tool>search</tool>
 <pattern>regex or literal string</pattern>
 <path>optional/path/to/search (default: .)</path>
-Output: file:line: matching-line for each match.
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>
@@ -186,10 +180,7 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
     if let Some(command) = extract_last_tag(text, "command") {
         return Ok((
             thought,
-            vec![LlmAction::Shell {
-                command,
-                file: None,
-            }],
+            vec![LlmAction::Shell { command }],
         ));
     }
 
@@ -207,18 +198,22 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
         "shell" => {
             let command = extract_last_tag(text, "command")
                 .ok_or_else(|| anyhow!("missing <command> for shell tool call"))?;
-            let file = extract_last_tag(text, "file");
-            Ok(LlmAction::Shell { command, file })
+            Ok(LlmAction::Shell { command })
         }
         "update" => {
             let path = extract_last_tag(text, "path")
                 .ok_or_else(|| anyhow!("missing <path> for update tool call"))?;
-            let old_string = extract_last_tag(text, "old_string")
-                .ok_or_else(|| anyhow!("missing <old_string> for update tool call"))?;
+            let line_start = extract_last_tag(text, "line_start")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .ok_or_else(|| anyhow!("missing or invalid <line_start> for update tool call"))?;
+            let line_end = extract_last_tag(text, "line_end")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .ok_or_else(|| anyhow!("missing or invalid <line_end> for update tool call"))?;
             let new_string = extract_last_tag(text, "new_string").unwrap_or_default();
             Ok(LlmAction::UpdateFile {
                 path,
-                old_string,
+                line_start,
+                line_end,
                 new_string,
             })
         }

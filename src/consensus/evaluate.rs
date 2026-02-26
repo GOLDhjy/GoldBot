@@ -65,7 +65,7 @@ pub fn validate_done_when(done_when: &[String], cwd: &Path) -> ValidationReport 
                 };
             }
 
-            match run_command(cmd, None) {
+            match run_command(cmd) {
                 Ok(out) => {
                     notes.push(format!("cmd `{cmd}` => exit {}", out.exit_code));
                     if out.exit_code != 0 {
@@ -213,7 +213,7 @@ fn has_any(hay: &str, needles: &[&str]) -> bool {
 
 pub fn self_review(cwd: &Path) -> ValidationReport {
     let _ = cwd;
-    match run_command("git rev-parse --is-inside-work-tree", None) {
+    match run_command("git rev-parse --is-inside-work-tree") {
         Ok(out) if out.exit_code == 0 => {}
         Ok(out) => {
             return ValidationReport {
@@ -231,7 +231,7 @@ pub fn self_review(cwd: &Path) -> ValidationReport {
         }
     }
 
-    match run_command("git diff --check", None) {
+    match run_command("git diff --check") {
         Ok(out) if out.exit_code == 0 => {}
         Ok(out) => {
             return ValidationReport {
@@ -249,10 +249,10 @@ pub fn self_review(cwd: &Path) -> ValidationReport {
         }
     }
 
-    let status = run_command("git status --short", None)
+    let status = run_command("git status --short")
         .map(|o| truncate(&o.output, 220))
         .unwrap_or_else(|e| format!("status unavailable: {e}"));
-    let stat = run_command("git diff --stat", None)
+    let stat = run_command("git diff --stat")
         .map(|o| truncate(&o.output, 220))
         .unwrap_or_else(|e| format!("diffstat unavailable: {e}"));
 
@@ -266,7 +266,7 @@ pub fn self_review(cwd: &Path) -> ValidationReport {
 pub fn commit_todo(todo_id: &str, todo_text: &str) -> CommitReport {
     let msg = format!("GE({todo_id}): {}", shorten_for_commit(todo_text));
     let quoted = shell_single_quote(&msg);
-    if let Err(e) = run_command("git add -A -- . ':(exclude)GE_LOG.jsonl'", None) {
+    if let Err(e) = run_command("git add -A -- . ':(exclude)GE_LOG.jsonl'") {
         return CommitReport {
             outcome: ExecutorOutcome::Failed,
             summary: format!("git add failed: {e}"),
@@ -275,7 +275,7 @@ pub fn commit_todo(todo_id: &str, todo_text: &str) -> CommitReport {
     }
 
     let commit_cmd = format!("git commit --allow-empty -m {quoted}");
-    let commit_out = match run_command(&commit_cmd, None) {
+    let commit_out = match run_command(&commit_cmd) {
         Ok(out) => out,
         Err(e) => {
             return CommitReport {
@@ -293,7 +293,7 @@ pub fn commit_todo(todo_id: &str, todo_text: &str) -> CommitReport {
         };
     }
 
-    let show = run_command("git show --stat --oneline --no-color -1", None)
+    let show = run_command("git show --stat --oneline --no-color -1")
         .map(|o| truncate(&o.output, 320))
         .unwrap_or_else(|e| format!("commit created; show failed: {e}"));
     CommitReport {
@@ -304,7 +304,7 @@ pub fn commit_todo(todo_id: &str, todo_text: &str) -> CommitReport {
 }
 
 pub fn latest_commit_context() -> Option<String> {
-    let out = run_command("git show --stat --oneline --no-color -1", None).ok()?;
+    let out = run_command("git show --stat --oneline --no-color -1").ok()?;
     if out.exit_code != 0 {
         return None;
     }

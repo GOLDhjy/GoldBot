@@ -31,7 +31,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.interrupt_llm_loop_requested = false;
     app.interjection_mode = false;
     app.pending_confirm = None;
-    app.pending_confirm_file = None;
+
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.input_focused = true;
@@ -142,13 +142,13 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = true;
                 // Don't break — continue to next action in this response.
             }
-            LlmAction::Shell { command, file } => {
+            LlmAction::Shell { command } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 let (risk, _reason) = assess_command(&command);
                 match risk {
                     RiskLevel::Safe => {
-                        execute_command(app, screen, &command, file.as_deref());
+                        execute_command(app, screen, &command);
                         app.needs_agent_executor = true;
                     }
                     RiskLevel::Confirm => {
@@ -164,7 +164,7 @@ pub(crate) fn process_llm_result(
                             };
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);
-                            execute_command(app, screen, &command, file.as_deref());
+                            execute_command(app, screen, &command);
                             app.needs_agent_executor = true;
                         } else {
                             let label = crate::tools::shell::classify_command(&command).label();
@@ -175,7 +175,6 @@ pub(crate) fn process_llm_result(
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);
                             app.pending_confirm = Some(command);
-                            app.pending_confirm_file = file;
                             app.pending_confirm_note = false;
                             screen.confirm_selected = Some(0);
                             screen.input_focused = false;
@@ -216,12 +215,13 @@ pub(crate) fn process_llm_result(
             }
             LlmAction::UpdateFile {
                 path,
-                old_string,
+                line_start,
+                line_end,
                 new_string,
             } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
-                execute_update_file(app, screen, &path, &old_string, &new_string);
+                execute_update_file(app, screen, &path, line_start, line_end, &new_string);
                 app.needs_agent_executor = true;
                 break 'actions;
             }
@@ -433,12 +433,7 @@ fn render_plan(screen: &mut Screen, content: &str) {
 }
 
 
-pub(crate) fn execute_command(
-    app: &mut App,
-    screen: &mut Screen,
-    cmd: &str,
-    file_hint: Option<&str>,
-) {
+pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     let intent = crate::tools::shell::classify_command(cmd);
     let call_ev = Event::ToolCall {
         label: intent.label(),
@@ -453,7 +448,7 @@ pub(crate) fn execute_command(
     screen.status = format!("Running: {short_cmd}");
     screen.refresh();
 
-    match crate::tools::shell::run_command(cmd, file_hint) {
+    match crate::tools::shell::run_command(cmd) {
         Ok(out) => {
             app.messages.push(Message::user(format!(
                 "Tool result (exit={}):\n{}",
@@ -529,7 +524,7 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
         screen.status = format!("Explorer [{}/{}]: {short}", i + 1, n);
         screen.refresh();
 
-        match crate::tools::shell::run_command(cmd, None) {
+        match crate::tools::shell::run_command(cmd) {
             Ok(out) => {
                 let mut llm = format!("$ {cmd}\n{}", out.output.trim_end());
                 if out.exit_code != 0 {
@@ -584,7 +579,8 @@ pub(crate) fn execute_update_file(
     app: &mut App,
     screen: &mut Screen,
     path: &str,
-    old_string: &str,
+    line_start: usize, // 1-based
+    line_end: usize,   // 1-based, inclusive
     new_string: &str,
 ) {
     let call_ev = Event::ToolCall {
@@ -601,54 +597,62 @@ pub(crate) fn execute_update_file(
         app.workspace.join(path)
     };
 
-    // 返回 start_line（old_string 在文件中的起始行号，0-based），用于 diff 行号对齐
-    let result: Result<usize, std::io::Error> = (|| {
+    // 返回 (old_content, new_content_normalized) 用于 diff
+    let result: Result<(String, String), std::io::Error> = (|| {
         let raw = std::fs::read_to_string(&abs_path)?;
         let crlf = raw.contains("\r\n");
-        // Normalize to LF for matching; the `read` tool also returns LF.
         let content = if crlf { raw.replace("\r\n", "\n") } else { raw.clone() };
-        let norm_old = old_string.replace("\r\n", "\n");
-        let count = content.matches(norm_old.as_str()).count();
-        if count == 0 {
-            return Err(std::io::Error::other(
-                "old_string not found in file. \
-                 Use the `read` tool to get the exact current content, \
-                 then retry with the correct old_string \
-                 (check indentation and whitespace carefully).",
-            ));
-        }
-        if count > 1 {
+        let mut lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+
+        // 校验行号（1-based，允许 line_end == total+1 表示追加到末尾）
+        if line_start == 0 || line_start > total + 1 {
             return Err(std::io::Error::other(format!(
-                "old_string matched {count} times — add more surrounding context to make it unique.",
+                "line_start={line_start} 超出文件范围（共 {total} 行）",
             )));
         }
-        // 计算 old_string 在文件中的实际起始行号（0-based offset）
-        let start_line = content
-            .find(norm_old.as_str())
-            .map(|pos| content[..pos].lines().count())
-            .unwrap_or(0);
+        if line_end < line_start || line_end > total {
+            return Err(std::io::Error::other(format!(
+                "line_end={line_end} 无效（line_start={line_start}，共 {total} 行）",
+            )));
+        }
+
+        let s = line_start - 1; // 转 0-based
+        let e = line_end;       // lines[s..e]
+
+        // 旧内容（用于 diff）
+        let old_content = lines[s..e].join("\n");
+
+        // 用新内容替换
         let norm_new = new_string.replace("\r\n", "\n");
-        let new_normalized = content.replacen(norm_old.as_str(), norm_new.as_str(), 1);
-        // Restore original line endings if the file used CRLF.
-        let new_content = if crlf {
+        let new_lines: Vec<&str> = norm_new.lines().collect();
+        lines.splice(s..e, new_lines.iter().copied());
+
+        let mut new_normalized = lines.join("\n");
+        // 保留原文件末尾换行
+        if content.ends_with('\n') {
+            new_normalized.push('\n');
+        }
+        let new_file_content = if crlf {
             new_normalized.replace("\n", "\r\n")
         } else {
-            new_normalized
+            new_normalized.clone()
         };
-        std::fs::write(&abs_path, new_content)?;
-        Ok(start_line)
+        std::fs::write(&abs_path, new_file_content)?;
+        Ok((old_content, norm_new))
     })();
 
     match result {
-        Ok(start_line) => {
+        Ok((old_content, norm_new)) => {
+            let line_offset = line_start - 1;
             let diff_text =
-                crate::tools::shell::render_unified_diff(old_string, new_string, start_line);
+                crate::tools::shell::render_unified_diff(&old_content, &norm_new, line_offset);
             let store = MemoryStore::new();
             let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
-            let added = new_string.lines().count();
-            let deleted = old_string.lines().count();
+            let added = norm_new.lines().count();
+            let deleted = line_end - line_start + 1;
             app.messages.push(Message::user(format!(
-                "Tool result:\nFile updated: +{added} -{deleted}"
+                "Tool result:\nFile updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})"
             )));
             // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
             let mut tool_output = format!("Diff {path}:\n");
@@ -745,12 +749,11 @@ pub(crate) fn execute_read_file(
         app.workspace.join(path)
     };
 
-    let result: Result<(String, String), std::io::Error> = (|| {
+    let result: Result<String, std::io::Error> = (|| {
         let raw = std::fs::read_to_string(&abs_path)?;
-        // Strip UTF-8 BOM and normalize to LF so old_string matching works.
+        // Strip UTF-8 BOM and normalize to LF.
         let content_owned = raw.trim_start_matches('\u{FEFF}').replace("\r\n", "\n");
-        let content = content_owned.as_str();
-        let lines: Vec<&str> = content.lines().collect();
+        let lines: Vec<&str> = content_owned.lines().collect();
         let total = lines.len();
 
         let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0);
@@ -759,33 +762,36 @@ pub(crate) fn execute_read_file(
             .unwrap_or(total);
         let start = start.min(total);
 
-        let mut body = String::new();
-        for line in &lines[start..end] {
-            body.push_str(line);
-            body.push('\n');
+        if start >= end && total > 0 {
+            return Ok("(empty range)\n".to_string());
         }
-        let trailer = if end < total {
-            format!(
-                "... ({} more lines, use <offset>/<limit> to read further)\n",
-                total - end
-            )
-        } else {
-            String::new()
-        };
+
+        // 行号宽度按文件总行数对齐
+        let num_width = total.to_string().len();
+        let mut body = String::new();
+        for (i, line) in lines[start..end].iter().enumerate() {
+            let lineno = start + i + 1;
+            body.push_str(&format!("{lineno:>num_width$}: {line}\n"));
+        }
         if body.is_empty() {
             body = "(empty file)\n".to_string();
         }
-        let output = format!("{body}{trailer}");
-        Ok((output.clone(), output))
+        if end < total {
+            body.push_str(&format!(
+                "... ({} more lines, use <offset>/<limit> to read further)\n",
+                total - end
+            ));
+        }
+        Ok(body)
     })();
 
     match result {
-        Ok((display, llm)) => {
+        Ok(output) => {
             app.messages
-                .push(Message::user(format!("Tool result:\n{llm}")));
+                .push(Message::user(format!("Tool result:\n{output}")));
             let ev = Event::ToolResult {
                 exit_code: 0,
-                output: display,
+                output,
             };
             emit_live_event(screen, &ev);
             app.task_events.push(ev);
@@ -961,7 +967,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     app.pending_confirm = None;
-    app.pending_confirm_file = None;
+
     app.pending_confirm_note = false;
     screen.confirm_selected = None;
     screen.input_focused = true;

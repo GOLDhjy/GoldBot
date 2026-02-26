@@ -50,8 +50,6 @@ pub(crate) struct App {
     pub running: bool,
     pub quit: bool,
     pub pending_confirm: Option<String>,
-    /// File hint accompanying `pending_confirm`, forwarded to `execute_command` for diff capture.
-    pub pending_confirm_file: Option<String>,
     pub pending_confirm_note: bool,
     pub task_events: Vec<Event>,
     pub final_summary: Option<String>,
@@ -223,7 +221,7 @@ impl App {
             running: false,
             quit: false,
             pending_confirm: None,
-            pending_confirm_file: None,
+
             pending_confirm_note: false,
             task_events: Vec::new(),
             final_summary: None,

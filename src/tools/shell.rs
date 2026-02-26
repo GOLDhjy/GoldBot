@@ -74,9 +74,9 @@ pub fn classify_command(cmd: &str) -> CommandIntent {
     }
 }
 
-pub fn run_command(cmd: &str, file_hint: Option<&str>) -> Result<CommandResult> {
+pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let before_compare = capture_before_compare(&cwd, cmd, file_hint);
+    let before_compare = capture_before_compare(&cwd, cmd);
     let before = snapshot_files(&cwd);
 
     let timeout_secs: u64 = std::env::var("GOLDBOT_CMD_TIMEOUT")
@@ -612,26 +612,8 @@ fn read_preview(root: &Path, rel: &Path) -> Option<String> {
     Some(out)
 }
 
-fn capture_before_compare(
-    root: &Path,
-    cmd: &str,
-    file_hint: Option<&str>,
-) -> HashMap<PathBuf, String> {
+fn capture_before_compare(root: &Path, cmd: &str) -> HashMap<PathBuf, String> {
     let mut out = HashMap::new();
-
-    // If the LLM explicitly declared the target file, capture it first.
-    if let Some(hint) = file_hint {
-        let abs = absolutize_for_runtime(root, hint);
-        if abs.is_file() {
-            if let Ok(rel) = abs.strip_prefix(root).map(PathBuf::from) {
-                if !should_skip(&rel) {
-                    if let Some(text) = read_text_limited(&abs, MAX_COMPARE_CAPTURE_BYTES) {
-                        out.insert(rel, text);
-                    }
-                }
-            }
-        }
-    }
 
     // Also try extract_target for simple commands
     if let Some(target) = extract_target(cmd) {

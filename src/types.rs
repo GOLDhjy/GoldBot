@@ -188,7 +188,6 @@ pub enum Event {
 pub enum LlmAction {
     Shell {
         command: String,
-        file: Option<String>,
     },
     /// Batch read-only exploration: multiple commands executed in sequence,
     /// results combined into a single tool-result message.
@@ -227,7 +226,8 @@ pub enum LlmAction {
     },
     UpdateFile {
         path: String,
-        old_string: String,
+        line_start: usize,
+        line_end: usize,
         new_string: String,
     },
     SearchFiles {

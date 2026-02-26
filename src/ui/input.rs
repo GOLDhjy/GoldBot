@@ -190,8 +190,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                             screen.refresh();
                             return;
                         };
-                        let file_hint = app.pending_confirm_file.take();
-                        execute_command(app, screen, &cmd, file_hint.as_deref());
+                        execute_command(app, screen, &cmd);
                         app.needs_agent_executor = true;
                     }
                     1 => {
@@ -219,7 +218,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                         screen.confirm_selected = None;
                         app.pending_confirm_note = false;
                         app.pending_confirm = None;
-                        app.pending_confirm_file = None;
+
                         finish(app, screen, "Task aborted by user".to_string());
                     }
                     _ => begin_confirm_note_mode(app, screen, None),
@@ -253,7 +252,7 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             app.task_events.push(ev);
 
             app.pending_confirm = None;
-            app.pending_confirm_file = None;
+
             app.pending_confirm_note = false;
             app.needs_agent_executor = true;
             screen.status.clear();
