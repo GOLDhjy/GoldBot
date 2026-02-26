@@ -21,6 +21,9 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
         screen.emit(&[String::new()]);
     }
     screen.reset_task_lines();
+    // Refresh assistant context so workspace-level instructions (e.g. AGENTS.md)
+    // are picked up for each new task without requiring a restart.
+    app.rebuild_assistant_context_message();
 
     app.task = task.clone();
     app.steps_taken = 0;

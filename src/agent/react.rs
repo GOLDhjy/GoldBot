@@ -137,11 +137,34 @@ pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistM
          - When asked about past events, preferences, or prior agreements, check memory first \
          using case-insensitive search (prefer `rg -n -i`)."
     );
+    append_workspace_agents_md(&mut out, workspace);
     if assist_mode == AssistMode::Plan {
         out.push_str("\n\n");
         out.push_str(plan::PLAN_MODE_ASSIST_CONTEXT_APPENDIX);
     }
     out
+}
+
+fn append_workspace_agents_md(out: &mut String, workspace: &std::path::Path) {
+    let path = workspace.join("AGENTS.md");
+    if !path.is_file() {
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+
+    out.push_str("\n\n");
+    out.push_str("Workspace-specific instructions (from `AGENTS.md`) are provided below. ");
+    out.push_str("Follow them for this workspace unless they conflict with higher-priority system/tool constraints.\n");
+    out.push_str(&format!("AGENTS path: `{}`\n\n", path.display()));
+    out.push_str("----- BEGIN AGENTS.md -----\n");
+    out.push_str(content);
+    out.push_str("\n----- END AGENTS.md -----");
 }
 
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
