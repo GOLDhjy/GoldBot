@@ -8,6 +8,9 @@ use crate::{
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
+const AGENTS_SUMMARY_MAX_CHARS: usize = 2_000;
+const AGENTS_SUMMARY_MAX_LINES: usize = 28;
+
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
 You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below, Think before Act.
 
@@ -146,10 +149,9 @@ pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistM
 }
 
 fn append_workspace_agents_md(out: &mut String, workspace: &std::path::Path) {
-    let path = workspace.join("AGENTS.md");
-    if !path.is_file() {
+    let Some(path) = find_nearest_agents_md(workspace) else {
         return;
-    }
+    };
     let Ok(content) = std::fs::read_to_string(&path) else {
         return;
     };
@@ -159,12 +161,99 @@ fn append_workspace_agents_md(out: &mut String, workspace: &std::path::Path) {
     }
 
     out.push_str("\n\n");
-    out.push_str("Workspace-specific instructions (from `AGENTS.md`) are provided below. ");
-    out.push_str("Follow them for this workspace unless they conflict with higher-priority system/tool constraints.\n");
-    out.push_str(&format!("AGENTS path: `{}`\n\n", path.display()));
-    out.push_str("----- BEGIN AGENTS.md -----\n");
-    out.push_str(content);
-    out.push_str("\n----- END AGENTS.md -----");
+    let summary = summarize_agents_md_for_prompt(content);
+    out.push_str("Workspace-specific instructions are defined in a local `AGENTS.md` file.\n");
+    out.push_str(&format!("AGENTS path: `{}`\n", path.display()));
+    out.push_str(
+        "Below is an auto-extracted summary (headings only). For exact wording or \
+         detailed rules, read `AGENTS.md` directly before acting on project-specific tasks.\n\n",
+    );
+    out.push_str("----- BEGIN AGENTS.md SUMMARY -----\n");
+    out.push_str(&summary);
+    out.push_str("\n----- END AGENTS.md SUMMARY -----");
+}
+
+fn find_nearest_agents_md(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
+    let git_root = nearest_git_root(workspace);
+    let mut dir = workspace;
+    loop {
+        let candidate = dir.join("AGENTS.md");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if git_root.as_deref() == Some(dir) {
+            return None;
+        }
+        let Some(parent) = dir.parent() else {
+            return None;
+        };
+        dir = parent;
+    }
+}
+
+fn nearest_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = Some(start);
+    while let Some(p) = dir {
+        if p.join(".git").exists() {
+            return Some(p.to_path_buf());
+        }
+        dir = p.parent();
+    }
+    None
+}
+
+fn summarize_agents_md_for_prompt(content: &str) -> String {
+    let mut lines = Vec::<String>::new();
+    let mut in_code_fence = false;
+
+    for raw in content.lines() {
+        let t = raw.trim();
+        if t.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence || t.is_empty() {
+            continue;
+        }
+
+        let keep = t.starts_with('#');
+        if !keep {
+            continue;
+        }
+
+        lines.push(collapse_ws(t));
+        if lines.len() >= AGENTS_SUMMARY_MAX_LINES {
+            break;
+        }
+    }
+
+    let mut summary = lines.join("\n");
+    truncate_chars_with_notice(
+        &mut summary,
+        AGENTS_SUMMARY_MAX_CHARS,
+        "\n[AGENTS.md summary truncated; read the file for full details]",
+    );
+    if summary.is_empty() {
+        "(AGENTS.md exists but produced an empty summary; read the file directly)".to_string()
+    } else {
+        summary
+    }
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars_with_notice(buf: &mut String, max_chars: usize, notice: &str) {
+    let count = buf.chars().count();
+    if count <= max_chars {
+        return;
+    }
+    let notice_chars = notice.chars().count();
+    let keep = max_chars.saturating_sub(notice_chars).max(32);
+    let truncated: String = buf.chars().take(keep).collect();
+    *buf = truncated;
+    buf.push_str(notice);
 }
 
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
@@ -440,7 +529,10 @@ fn extract_last_tag_preserve_block(text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_assistant_context, build_system_prompt, parse_llm_response};
+    use super::{
+        build_assistant_context, build_system_prompt, parse_llm_response,
+        summarize_agents_md_for_prompt,
+    };
     use crate::types::{AssistMode, LlmAction};
     use serde_json::json;
 
@@ -569,6 +661,43 @@ mod tests {
             }
             _ => panic!("expected WriteFile action"),
         }
+    }
+    #[test]
+    fn agents_summary_keeps_headings_only_and_skips_code_fences() {
+        let md = "\
+# Repo Guide
+
+Intro prose paragraph should be skipped in summary mode.
+
+## Build
+- cargo check
+- cargo test
+
+```bash
+rm -rf target
+```
+
+### Style
+1. use rustfmt
+2. keep changes small
+";
+        let summary = summarize_agents_md_for_prompt(md);
+        assert!(summary.contains("# Repo Guide"));
+        assert!(summary.contains("## Build"));
+        assert!(summary.contains("### Style"));
+        assert!(!summary.contains("rm -rf target"));
+        assert!(!summary.contains("Intro prose paragraph"));
+        assert!(!summary.contains("- cargo check"));
+        assert!(!summary.contains("1. use rustfmt"));
+    }
+
+    #[test]
+    fn agents_summary_truncates_long_content_with_notice() {
+        let long_heading = format!("# {}\n", "x".repeat(5000));
+        let md = format!("# Title\n{long_heading}");
+        let summary = summarize_agents_md_for_prompt(&md);
+        assert!(summary.contains("# Title"));
+        assert!(summary.contains("summary truncated"));
     }
     #[test]
     fn build_assistant_context_off_does_not_include_plan_rules() {
