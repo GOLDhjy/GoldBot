@@ -547,8 +547,14 @@ fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
             command,
         }) => {
             let short_cmd = crate::ui::format::shorten_text(&command, 60);
-            screen.status = format!("Explorer [{completed}/{total}]: {short_cmd}");
-            screen.refresh_status_only();
+            let branch = if completed == total { "`-- " } else { "|-- " };
+            let ev = crate::types::Event::ToolCall {
+                label: "Explorer".to_string(),
+                command: format!("{branch}{short_cmd}"),
+                multiline: true,
+            };
+            crate::ui::format::emit_live_event(screen, &ev);
+            app.task_events.push(ev);
         }
         Ok(result) => {
             app.shell_exec_rx = None;

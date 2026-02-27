@@ -625,8 +625,8 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
 
     crate::tools::shell::clear_running_shell_cancel_request();
     let total = commands.len();
-    screen.status = format!("Explorer [0/{total}]: starting");
-    screen.refresh();
+    screen.status = format!("Explorer [0/{total}]");
+    screen.refresh_status_only();
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     app.shell_exec_rx = Some(rx);
@@ -705,28 +705,11 @@ pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, resul
             return;
         }
         ShellExecResult::Explorer {
-            commands,
-            outputs,
+            commands: _commands,
+            outputs: _outputs,
             llm_parts,
             final_exit,
         } => {
-            let mut tree_lines: Vec<String> = Vec::new();
-            for (i, (cmd, preview)) in commands.iter().zip(outputs.iter()).enumerate() {
-                let is_last = i == commands.len() - 1;
-                let branch = if is_last { "`-- " } else { "|-- " };
-                let indent = if is_last { "    " } else { "|   " };
-                tree_lines.push(format!("{}{}", branch, shorten_text(cmd, 60)));
-                tree_lines.push(format!("{}{}", indent, shorten_text(preview, 80)));
-            }
-
-            let call_ev = Event::ToolCall {
-                label: "Explorer".to_string(),
-                command: tree_lines.join("\n"),
-                multiline: true,
-            };
-            emit_live_event(screen, &call_ev);
-            app.task_events.push(call_ev);
-
             let llm_combined = llm_parts.join("\n\n");
             let header = format!("Tool result (exit={final_exit}):");
             push_tool_result_to_llm(app, &header, &llm_combined);
