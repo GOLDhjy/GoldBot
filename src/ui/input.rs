@@ -22,6 +22,16 @@ pub(crate) fn handle_key(
     if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
+    if key == KeyCode::Char('v') && modifiers.contains(KeyModifiers::CONTROL) {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(text) = cb.get_text() {
+                if !text.is_empty() {
+                    handle_paste(app, screen, &text);
+                }
+            }
+        }
+        return false;
+    }
     if key == KeyCode::Esc && modifiers.is_empty() && should_interrupt_llm_chat_loop(app) {
         interrupt_llm_chat_loop(app, screen);
         return false;
@@ -162,7 +172,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                 screen.question_labels.clear();
                 screen.input_focused = true;
                 app.answering_question = true;
-                screen.input.push(c);
+                screen.insert_char_at_cursor(c);
                 screen.status = "✍ 请输入你的答案后按 Enter".dark_yellow().to_string();
                 screen.refresh();
             }
@@ -191,7 +201,6 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                             return;
                         };
                         execute_command(app, screen, &cmd);
-                        app.needs_agent_executor = true;
                     }
                     1 => {
                         // Skip
@@ -260,12 +269,28 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             screen.refresh();
         }
         KeyCode::Esc if modifiers.is_empty() => exit_confirm_note_mode(app, screen, true),
+        KeyCode::Left => {
+            screen.cursor_left();
+            screen.refresh();
+        }
+        KeyCode::Right => {
+            screen.cursor_right();
+            screen.refresh();
+        }
+        KeyCode::Home => {
+            screen.cursor_home();
+            screen.refresh();
+        }
+        KeyCode::End => {
+            screen.cursor_end();
+            screen.refresh();
+        }
         KeyCode::Backspace => {
-            pop_input_tail(app, screen);
+            pop_input_at_cursor(app, screen);
             screen.refresh();
         }
         KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-            screen.input.push(c);
+            screen.insert_char_at_cursor(c);
             screen.refresh();
         }
         _ => {}
@@ -290,12 +315,28 @@ fn handle_api_key_input_mode(
             screen.emit(&["  API key input canceled. Task is paused.".to_string()]);
             screen.refresh();
         }
+        KeyCode::Left => {
+            screen.cursor_left();
+            screen.refresh();
+        }
+        KeyCode::Right => {
+            screen.cursor_right();
+            screen.refresh();
+        }
+        KeyCode::Home => {
+            screen.cursor_home();
+            screen.refresh();
+        }
+        KeyCode::End => {
+            screen.cursor_end();
+            screen.refresh();
+        }
         KeyCode::Backspace => {
-            pop_input_tail(app, screen);
+            pop_input_at_cursor(app, screen);
             screen.refresh();
         }
         KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-            screen.input.push(c);
+            screen.insert_char_at_cursor(c);
             screen.refresh();
         }
         _ => {}
@@ -357,7 +398,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                     let query = app.at_file.query.as_mut().unwrap();
                     query.push(c);
-                    screen.input.push(c);
+                    screen.insert_char_at_cursor(c);
                     let q = query.clone();
                     update_at_file_candidates(app, screen, &q);
                     screen.refresh();
@@ -458,7 +499,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                     let query = app.cmd_picker.query.as_mut().unwrap();
                     query.push(c);
-                    screen.input.push(c);
+                    screen.insert_char_at_cursor(c);
                     let q = query.clone();
                     update_command_candidates(app, screen, &q);
                     screen.refresh();
@@ -469,6 +510,20 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
         }
 
         match key {
+            // Ctrl+J inserts newline (Shift+Enter where terminal supports it)
+            KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+                screen.insert_char_at_cursor('\n');
+                screen.refresh();
+            }
+            // Shift+Enter inserts newline
+            // Note: Windows Console reports Shift+Enter as Enter+CONTROL
+            KeyCode::Enter
+                if modifiers.contains(KeyModifiers::SHIFT)
+                    || modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                screen.insert_char_at_cursor('\n');
+                screen.refresh();
+            }
             KeyCode::Enter => {
                 let raw = expand_input_text(app, &screen.input);
                 // 若有暂存的模板命令，把占位符替换成完整模板内容发给 LLM，
@@ -502,8 +557,40 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 }
                 screen.refresh();
             }
+            KeyCode::Left if modifiers.contains(KeyModifiers::CONTROL) => {
+                screen.cursor_word_left();
+                screen.refresh();
+            }
+            KeyCode::Right if modifiers.contains(KeyModifiers::CONTROL) => {
+                screen.cursor_word_right();
+                screen.refresh();
+            }
+            KeyCode::Left => {
+                screen.cursor_left();
+                screen.refresh();
+            }
+            KeyCode::Right => {
+                screen.cursor_right();
+                screen.refresh();
+            }
+            KeyCode::Up if screen.input.contains('\n') => {
+                screen.cursor_up();
+                screen.refresh();
+            }
+            KeyCode::Down if screen.input.contains('\n') => {
+                screen.cursor_down();
+                screen.refresh();
+            }
+            KeyCode::Home => {
+                screen.cursor_home();
+                screen.refresh();
+            }
+            KeyCode::End => {
+                screen.cursor_end();
+                screen.refresh();
+            }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                screen.input.push(c);
+                screen.insert_char_at_cursor(c);
                 if c == '@' {
                     enter_at_file_mode(app, screen);
                 } else if c == '/' && screen.input == "/" {
@@ -512,7 +599,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.refresh();
             }
             KeyCode::Backspace => {
-                pop_input_tail(app, screen);
+                pop_input_at_cursor(app, screen);
                 screen.refresh();
             }
             _ => {}
@@ -528,7 +615,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input_focused = true;
-                screen.input.push(c);
+                screen.insert_char_at_cursor(c);
                 if c == '@' {
                     enter_at_file_mode(app, screen);
                 } else if c == '/' && screen.input == "/" {
@@ -547,14 +634,30 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 
 fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     match key {
+        KeyCode::Left => {
+            screen.cursor_left();
+            screen.refresh();
+        }
+        KeyCode::Right => {
+            screen.cursor_right();
+            screen.refresh();
+        }
+        KeyCode::Home => {
+            screen.cursor_home();
+            screen.refresh();
+        }
+        KeyCode::End => {
+            screen.cursor_end();
+            screen.refresh();
+        }
         KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             screen.input_focused = true;
-            screen.input.push(c);
+            screen.insert_char_at_cursor(c);
             screen.refresh();
         }
         KeyCode::Backspace => {
             screen.input_focused = true;
-            pop_input_tail(app, screen);
+            pop_input_at_cursor(app, screen);
             screen.refresh();
         }
         _ => {}
@@ -873,10 +976,13 @@ fn append_paste_input(app: &mut App, screen: &mut Screen, pasted: &str) {
     if multiline || long_text {
         app.paste_counter += 1;
         let placeholder = build_paste_placeholder(app.paste_counter, pasted);
-        if !screen.input.is_empty() && !screen.input.ends_with(char::is_whitespace) {
-            screen.input.push(' ');
+        if !screen.input.is_empty()
+            && screen.input_cursor > 0
+            && !screen.input[..screen.input_cursor].ends_with(char::is_whitespace)
+        {
+            screen.insert_char_at_cursor(' ');
         }
-        screen.input.push_str(&placeholder);
+        screen.insert_at_cursor(&placeholder);
         app.paste_chunks.push(PasteChunk {
             placeholder,
             content: pasted.to_string(),
@@ -886,7 +992,7 @@ fn append_paste_input(app: &mut App, screen: &mut Screen, pasted: &str) {
 
     for ch in pasted.chars() {
         if ch != '\r' && ch != '\n' {
-            screen.input.push(ch);
+            screen.insert_char_at_cursor(ch);
         }
     }
 }
@@ -925,54 +1031,56 @@ pub(crate) fn expand_input_text(app: &App, input: &str) -> String {
 
 fn clear_input_buffer(app: &mut App, screen: &mut Screen) {
     screen.input.clear();
+    screen.input_cursor = 0;
     app.paste_chunks.clear();
     app.at_file.chunks.clear();
 }
 
-fn pop_input_tail(app: &mut App, screen: &mut Screen) {
-    if screen.input.is_empty() {
+fn pop_input_at_cursor(app: &mut App, screen: &mut Screen) {
+    if screen.input.is_empty() || screen.input_cursor == 0 {
         return;
     }
 
-    let mut matched_idx = None;
+    let before = &screen.input[..screen.input_cursor];
+
+    // Check if cursor is right after a paste chunk placeholder
     for (idx, chunk) in app.paste_chunks.iter().enumerate().rev() {
-        if screen.input.ends_with(&chunk.placeholder) {
-            matched_idx = Some(idx);
-            break;
+        if before.ends_with(&chunk.placeholder) {
+            let ph_len = chunk.placeholder.len();
+            let start = screen.input_cursor - ph_len;
+            screen.input.drain(start..screen.input_cursor);
+            screen.input_cursor = start;
+            app.paste_chunks.remove(idx);
+            // Remove trailing space before placeholder
+            if screen.input_cursor > 0
+                && screen.input.as_bytes().get(screen.input_cursor - 1) == Some(&b' ')
+            {
+                screen.input_cursor -= 1;
+                screen.input.remove(screen.input_cursor);
+            }
+            return;
         }
     }
 
-    if let Some(idx) = matched_idx {
-        let placeholder_len = app.paste_chunks[idx].placeholder.len();
-        let new_len = screen.input.len().saturating_sub(placeholder_len);
-        screen.input.truncate(new_len);
-        app.paste_chunks.remove(idx);
-        if screen.input.ends_with(' ') {
-            screen.input.pop();
-        }
-        return;
-    }
-
-    let mut matched_at_file_idx = None;
+    // Check if cursor is right after an @file placeholder
     for (idx, chunk) in app.at_file.chunks.iter().enumerate().rev() {
-        if screen.input.ends_with(&chunk.placeholder) {
-            matched_at_file_idx = Some(idx);
-            break;
+        if before.ends_with(&chunk.placeholder) {
+            let ph_len = chunk.placeholder.len();
+            let start = screen.input_cursor - ph_len;
+            screen.input.drain(start..screen.input_cursor);
+            screen.input_cursor = start;
+            app.at_file.chunks.remove(idx);
+            if screen.input_cursor > 0
+                && screen.input.as_bytes().get(screen.input_cursor - 1) == Some(&b' ')
+            {
+                screen.input_cursor -= 1;
+                screen.input.remove(screen.input_cursor);
+            }
+            return;
         }
     }
 
-    if let Some(idx) = matched_at_file_idx {
-        let placeholder_len = app.at_file.chunks[idx].placeholder.len();
-        let new_len = screen.input.len().saturating_sub(placeholder_len);
-        screen.input.truncate(new_len);
-        app.at_file.chunks.remove(idx);
-        if screen.input.ends_with(' ') {
-            screen.input.pop();
-        }
-        return;
-    }
-
-    screen.input.pop();
+    screen.delete_char_before_cursor();
 }
 
 // ── Confirm-note mode ─────────────────────────────────────────────────────────
@@ -991,7 +1099,7 @@ fn begin_confirm_note_mode(app: &mut App, screen: &mut Screen, first_char: Optio
         .to_string();
     clear_input_buffer(app, screen);
     if let Some(c) = first_char {
-        screen.input.push(c);
+        screen.insert_char_at_cursor(c);
     }
     screen.refresh();
 }
@@ -1014,7 +1122,7 @@ fn exit_confirm_note_mode(app: &mut App, screen: &mut Screen, back_to_menu: bool
 
 /// Enter @ file picker mode: record the cursor position, run the initial (empty) search.
 fn enter_at_file_mode(app: &mut App, screen: &mut Screen) {
-    app.at_file.at_pos = screen.input.len(); // byte offset immediately after '@'
+    app.at_file.at_pos = screen.input_cursor; // byte offset immediately after '@'
     app.at_file.query = Some(String::new());
     app.at_file.sel = 0;
     update_at_file_candidates(app, screen, "");

@@ -10,7 +10,8 @@ use std::{io, time::Duration};
 use agent::{
     executor::{
         handle_llm_stream_delta, handle_llm_thinking_delta, maybe_flush_and_compact_before_call,
-        process_llm_result, refresh_llm_status, start_task,
+        process_llm_result, refresh_llm_status, start_task, handle_shell_exec_result,
+        ShellExecResult,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
@@ -50,6 +51,8 @@ pub(crate) struct App {
     pub llm_stream_preview: String,
     pub llm_preview_shown: String,
     pub needs_agent_executor: bool,
+    pub shell_task_running: bool,
+    pub shell_exec_rx: Option<std::sync::mpsc::Receiver<ShellExecResult>>,
     /// User pressed Esc to stop the active LLM loop; run_loop should abort the in-flight worker.
     pub interrupt_llm_loop_requested: bool,
     /// Next normal user input should be sent as an in-conversation interjection, not a new task.
@@ -236,6 +239,8 @@ impl App {
             llm_stream_preview: String::new(),
             llm_preview_shown: String::new(),
             needs_agent_executor: false,
+            shell_task_running: false,
+            shell_exec_rx: None,
             interrupt_llm_loop_requested: false,
             interjection_mode: false,
             running: false,
@@ -397,6 +402,8 @@ async fn run_loop(
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
     let mut last_spinner_refresh = std::time::Instant::now();
     let mut llm_task_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_paste_at = std::time::Instant::now() - Duration::from_secs(60);
+    let mut last_paste_content = String::new();
 
     loop {
         // 动态检查能用的mcp加入系统提示，并显示当前可用的mcp工具状态
@@ -460,12 +467,33 @@ async fn run_loop(
             }
         }
 
+        match app.shell_exec_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => {
+                app.shell_exec_rx = None;
+                app.shell_task_running = false;
+                handle_shell_exec_result(app, screen, result);
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                app.shell_exec_rx = None;
+                app.shell_task_running = false;
+                handle_shell_exec_result(
+                    app,
+                    screen,
+                    ShellExecResult::Command {
+                        result: Err("shell worker disconnected unexpectedly".to_string()),
+                    },
+                );
+            }
+            _ => {}
+        }
+
         drain_ge_events(app, screen);
 
         if app.running
             && app.pending_confirm.is_none()
             && app.needs_agent_executor
             && !app.llm_calling
+            && !app.shell_task_running
         {
             //在compact之前写入长期记忆把
             maybe_flush_and_compact_before_call(app, screen);
@@ -515,10 +543,41 @@ async fn run_loop(
 
         //处理键盘事件，包括普通按键和粘贴事件
         if event::poll(Duration::from_millis(50))? {
-            // Drain all immediately-available events.
-            let mut events = vec![event::read()?];
+            // Read first event, then wait briefly to let paste bursts accumulate.
+            let first = event::read()?;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut events = vec![first];
             while event::poll(Duration::ZERO)? {
                 events.push(event::read()?);
+            }
+
+            // Windows terminals don't support bracketed paste: Ctrl+V is
+            // intercepted and clipboard content arrives as rapid key events.
+            // Detect by burst size; content dedup prevents duplicates.
+            if events.len() > 4 {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if let Ok(text) = cb.get_text() {
+                        if !text.is_empty() {
+                            let is_dup = text == last_paste_content
+                                && last_paste_at.elapsed() < Duration::from_secs(5);
+                            if !is_dup {
+                                handle_paste(app, screen, &text);
+                                last_paste_content = text;
+                                last_paste_at = std::time::Instant::now();
+                            }
+                        }
+                    }
+                }
+                // Drain until 200ms of silence
+                loop {
+                    if !event::poll(Duration::from_millis(200))? {
+                        break;
+                    }
+                    while event::poll(Duration::ZERO)? {
+                        let _ = event::read()?;
+                    }
+                }
+                continue;
             }
 
             for ev in events {

@@ -41,8 +41,10 @@ pub(crate) struct Screen {
     pub is_running: bool,
     /// Spinner animation frame counter, incremented by the main loop.
     pub spinner_tick: u64,
-    /// 光标是否已从 hint 行上移到 prompt 行（影响 clear_managed 的起点计算）
-    cursor_at_prompt: bool,
+    /// 输入光标字节偏移
+    pub input_cursor: usize,
+    /// 光标在 hint 行上方几行（0=hint 行，1=单行旧行为，N=多行）
+    cursor_rows_above_hint: usize,
     /// 上次 draw_managed 渲染的状态行数，用于 refresh_status_only 定位
     last_status_rows: usize,
     /// @ 文件选择器：待显示的候选文件路径（相对路径字符串）
@@ -77,7 +79,8 @@ impl Screen {
             workspace: String::new(),
             is_running: false,
             spinner_tick: 0,
-            cursor_at_prompt: false,
+            input_cursor: 0,
+            cursor_rows_above_hint: 0,
             last_status_rows: 1,
             at_file_labels: Vec::new(),
             at_file_sel: 0,
@@ -105,7 +108,8 @@ impl Screen {
             workspace: String::new(),
             is_running: false,
             spinner_tick: 0,
-            cursor_at_prompt: false,
+            input_cursor: 0,
+            cursor_rows_above_hint: 0,
             last_status_rows: 1,
             at_file_labels: Vec::new(),
             at_file_sel: 0,
@@ -167,10 +171,11 @@ impl Screen {
         if self.headless {
             return;
         }
-        // 如果光标已上移到 prompt 行，先移回 hint 行（managed 区底部）
-        if self.cursor_at_prompt {
-            let _ = execute!(self.stdout, cursor::MoveDown(1));
-            self.cursor_at_prompt = false;
+        // 如果光标在 hint 行上方，先移回 hint 行（managed 区底部）
+        if self.cursor_rows_above_hint > 0 {
+            let down = self.cursor_rows_above_hint.min(u16::MAX as usize) as u16;
+            let _ = execute!(self.stdout, cursor::MoveDown(down));
+            self.cursor_rows_above_hint = 0;
         }
         let up = self.managed_lines.saturating_sub(1).min(u16::MAX as usize) as u16;
         let _ = execute!(
@@ -277,15 +282,32 @@ impl Screen {
                     let _ = execute!(self.stdout, Print(format!("  {}\r\n", line)));
                 }
             }
+
+            // ── Multi-line input rendering ──
             let prompt_str = format!("{} ", sym.prompt);
-            let input_budget = cols.saturating_sub(rendered_text_width(&prompt_str));
-            let shown_input = fit_single_line_tail(&self.input, input_budget);
-            let prompt = if self.input_focused {
-                format!("{}{}", prompt_str, shown_input)
-            } else {
-                format!("{}{}", prompt_str, shown_input).grey().to_string()
-            };
-            let _ = execute!(self.stdout, Print(format!("{}\r\n", prompt)));
+            let prompt_width = rendered_text_width(&prompt_str);
+            let input_budget = cols.saturating_sub(prompt_width);
+            let indent = " ".repeat(prompt_width);
+
+            let input_lines: Vec<&str> = self.input.split('\n').collect();
+            let input_row_count = input_lines.len();
+
+            for (i, line) in input_lines.iter().enumerate() {
+                let shown = fit_single_line_tail(line, input_budget);
+                let rendered = if i == 0 {
+                    if self.input_focused {
+                        format!("{}{}", prompt_str, shown)
+                    } else {
+                        format!("{}{}", prompt_str, shown).grey().to_string()
+                    }
+                } else if self.input_focused {
+                    format!("{}{}", indent, shown)
+                } else {
+                    format!("{}{}", indent, shown).grey().to_string()
+                };
+                let _ = execute!(self.stdout, Print(format!("{}\r\n", rendered)));
+            }
+
             let accept_hint = match self.assist_mode {
                 AssistMode::Off => format!(
                     "  {} {}{}",
@@ -313,22 +335,35 @@ impl Screen {
                 ),
             };
             let _ = execute!(self.stdout, Print(accept_hint));
-            self.managed_lines =
-                todo_rows + at_file_rows + command_rows + model_picker_rows + status_rows + 2;
+            self.managed_lines = todo_rows
+                + at_file_rows
+                + command_rows
+                + model_picker_rows
+                + status_rows
+                + input_row_count
+                + 1;
 
-            // 光标归位：hint 行无 \r\n，cursor 就在 hint 行末；
-            // 上移 1 行即到输入行，再定位到输入末尾并显示
+            // 光标归位
             if self.input_focused {
-                let input_col = (rendered_text_width(&prompt_str)
-                    + rendered_text_width(&shown_input))
-                .min(u16::MAX as usize) as u16;
+                let (cursor_row, cursor_col) = self.cursor_row_col();
+                let lines_below_cursor =
+                    (input_row_count - 1 - cursor_row) + 1; // +1 for hint line
+                let col_offset = if cursor_row == 0 {
+                    prompt_width + cursor_col
+                } else {
+                    prompt_width + cursor_col
+                };
+                let up = lines_below_cursor.min(u16::MAX as usize) as u16;
+                let col = col_offset.min(u16::MAX as usize) as u16;
                 let _ = execute!(
                     self.stdout,
-                    cursor::MoveUp(1),
-                    cursor::MoveToColumn(input_col),
+                    cursor::MoveUp(up),
+                    cursor::MoveToColumn(col),
                     cursor::Show
                 );
-                self.cursor_at_prompt = true;
+                self.cursor_rows_above_hint = lines_below_cursor;
+            } else {
+                self.cursor_rows_above_hint = 0;
             }
         }
         let _ = self.stdout.flush();
@@ -522,7 +557,8 @@ impl Screen {
         self.task_lines = 0;
         self.task_rendered.clear();
         self.managed_lines = 3;
-        self.cursor_at_prompt = false;
+        self.input_cursor = 0;
+        self.cursor_rows_above_hint = 0;
         let target_row = crossterm::terminal::size()
             .map(|(_, rows)| rows.saturating_sub(reserve_rows.min(u16::MAX as usize) as u16))
             .unwrap_or(0);
@@ -546,6 +582,7 @@ impl Screen {
             || !self.at_file_labels.is_empty()
             || !self.command_labels.is_empty()
             || !self.model_picker_labels.is_empty()
+            || self.input.contains('\n')
         {
             self.refresh();
             return;
@@ -580,9 +617,9 @@ impl Screen {
             return;
         }
 
-        // 从当前光标位置（prompt 行 or hint 行）向上定位到第一条状态行
-        let up = if self.cursor_at_prompt {
-            new_rows as u16
+        // 从当前光标位置向上定位到第一条状态行
+        let up = if self.cursor_rows_above_hint > 0 {
+            (new_rows + self.cursor_rows_above_hint - 1) as u16
         } else {
             (new_rows + 1) as u16
         };
@@ -607,12 +644,11 @@ impl Screen {
         }
 
         // 打印完状态行后，光标位于 prompt 行开头，恢复到原来位置
-        if self.cursor_at_prompt {
+        if self.cursor_rows_above_hint > 0 {
             let prompt_str = format!("{} ", sym.prompt);
-            let input_budget = cols.saturating_sub(rendered_text_width(&prompt_str));
-            let shown_input = fit_single_line_tail(&self.input, input_budget);
-            let input_col = (rendered_text_width(&prompt_str) + rendered_text_width(&shown_input))
-                .min(u16::MAX as usize) as u16;
+            let prompt_width = rendered_text_width(&prompt_str);
+            let (_, cursor_col) = self.cursor_row_col();
+            let input_col = (prompt_width + cursor_col).min(u16::MAX as usize) as u16;
             let _ = execute!(self.stdout, cursor::MoveToColumn(input_col), cursor::Show);
         } else {
             // 移回 hint 行（仅向下一行，不显示光标）
@@ -662,6 +698,196 @@ impl Screen {
             self.task_rendered.push(line.clone());
         }
         self.draw_managed();
+    }
+
+    // ── Cursor helper methods ────────────────────────────────────────────────
+
+    /// Move cursor left by one char. Returns true if moved.
+    pub fn cursor_left(&mut self) -> bool {
+        if self.input_cursor == 0 {
+            return false;
+        }
+        // Find the previous char boundary
+        let mut pos = self.input_cursor - 1;
+        while pos > 0 && !self.input.is_char_boundary(pos) {
+            pos -= 1;
+        }
+        self.input_cursor = pos;
+        true
+    }
+
+    /// Move cursor right by one char. Returns true if moved.
+    pub fn cursor_right(&mut self) -> bool {
+        if self.input_cursor >= self.input.len() {
+            return false;
+        }
+        let ch = self.input[self.input_cursor..].chars().next().unwrap();
+        self.input_cursor += ch.len_utf8();
+        true
+    }
+
+    /// Move cursor left by one word (Ctrl+Left).
+    pub fn cursor_word_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let bytes = self.input.as_bytes();
+        let mut pos = self.input_cursor;
+        // Skip whitespace
+        while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
+            pos -= 1;
+        }
+        // Skip word chars
+        while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
+            pos -= 1;
+        }
+        self.input_cursor = pos;
+    }
+
+    /// Move cursor right by one word (Ctrl+Right).
+    pub fn cursor_word_right(&mut self) {
+        let len = self.input.len();
+        if self.input_cursor >= len {
+            return;
+        }
+        let bytes = self.input.as_bytes();
+        let mut pos = self.input_cursor;
+        // Skip word chars
+        while pos < len && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        // Skip whitespace
+        while pos < len && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        self.input_cursor = pos;
+    }
+
+    /// Move cursor up one line. Returns true if moved.
+    pub fn cursor_up(&mut self) -> bool {
+        let (row, col) = self.cursor_row_col();
+        if row == 0 {
+            return false;
+        }
+        self.move_cursor_to_line_col(row - 1, col);
+        true
+    }
+
+    /// Move cursor down one line. Returns true if moved.
+    pub fn cursor_down(&mut self) -> bool {
+        let (row, col) = self.cursor_row_col();
+        let line_count = self.input_line_count();
+        if row + 1 >= line_count {
+            return false;
+        }
+        self.move_cursor_to_line_col(row + 1, col);
+        true
+    }
+
+    /// Move cursor to start of current line.
+    pub fn cursor_home(&mut self) {
+        // Find the start of the current line
+        let before = &self.input[..self.input_cursor];
+        if let Some(nl_pos) = before.rfind('\n') {
+            self.input_cursor = nl_pos + 1;
+        } else {
+            self.input_cursor = 0;
+        }
+    }
+
+    /// Move cursor to end of current line.
+    pub fn cursor_end(&mut self) {
+        let after = &self.input[self.input_cursor..];
+        if let Some(nl_pos) = after.find('\n') {
+            self.input_cursor += nl_pos;
+        } else {
+            self.input_cursor = self.input.len();
+        }
+    }
+
+    /// Insert a char at cursor position.
+    pub fn insert_char_at_cursor(&mut self, c: char) {
+        self.input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    /// Insert a string at cursor position.
+    pub fn insert_at_cursor(&mut self, s: &str) {
+        self.input.insert_str(self.input_cursor, s);
+        self.input_cursor += s.len();
+    }
+
+    /// Delete the char before cursor. Returns the deleted char if any.
+    pub fn delete_char_before_cursor(&mut self) -> Option<char> {
+        if self.input_cursor == 0 {
+            return None;
+        }
+        // Find previous char boundary
+        let mut pos = self.input_cursor - 1;
+        while pos > 0 && !self.input.is_char_boundary(pos) {
+            pos -= 1;
+        }
+        let ch = self.input[pos..].chars().next().unwrap();
+        self.input.drain(pos..self.input_cursor);
+        self.input_cursor = pos;
+        Some(ch)
+    }
+
+    /// Calculate cursor row and column (display width).
+    pub fn cursor_row_col(&self) -> (usize, usize) {
+        let before = &self.input[..self.input_cursor];
+        let row = before.matches('\n').count();
+        let last_nl = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let col = rendered_text_width(&self.input[last_nl..self.input_cursor]);
+        (row, col)
+    }
+
+    /// Count total lines in input.
+    pub fn input_line_count(&self) -> usize {
+        if self.input.is_empty() {
+            1
+        } else {
+            self.input.matches('\n').count() + 1
+        }
+    }
+
+    /// Move cursor to specified line and column (by display width).
+    fn move_cursor_to_line_col(&mut self, target_line: usize, target_col: usize) {
+        let mut line = 0;
+        let mut line_start = 0;
+        for (i, ch) in self.input.char_indices() {
+            if line == target_line {
+                line_start = i;
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        if line < target_line {
+            // target_line is beyond input
+            self.input_cursor = self.input.len();
+            return;
+        }
+        // Now walk from line_start to find the right column
+        let mut col = 0;
+        let mut pos = line_start;
+        for (i, ch) in self.input[line_start..].char_indices() {
+            if ch == '\n' {
+                pos = line_start + i;
+                break;
+            }
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col + w > target_col {
+                pos = line_start + i;
+                self.input_cursor = pos;
+                return;
+            }
+            col += w;
+            pos = line_start + i + ch.len_utf8();
+        }
+        self.input_cursor = pos;
     }
 }
 

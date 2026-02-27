@@ -16,6 +16,19 @@ use crate::{
     MAX_MESSAGES_BEFORE_COMPACTION,
 };
 
+#[derive(Debug)]
+pub(crate) enum ShellExecResult {
+    Command {
+        result: Result<crate::tools::shell::CommandResult, String>,
+    },
+    Explorer {
+        commands: Vec<String>,
+        outputs: Vec<String>,
+        llm_parts: Vec<String>,
+        final_exit: i32,
+    },
+}
+
 pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     if app.messages.len() > 1 {
         screen.emit(&[String::new()]);
@@ -46,6 +59,8 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.final_summary = None;
     app.task_collapsed = false;
     app.todo_items.clear();
+    app.shell_task_running = false;
+    app.shell_exec_rx = None;
     screen.todo_items.clear();
     app.messages.push(Message::user(task.clone()));
 
@@ -163,7 +178,6 @@ pub(crate) fn process_llm_result(
                 match risk {
                     RiskLevel::Safe => {
                         execute_command(app, screen, &command);
-                        app.needs_agent_executor = true;
                     }
                     RiskLevel::Confirm => {
                         if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle)
@@ -179,7 +193,6 @@ pub(crate) fn process_llm_result(
                             emit_live_event(screen, &ev);
                             app.task_events.push(ev);
                             execute_command(app, screen, &command);
-                            app.needs_agent_executor = true;
                         } else {
                             let label = crate::tools::shell::classify_command(&command).label();
                             let ev = Event::NeedsConfirmation {
@@ -518,6 +531,19 @@ pub(crate) fn push_tool_result_to_llm(app: &mut App, header: &str, body: &str) {
 }
 
 pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
+    if app.shell_task_running {
+        let msg = "Another shell task is still running. Please wait.";
+        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
+        let ev = Event::ToolResult {
+            exit_code: -1,
+            output: msg.to_string(),
+        };
+        emit_live_event(screen, &ev);
+        app.task_events.push(ev);
+        app.needs_agent_executor = true;
+        return;
+    }
+
     let intent = crate::tools::shell::classify_command(cmd);
     let call_ev = Event::ToolCall {
         label: intent.label(),
@@ -532,28 +558,16 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     screen.status = format!("Running: {short_cmd}");
     screen.refresh();
 
-    match crate::tools::shell::run_command(cmd) {
-        Ok(out) => {
-            let header = format!("Tool result (exit={}):", out.exit_code);
-            push_tool_result_to_llm(app, &header, &out.output);
-            let ev = Event::ToolResult {
-                exit_code: out.exit_code,
-                output: out.output,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
-        }
-        Err(e) => {
-            let err = format!("execution failed: {e}");
-            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-            let ev = Event::ToolResult {
-                exit_code: -1,
-                output: err,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
-        }
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.shell_exec_rx = Some(rx);
+    app.shell_task_running = true;
+
+    let cmd_owned = cmd.to_string();
+    std::thread::spawn(move || {
+        let result = crate::tools::shell::run_command(&cmd_owned)
+            .map_err(|e| format!("execution failed: {e}"));
+        let _ = tx.send(ShellExecResult::Command { result });
+    });
 }
 
 pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, arguments: &Value) {
@@ -650,6 +664,39 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
     let llm_combined = llm_parts.join("\n\n");
     let header = format!("Tool result (exit={final_exit}):");
     push_tool_result_to_llm(app, &header, &llm_combined);
+}
+
+pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, result: ShellExecResult) {
+    match result {
+        ShellExecResult::Command { result } => match result {
+            Ok(out) => {
+                let header = format!("Tool result (exit={}):", out.exit_code);
+                push_tool_result_to_llm(app, &header, &out.output);
+                let ev = Event::ToolResult {
+                    exit_code: out.exit_code,
+                    output: out.output,
+                };
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+            }
+            Err(err) => {
+                push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
+                let ev = Event::ToolResult {
+                    exit_code: -1,
+                    output: err,
+                };
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+            }
+        },
+        ShellExecResult::Explorer { .. } => {
+            // Explorer remains synchronous for now; this path is reserved for future async support.
+        }
+    }
+
+    screen.status.clear();
+    app.needs_agent_executor = true;
+    screen.refresh();
 }
 
 pub(crate) fn execute_update_file(

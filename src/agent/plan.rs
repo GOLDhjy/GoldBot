@@ -6,6 +6,7 @@ use crate::types::{LlmAction, TodoItem, TodoStatus};
 pub(crate) const PLAN_MODE_ASSIST_CONTEXT_APPENDIX: &str = "\
 Plan mode is enabled. Use the plan workflow proactively.
 ## Plan Mode Rules
+- 进入plan模式后,你应该充分了解需求，如果是编码类任务,你应该先分析代码结构和逻辑,然后再给出详细的计划步骤。
 - If information is missing or the task is ambiguous, use <tool>question</tool> first (ask one key question at a time).
 - Once information is sufficient and the task is complex, use <tool>plan</tool> to produce a complete plan with todo-style step breakdowns.
 - After <tool>plan</tool>, immediately ask for confirmation with <tool>question</tool>.
@@ -15,12 +16,6 @@ Plan mode is enabled. Use the plan workflow proactively.
 - <tool>set_mode</tool> is non-blocking and only updates local mode/UI.
 
 ## Plan Tools
-
-<thought>reasoning</thought>
-<tool>set_mode</tool>
-<mode>agent</mode>
-`<mode>` 可选值：`agent` / `accept_edits` / `plan`
-
 
 Plan 输出示例：
 <thought>reasoning</thought>

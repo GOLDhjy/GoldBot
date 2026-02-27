@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
@@ -17,6 +17,7 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 # Response format
 
 ## Rules
+- When asked to plan implementation, use <tool>set_mode</tool> with <mode>plan</mode>, then follow the 'plan mode' flow.
 - One blocking tool call per response. <tool>phase</tool> are non-blocking and may be included too. Use <tool>explorer</tool> to batch read-only lookups with multiple <command> tags.
 - Use <tool>phase</tool> to write what to do next (one short sentence). Update it when the stage changes; omit it if unchanged.
 - <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.
@@ -38,10 +39,10 @@ Task complete (required):
 
 ### Process Tools
 
-Shell command:
 <thought>reasoning</thought>
-<tool>shell</tool>
-<command>bash command</command>
+<tool>set_mode</tool>
+<mode>agent</mode>
+`<mode>` 可选值：`agent` / `plan`
 
 Explorer (batch read-only commands; all results returned at once — put everything into ONE call, never repeat):
 <thought>reasoning</thought>
@@ -81,6 +82,11 @@ Search files (regex search across file contents; native, cross-platform):
 <tool>search</tool>
 <pattern>regex or literal string</pattern>
 <path>optional/path/to/search (default: .)</path>
+
+Shell command: prefer native tool: read, search, write/update.
+<thought>reasoning</thought>
+<tool>shell</tool>
+<command>bash command</command>
 
 Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>
@@ -783,3 +789,4 @@ rm -rf target
         assert!(!prompt.contains("Todo progress panel (shows a live checklist in the terminal):"));
     }
 }
+
