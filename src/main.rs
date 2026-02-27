@@ -70,6 +70,8 @@ pub(crate) struct App {
     pub pending_question: Option<(String, Vec<String>)>,
     /// True when user is typing a free-text answer to a question/plan supplement.
     pub answering_question: bool,
+    /// When Some, input is treated as an API key value for this env var name.
+    pub pending_api_key_name: Option<String>,
     pub mcp_registry: crate::tools::mcp::McpRegistry,
     pub mcp_discovery_rx:
         Option<std::sync::mpsc::Receiver<(crate::tools::mcp::McpRegistry, Vec<String>)>>,
@@ -250,6 +252,7 @@ impl App {
             paste_chunks: Vec::new(),
             pending_question: None,
             answering_question: false,
+            pending_api_key_name: None,
             mcp_registry,
             mcp_discovery_rx: None,
             skills,
@@ -336,20 +339,6 @@ async fn main() -> anyhow::Result<()> {
     };
     screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
     screen.assist_mode = app.assist_mode;
-
-    // Warn if required API key is missing and show .env path.
-    if app.backend.api_key_missing() {
-        let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
-        screen.emit(&[
-            format!(
-                "  {} {} 未配置，请编辑: {}",
-                crossterm::style::Stylize::yellow(crate::ui::symbols::Symbols::current().warning),
-                app.backend.required_key_name(),
-                env_path.display()
-            ),
-            String::new(),
-        ]);
-    }
 
     // Display discovered skills below the banner.
     let skill_names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();

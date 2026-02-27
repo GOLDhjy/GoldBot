@@ -272,7 +272,42 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
     }
 }
 
+fn handle_api_key_input_mode(
+    app: &mut App,
+    screen: &mut Screen,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) {
+    match key {
+        KeyCode::Enter => {
+            let raw = expand_input_text(app, &screen.input);
+            submit_api_key_input(app, screen, raw);
+        }
+        KeyCode::Esc if modifiers.is_empty() => {
+            app.pending_api_key_name = None;
+            clear_input_buffer(app, screen);
+            screen.status.clear();
+            screen.emit(&["  API key input canceled. Task is paused.".to_string()]);
+            screen.refresh();
+        }
+        KeyCode::Backspace => {
+            pop_input_tail(app, screen);
+            screen.refresh();
+        }
+        KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            screen.input.push(c);
+            screen.refresh();
+        }
+        _ => {}
+    }
+}
+
 fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
+    if app.pending_api_key_name.is_some() {
+        handle_api_key_input_mode(app, screen, key, modifiers);
+        return;
+    }
+
     if screen.input_focused {
         // ── @ file picker intercepts navigation keys first ──
         if app.at_file.query.is_some() {
@@ -552,6 +587,94 @@ pub(crate) fn submit_user_input(app: &mut App, screen: &mut Screen, task: String
             )]);
         }
     }
+}
+
+fn submit_api_key_input(app: &mut App, screen: &mut Screen, raw: String) {
+    let Some(key_name) = app.pending_api_key_name.clone() else {
+        return;
+    };
+
+    let parsed_value = parse_api_key_input(&raw, &key_name);
+    let Some(key_value) = normalize_api_key_value(&key_name, &parsed_value) else {
+        screen.status = format!("Please input a valid {} value.", key_name)
+            .dark_yellow()
+            .to_string();
+        screen.refresh();
+        return;
+    };
+
+    persist_api_key_to_env(&key_name, &key_value);
+    clear_input_buffer(app, screen);
+
+    app.pending_api_key_name = None;
+    app.running = true;
+    app.needs_agent_executor = true;
+    screen.status = "API key saved. Retrying...".grey().to_string();
+    screen.emit(&[format!("  {} updated. Retrying current task...", key_name)]);
+    screen.refresh();
+}
+
+fn parse_api_key_input(raw: &str, key_name: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some((lhs, rhs)) = trimmed.split_once('=')
+        && lhs.trim().eq_ignore_ascii_case(key_name)
+    {
+        return rhs.trim().trim_matches('"').trim_matches('\'').to_string();
+    }
+    trimmed.trim_matches('"').trim_matches('\'').to_string()
+}
+
+fn resolve_valid_api_key(key_name: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(key_name)
+        && let Some(valid) = normalize_api_key_value(key_name, &value)
+    {
+        return Some(valid);
+    }
+
+    read_key_from_dot_env(key_name).and_then(|v| normalize_api_key_value(key_name, &v))
+}
+
+fn read_key_from_dot_env(key_name: &str) -> Option<String> {
+    let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+    let raw = std::fs::read_to_string(env_path).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if lhs.trim() == key_name {
+            return Some(rhs.trim().to_string());
+        }
+    }
+    None
+}
+
+fn normalize_api_key_value(key_name: &str, raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() || is_placeholder_api_key(key_name, trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_placeholder_api_key(key_name: &str, value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let known_placeholder = match key_name {
+        "BIGMODEL_API_KEY" => "your_bigmodel_api_key_here",
+        "MINIMAX_API_KEY" => "your_minimax_api_key_here",
+        _ => "",
+    };
+    if !known_placeholder.is_empty() && lower == known_placeholder {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "changeme" | "replace_me" | "your_api_key_here"
+    ) || (lower.starts_with("your_") && lower.ends_with("_here") && lower.contains("api_key"))
 }
 
 fn should_interrupt_llm_chat_loop(app: &App) -> bool {
@@ -1284,6 +1407,34 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
     let _ = std::fs::write(&env_path, content);
 }
 
+fn persist_api_key_to_env(key_name: &str, key_value: &str) {
+    let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+    let raw = std::fs::read_to_string(&env_path).unwrap_or_default();
+
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+    let mut found = false;
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{key_name}="))
+            || trimmed.starts_with(&format!("{key_name} ="))
+        {
+            *line = format!("{key_name}={key_value}");
+            found = true;
+        }
+    }
+    if !found {
+        lines.push(format!("{key_name}={key_value}"));
+    }
+
+    let content = lines.join("\n") + "\n";
+    let _ = std::fs::write(&env_path, content);
+    // SAFETY: GoldBot intentionally mutates its own process env after user input
+    // to make the updated key effective immediately in the current session.
+    unsafe {
+        std::env::set_var(key_name, key_value);
+    }
+}
+
 /// 进入第一级：显示所有可用后端。
 fn enter_model_picker_backend_stage(app: &mut App, screen: &mut Screen) {
     app.model_picker.stage = crate::ModelPickerStage::Backend;
@@ -1379,16 +1530,34 @@ fn select_model_item(app: &mut App, screen: &mut Screen) {
                 app.backend.backend_label(),
                 app.backend.model_name()
             )];
-            if app.backend.api_key_missing() {
+            app.pending_api_key_name = None;
+            screen.status.clear();
+            let key_name = app.backend.required_key_name().to_string();
+            if let Some(key_value) = resolve_valid_api_key(&key_name) {
+                // SAFETY: refresh process env so switched backend can use key immediately.
+                unsafe {
+                    std::env::set_var(&key_name, &key_value);
+                }
+            } else {
                 let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+                app.pending_api_key_name = Some(key_name.clone());
+                app.running = false;
+                app.needs_agent_executor = false;
+                screen.input_focused = true;
                 lines.push(format!(
                     "  {} {} 未配置，请编辑: {}",
                     crossterm::style::Stylize::yellow(
                         crate::ui::symbols::Symbols::current().warning
                     ),
-                    app.backend.required_key_name(),
+                    key_name,
                     env_path.display()
                 ));
+                lines.push(format!(
+                    "  Paste {key_name} now and press Enter to continue this session."
+                ));
+                screen.status = format!("Waiting for {} input...", key_name)
+                    .dark_yellow()
+                    .to_string();
             }
             screen.emit(&lines);
         }
