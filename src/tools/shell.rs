@@ -4,6 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -23,6 +24,7 @@ const MAX_PREVIEW_CHARS_PER_LINE: usize = 140;
 const MAX_COMPARE_CAPTURE_BYTES: usize = 64 * 1024;
 /// Maximum number of unified-diff output lines shown per modified file.
 const MAX_DIFF_LINES: usize = 60;
+static SHELL_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
@@ -74,6 +76,14 @@ pub fn classify_command(cmd: &str) -> CommandIntent {
     }
 }
 
+pub fn request_cancel_running_shell_commands() {
+    SHELL_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn clear_running_shell_cancel_request() {
+    SHELL_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+}
+
 pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let before_compare = capture_before_compare(&cwd, cmd);
@@ -104,12 +114,19 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let start = Instant::now();
     let poll_interval = Duration::from_millis(200);
     let mut timed_out = false;
+    let mut canceled_by_user = false;
 
     // Poll until child exits or timeout.
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => break,
             Ok(None) => {
+                if SHELL_CANCEL_REQUESTED.load(Ordering::SeqCst) {
+                    canceled_by_user = true;
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap zombie
+                    break;
+                }
                 if start.elapsed() >= timeout {
                     timed_out = true;
                     let _ = child.kill();
@@ -122,6 +139,10 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
         }
     }
 
+    if canceled_by_user {
+        SHELL_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
     // Read whatever output is available.
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
@@ -132,7 +153,7 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
         let _ = err.read_to_end(&mut stderr_buf);
     }
 
-    let exit_code = if timed_out {
+    let exit_code = if timed_out || canceled_by_user {
         -1
     } else {
         child.wait().ok().and_then(|s| s.code()).unwrap_or(-1)
@@ -151,7 +172,12 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     text.push_str(&String::from_utf8_lossy(&stdout_buf));
     text.push_str(&String::from_utf8_lossy(&stderr_buf));
 
-    if timed_out {
+    if canceled_by_user {
+        if !text.trim_end().is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[command canceled by user]");
+    } else if timed_out {
         if !text.trim_end().is_empty() {
             text.push('\n');
         }

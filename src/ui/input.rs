@@ -783,13 +783,17 @@ fn is_placeholder_api_key(key_name: &str, value: &str) -> bool {
 fn should_interrupt_llm_chat_loop(app: &App) -> bool {
     app.mode == Mode::Normal
         && app.running
-        && (app.llm_calling || app.needs_agent_executor)
+        && (app.llm_calling || app.needs_agent_executor || app.shell_task_running)
         && app.pending_confirm.is_none()
         && app.pending_question.is_none()
         && !app.pending_confirm_note
 }
 
 fn interrupt_llm_chat_loop(app: &mut App, screen: &mut Screen) {
+    let canceling_shell = app.shell_task_running;
+    if canceling_shell {
+        crate::tools::shell::request_cancel_running_shell_commands();
+    }
     app.interrupt_llm_loop_requested = true;
     app.interjection_mode = true;
     app.running = false;
@@ -798,12 +802,22 @@ fn interrupt_llm_chat_loop(app: &mut App, screen: &mut Screen) {
     app.llm_stream_preview.clear();
     app.llm_preview_shown.clear();
     screen.input_focused = true;
-    screen.status = "LLM loop interrupted. Type a message and press Enter to interject."
+    screen.status = if canceling_shell {
+        "Interrupt requested. Cancelling shell command..."
+    } else {
+        "LLM loop interrupted. Type a message and press Enter to interject."
+    }
         .dark_yellow()
         .to_string();
-    screen.emit(&[String::from(
-        "  LLM loop interrupted. Type a message and press Enter to interject.",
-    )]);
+    if canceling_shell {
+        screen.emit(&[String::from(
+            "  Interrupt requested. Cancelling shell command...",
+        )]);
+    } else {
+        screen.emit(&[String::from(
+            "  LLM loop interrupted. Type a message and press Enter to interject.",
+        )]);
+    }
     screen.refresh();
 }
 

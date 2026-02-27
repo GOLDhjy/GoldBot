@@ -52,7 +52,7 @@ pub(crate) struct App {
     pub llm_preview_shown: String,
     pub needs_agent_executor: bool,
     pub shell_task_running: bool,
-    pub shell_exec_rx: Option<std::sync::mpsc::Receiver<ShellExecResult>>,
+    pub shell_exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ShellExecResult>>,
     /// User pressed Esc to stop the active LLM loop; run_loop should abort the in-flight worker.
     pub interrupt_llm_loop_requested: bool,
     /// Next normal user input should be sent as an in-conversation interjection, not a new task.
@@ -402,8 +402,6 @@ async fn run_loop(
     let (tx, mut rx) = mpsc::channel::<LlmWorkerEvent>(64);
     let mut last_spinner_refresh = std::time::Instant::now();
     let mut llm_task_handle: Option<tokio::task::JoinHandle<()>> = None;
-    let mut last_paste_at = std::time::Instant::now() - Duration::from_secs(60);
-    let mut last_paste_content = String::new();
 
     loop {
         // 动态检查能用的mcp加入系统提示，并显示当前可用的mcp工具状态
@@ -467,25 +465,7 @@ async fn run_loop(
             }
         }
 
-        match app.shell_exec_rx.as_ref().map(|rx| rx.try_recv()) {
-            Some(Ok(result)) => {
-                app.shell_exec_rx = None;
-                app.shell_task_running = false;
-                handle_shell_exec_result(app, screen, result);
-            }
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                app.shell_exec_rx = None;
-                app.shell_task_running = false;
-                handle_shell_exec_result(
-                    app,
-                    screen,
-                    ShellExecResult::Command {
-                        result: Err("shell worker disconnected unexpectedly".to_string()),
-                    },
-                );
-            }
-            _ => {}
-        }
+        poll_shell_exec_result(app, screen);
 
         drain_ge_events(app, screen);
 
@@ -541,60 +521,10 @@ async fn run_loop(
             last_spinner_refresh = std::time::Instant::now();
         }
 
-        //处理键盘事件，包括普通按键和粘贴事件
-        if event::poll(Duration::from_millis(50))? {
-            // Read first event, then wait briefly to let paste bursts accumulate.
-            let first = event::read()?;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let mut events = vec![first];
-            while event::poll(Duration::ZERO)? {
-                events.push(event::read()?);
-            }
-
-            // Windows terminals don't support bracketed paste: Ctrl+V is
-            // intercepted and clipboard content arrives as rapid key events.
-            // Detect by burst size; content dedup prevents duplicates.
-            if events.len() > 4 {
-                if let Ok(mut cb) = arboard::Clipboard::new() {
-                    if let Ok(text) = cb.get_text() {
-                        if !text.is_empty() {
-                            let is_dup = text == last_paste_content
-                                && last_paste_at.elapsed() < Duration::from_secs(5);
-                            if !is_dup {
-                                handle_paste(app, screen, &text);
-                                last_paste_content = text;
-                                last_paste_at = std::time::Instant::now();
-                            }
-                        }
-                    }
-                }
-                // Drain until 200ms of silence
-                loop {
-                    if !event::poll(Duration::from_millis(200))? {
-                        break;
-                    }
-                    while event::poll(Duration::ZERO)? {
-                        let _ = event::read()?;
-                    }
-                }
-                continue;
-            }
-
-            for ev in events {
-                match ev {
-                    CEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                        if handle_key(app, screen, k.code, k.modifiers) {
-                            app.quit = true;
-                            break;
-                        }
-                    }
-                    CEvent::Paste(text) => handle_paste(app, screen, &text),
-                    _ => {}
-                }
-            }
-        }
+        handle_terminal_events(app, screen).await?;
 
         if app.quit {
+            shutdown_background_work(app, screen, &mut llm_task_handle).await;
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -605,11 +535,99 @@ async fn run_loop(
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
+    let Some(rx) = app.shell_exec_rx.as_mut() else {
+        return;
+    };
+
+    match rx.try_recv() {
+        Ok(ShellExecResult::ExplorerProgress {
+            completed,
+            total,
+            command,
+        }) => {
+            let short_cmd = crate::ui::format::shorten_text(&command, 60);
+            screen.status = format!("Explorer [{completed}/{total}]: {short_cmd}");
+            screen.refresh_status_only();
+        }
+        Ok(result) => {
+            app.shell_exec_rx = None;
+            app.shell_task_running = false;
+            crate::tools::shell::clear_running_shell_cancel_request();
+            handle_shell_exec_result(app, screen, result);
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            app.shell_exec_rx = None;
+            app.shell_task_running = false;
+            crate::tools::shell::clear_running_shell_cancel_request();
+            handle_shell_exec_result(
+                app,
+                screen,
+                ShellExecResult::Command {
+                    result: Err("shell worker disconnected unexpectedly".to_string()),
+                },
+            );
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+    }
+}
+
+async fn handle_terminal_events(
+    app: &mut App,
+    screen: &mut Screen,
+) -> anyhow::Result<()> {
+    if !event::poll(Duration::from_millis(50))? {
+        return Ok(());
+    }
+
+    let mut events = vec![event::read()?];
+    while event::poll(Duration::ZERO)? {
+        events.push(event::read()?);
+    }
+
+    for ev in events {
+        match ev {
+            CEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                if handle_key(app, screen, k.code, k.modifiers) {
+                    app.quit = true;
+                    break;
+                }
+            }
+            CEvent::Paste(text) => handle_paste(app, screen, &text),
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+async fn shutdown_background_work(
+    app: &mut App,
+    screen: &mut Screen,
+    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    if app.shell_task_running {
+        crate::tools::shell::request_cancel_running_shell_commands();
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        while app.shell_task_running && std::time::Instant::now() < deadline {
+            poll_shell_exec_result(app, screen);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    if let Some(handle) = llm_task_handle.take() {
+        handle.abort();
+    }
+}
+
 fn interrupt_active_llm_loop(
     app: &mut App,
     screen: &mut Screen,
     llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    if app.shell_task_running {
+        crate::tools::shell::request_cancel_running_shell_commands();
+    }
     app.interrupt_llm_loop_requested = false;
     app.running = false;
     app.needs_agent_executor = false;

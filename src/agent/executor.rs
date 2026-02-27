@@ -21,6 +21,11 @@ pub(crate) enum ShellExecResult {
     Command {
         result: Result<crate::tools::shell::CommandResult, String>,
     },
+    ExplorerProgress {
+        completed: usize,
+        total: usize,
+        command: String,
+    },
     Explorer {
         commands: Vec<String>,
         outputs: Vec<String>,
@@ -236,7 +241,6 @@ pub(crate) fn process_llm_result(
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 execute_explorer_batch(app, screen, &commands);
-                app.needs_agent_executor = true;
                 break 'actions;
             }
             LlmAction::UpdateFile {
@@ -557,13 +561,14 @@ pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     let short_cmd = truncate_utf8_prefix(cmd, 60);
     screen.status = format!("Running: {short_cmd}");
     screen.refresh();
+    crate::tools::shell::clear_running_shell_cancel_request();
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     app.shell_exec_rx = Some(rx);
     app.shell_task_running = true;
 
     let cmd_owned = cmd.to_string();
-    std::thread::spawn(move || {
+    tokio::task::spawn_blocking(move || {
         let result = crate::tools::shell::run_command(&cmd_owned)
             .map_err(|e| format!("execution failed: {e}"));
         let _ = tx.send(ShellExecResult::Command { result });
@@ -605,65 +610,72 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
 }
 
 pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, commands: &[String]) {
-    let n = commands.len();
-    let mut llm_parts: Vec<String> = Vec::new();
-    let mut outputs: Vec<String> = Vec::new(); // first non-empty line per command
-    let mut final_exit: i32 = 0;
+    if app.shell_task_running {
+        let msg = "Another shell task is still running. Please wait.";
+        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
+        let ev = Event::ToolResult {
+            exit_code: -1,
+            output: msg.to_string(),
+        };
+        emit_live_event(screen, &ev);
+        app.task_events.push(ev);
+        app.needs_agent_executor = true;
+        return;
+    }
 
-    // Run all commands first, collecting results for inline tree display.
-    for (i, cmd) in commands.iter().enumerate() {
-        let short = truncate_utf8_prefix(cmd, 60);
-        screen.status = format!("Explorer [{}/{}]: {short}", i + 1, n);
-        screen.refresh();
+    crate::tools::shell::clear_running_shell_cancel_request();
+    let total = commands.len();
+    screen.status = format!("Explorer [0/{total}]: starting");
+    screen.refresh();
 
-        match crate::tools::shell::run_command(cmd) {
-            Ok(out) => {
-                let mut llm = format!("$ {cmd}\n{}", out.output.trim_end());
-                if out.exit_code != 0 {
-                    llm.push_str(&format!("\n(exit={})", out.exit_code));
-                    final_exit = out.exit_code;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.shell_exec_rx = Some(rx);
+    app.shell_task_running = true;
+
+    let commands_owned = commands.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut llm_parts: Vec<String> = Vec::new();
+        let mut outputs: Vec<String> = Vec::new();
+        let mut final_exit: i32 = 0;
+        let total = commands_owned.len();
+
+        for (idx, cmd) in commands_owned.iter().enumerate() {
+            let _ = tx.send(ShellExecResult::ExplorerProgress {
+                completed: idx + 1,
+                total,
+                command: cmd.clone(),
+            });
+            match crate::tools::shell::run_command(cmd) {
+                Ok(out) => {
+                    let mut llm = format!("$ {cmd}\n{}", out.output.trim_end());
+                    if out.exit_code != 0 {
+                        llm.push_str(&format!("\n(exit={})", out.exit_code));
+                        final_exit = out.exit_code;
+                    }
+                    llm_parts.push(llm);
+                    let preview = out
+                        .output
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("(no output)")
+                        .to_string();
+                    outputs.push(preview);
                 }
-                llm_parts.push(llm);
-                let preview = out
-                    .output
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("(no output)")
-                    .to_string();
-                outputs.push(preview);
-            }
-            Err(e) => {
-                llm_parts.push(format!("$ {cmd}\nexecution failed: {e}"));
-                outputs.push(format!("execution failed: {e}"));
-                final_exit = -1;
+                Err(e) => {
+                    llm_parts.push(format!("$ {cmd}\nexecution failed: {e}"));
+                    outputs.push(format!("execution failed: {e}"));
+                    final_exit = -1;
+                }
             }
         }
-    }
 
-    // Build tree with first-line output preview inline under each command.
-    // ├ cmd          └ cmd (last)
-    // │   preview        preview
-    let mut tree_lines: Vec<String> = Vec::new();
-    for (i, (cmd, preview)) in commands.iter().zip(outputs.iter()).enumerate() {
-        let is_last = i == n - 1;
-        let branch = if is_last { "└ " } else { "├ " };
-        let indent = if is_last { "    " } else { "│   " };
-        tree_lines.push(format!("{}{}", branch, shorten_text(cmd, 60)));
-        tree_lines.push(format!("{}{}", indent, shorten_text(preview, 80)));
-    }
-
-    let call_ev = Event::ToolCall {
-        label: "Explorer".to_string(),
-        command: tree_lines.join("\n"),
-        multiline: true,
-    };
-    emit_live_event(screen, &call_ev);
-    app.task_events.push(call_ev);
-
-    // Push full output to LLM only; no separate ToolResult UI event.
-    let llm_combined = llm_parts.join("\n\n");
-    let header = format!("Tool result (exit={final_exit}):");
-    push_tool_result_to_llm(app, &header, &llm_combined);
+        let _ = tx.send(ShellExecResult::Explorer {
+            commands: commands_owned,
+            outputs,
+            llm_parts,
+            final_exit,
+        });
+    });
 }
 
 pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, result: ShellExecResult) {
@@ -689,8 +701,35 @@ pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, resul
                 app.task_events.push(ev);
             }
         },
-        ShellExecResult::Explorer { .. } => {
-            // Explorer remains synchronous for now; this path is reserved for future async support.
+        ShellExecResult::ExplorerProgress { .. } => {
+            return;
+        }
+        ShellExecResult::Explorer {
+            commands,
+            outputs,
+            llm_parts,
+            final_exit,
+        } => {
+            let mut tree_lines: Vec<String> = Vec::new();
+            for (i, (cmd, preview)) in commands.iter().zip(outputs.iter()).enumerate() {
+                let is_last = i == commands.len() - 1;
+                let branch = if is_last { "`-- " } else { "|-- " };
+                let indent = if is_last { "    " } else { "|   " };
+                tree_lines.push(format!("{}{}", branch, shorten_text(cmd, 60)));
+                tree_lines.push(format!("{}{}", indent, shorten_text(preview, 80)));
+            }
+
+            let call_ev = Event::ToolCall {
+                label: "Explorer".to_string(),
+                command: tree_lines.join("\n"),
+                multiline: true,
+            };
+            emit_live_event(screen, &call_ev);
+            app.task_events.push(call_ev);
+
+            let llm_combined = llm_parts.join("\n\n");
+            let header = format!("Tool result (exit={final_exit}):");
+            push_tool_result_to_llm(app, &header, &llm_combined);
         }
     }
 
