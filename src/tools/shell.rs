@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -84,6 +84,22 @@ pub fn clear_running_shell_cancel_request() {
     SHELL_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
 }
 
+fn terminate_child_process(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    let _ = child.kill();
+    let _ = child.wait(); // reap zombie
+}
+
 pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let before_compare = capture_before_compare(&cwd, cmd);
@@ -115,22 +131,24 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let poll_interval = Duration::from_millis(200);
     let mut timed_out = false;
     let mut canceled_by_user = false;
+    let mut observed_exit_code: Option<i32> = None;
 
     // Poll until child exits or timeout.
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => {
+                observed_exit_code = status.code();
+                break;
+            }
             Ok(None) => {
                 if SHELL_CANCEL_REQUESTED.load(Ordering::SeqCst) {
                     canceled_by_user = true;
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap zombie
+                    terminate_child_process(&mut child);
                     break;
                 }
                 if start.elapsed() >= timeout {
                     timed_out = true;
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap zombie
+                    terminate_child_process(&mut child);
                     break;
                 }
                 std::thread::sleep(poll_interval);
@@ -144,19 +162,25 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     }
 
     // Read whatever output is available.
+    // IMPORTANT: when timeout/cancel happened, descendants may still hold stdout/stderr
+    // handles briefly; read_to_end can block for a long time. Skip blocking reads in that path.
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut stdout_buf);
-    }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_end(&mut stderr_buf);
+    if !timed_out && !canceled_by_user {
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_end(&mut stdout_buf);
+        }
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_end(&mut stderr_buf);
+        }
     }
 
     let exit_code = if timed_out || canceled_by_user {
         -1
     } else {
-        child.wait().ok().and_then(|s| s.code()).unwrap_or(-1)
+        observed_exit_code
+            .or_else(|| child.wait().ok().and_then(|s| s.code()))
+            .unwrap_or(-1)
     };
 
     let after = snapshot_files(&cwd);
