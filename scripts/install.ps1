@@ -1,9 +1,52 @@
 # GoldBot Windows Installer
 # Usage:
 #   irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex
+#   # For Windows PowerShell 5.1 TLS issues:
+#   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" -UseBasicParsing | iex
+#   # To also persist machine PATH, run installer in an Administrator PowerShell.
 #   irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps1" | iex; Install-GoldBot -Version v0.2.0
 
 $ErrorActionPreference = "Stop"
+
+function Enable-Tls12 {
+    try {
+        $current = [System.Net.ServicePointManager]::SecurityProtocol
+        if (($current -band [System.Net.SecurityProtocolType]::Tls12) -eq 0) {
+            [System.Net.ServicePointManager]::SecurityProtocol = $current -bor [System.Net.SecurityProtocolType]::Tls12
+        }
+    } catch {
+        # Ignore on platforms where ServicePointManager is not applicable.
+    }
+}
+
+function Invoke-WebRequestCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [int]$Retries = 3
+    )
+
+    $supportsUseBasicParsing = (Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        try {
+            if ($supportsUseBasicParsing) {
+                Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+            } else {
+                Invoke-WebRequest -Uri $Uri -OutFile $OutFile
+            }
+            return
+        } catch {
+            if ($attempt -ge $Retries) {
+                throw
+            }
+            Start-Sleep -Seconds $attempt
+        }
+    }
+}
+
+Enable-Tls12
 
 function Get-LatestTag {
     param(
@@ -21,22 +64,73 @@ function Get-LatestTag {
     }
 }
 
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Path-ContainsDir {
+    param(
+        [string]$PathValue,
+        [string]$Dir
+    )
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $false
+    }
+    $needle = $Dir.Trim().TrimEnd('\')
+    return ($PathValue -split ';' |
+        ForEach-Object { $_.Trim().TrimEnd('\') } |
+        Where-Object { $_ -ieq $needle } |
+        Select-Object -First 1) -ne $null
+}
+
 function Ensure-UserPathContains {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InstallDir
     )
-    $registryPath = "HKCU:\Environment"
-    $existingPath = (Get-ItemProperty -Path $registryPath -Name Path -ErrorAction SilentlyContinue).Path
+    $existingPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::User)
     if ([string]::IsNullOrWhiteSpace($existingPath)) {
         $newPath = $InstallDir
-    } elseif ($existingPath -notlike "*$InstallDir*") {
+    } elseif (-not (Path-ContainsDir -PathValue $existingPath -Dir $InstallDir)) {
         $newPath = "$existingPath;$InstallDir"
     } else {
         return
     }
-    Set-ItemProperty -Path $registryPath -Name Path -Value $newPath
+    [Environment]::SetEnvironmentVariable("Path", $newPath, [EnvironmentVariableTarget]::User)
     Write-Host "Added $InstallDir to user PATH. Restart terminal to take effect." -ForegroundColor Yellow
+}
+
+function Ensure-SystemPathContains {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InstallDir
+    )
+
+    if (-not (Test-IsAdministrator)) {
+        Write-Host "Skipped system PATH update (run PowerShell as Administrator to enable)." -ForegroundColor DarkYellow
+        return
+    }
+
+    try {
+        $existingPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
+        if ([string]::IsNullOrWhiteSpace($existingPath)) {
+            $newPath = $InstallDir
+        } elseif (-not (Path-ContainsDir -PathValue $existingPath -Dir $InstallDir)) {
+            $newPath = "$existingPath;$InstallDir"
+        } else {
+            return
+        }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, [EnvironmentVariableTarget]::Machine)
+        Write-Host "Added $InstallDir to system PATH (Machine)." -ForegroundColor Yellow
+    } catch {
+        Write-Host "Failed to update system PATH: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
 }
 
 function Install-GoldBot {
@@ -64,7 +158,7 @@ function Install-GoldBot {
 
     try {
         Write-Host "Downloading $asset ..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequestCompat -Uri $zipUrl -OutFile $zipPath
 
         Write-Host "Extracting archive..." -ForegroundColor Cyan
         Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
@@ -78,6 +172,7 @@ function Install-GoldBot {
         Copy-Item -Path $binary.FullName -Destination (Join-Path $InstallDir "goldbot.exe") -Force
         $env:PATH = "$InstallDir;$env:PATH"
         Ensure-UserPathContains -InstallDir $InstallDir
+        Ensure-SystemPathContains -InstallDir $InstallDir
 
         Write-Host "`nGoldBot installed: $InstallDir\goldbot.exe" -ForegroundColor Green
         Write-Host "Run 'goldbot' to start." -ForegroundColor Green
