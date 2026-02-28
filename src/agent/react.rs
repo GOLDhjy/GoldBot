@@ -8,9 +8,6 @@ use crate::{
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
-const AGENTS_SUMMARY_MAX_CHARS: usize = 2_000;
-const AGENTS_SUMMARY_MAX_LINES: usize = 28;
-
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
 You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below, Think before Act.
 
@@ -175,16 +172,15 @@ fn append_workspace_agents_md(out: &mut String, workspace: &std::path::Path) {
     }
 
     out.push_str("\n\n");
-    let summary = summarize_agents_md_for_prompt(content);
     out.push_str("Workspace-specific instructions are defined in a local `AGENTS.md` file.\n");
     out.push_str(&format!("AGENTS path: `{}`\n", path.display()));
     out.push_str(
-        "Below is an auto-extracted summary (headings only). For exact wording or \
-         detailed rules, read `AGENTS.md` directly before acting on project-specific tasks.\n\n",
+        "Below is the full file content. Follow these project-specific instructions before \
+         acting on repository tasks.\n\n",
     );
-    out.push_str("----- BEGIN AGENTS.md SUMMARY -----\n");
-    out.push_str(&summary);
-    out.push_str("\n----- END AGENTS.md SUMMARY -----");
+    out.push_str("----- BEGIN AGENTS.md -----\n");
+    out.push_str(content);
+    out.push_str("\n----- END AGENTS.md -----");
 }
 
 fn find_nearest_agents_md(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -214,60 +210,6 @@ fn nearest_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
         dir = p.parent();
     }
     None
-}
-
-fn summarize_agents_md_for_prompt(content: &str) -> String {
-    let mut lines = Vec::<String>::new();
-    let mut in_code_fence = false;
-
-    for raw in content.lines() {
-        let t = raw.trim();
-        if t.starts_with("```") {
-            in_code_fence = !in_code_fence;
-            continue;
-        }
-        if in_code_fence || t.is_empty() {
-            continue;
-        }
-
-        let keep = t.starts_with('#');
-        if !keep {
-            continue;
-        }
-
-        lines.push(collapse_ws(t));
-        if lines.len() >= AGENTS_SUMMARY_MAX_LINES {
-            break;
-        }
-    }
-
-    let mut summary = lines.join("\n");
-    truncate_chars_with_notice(
-        &mut summary,
-        AGENTS_SUMMARY_MAX_CHARS,
-        "\n[AGENTS.md summary truncated; read the file for full details]",
-    );
-    if summary.is_empty() {
-        "(AGENTS.md exists but produced an empty summary; read the file directly)".to_string()
-    } else {
-        summary
-    }
-}
-
-fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn truncate_chars_with_notice(buf: &mut String, max_chars: usize, notice: &str) {
-    let count = buf.chars().count();
-    if count <= max_chars {
-        return;
-    }
-    let notice_chars = notice.chars().count();
-    let keep = max_chars.saturating_sub(notice_chars).max(32);
-    let truncated: String = buf.chars().take(keep).collect();
-    *buf = truncated;
-    buf.push_str(notice);
 }
 
 /// Parse the raw text returned by the LLM into a thought and an ordered list of actions.
@@ -559,12 +501,25 @@ fn extract_last_tag_preserve_block(text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_assistant_context, build_system_prompt, parse_llm_response,
-        summarize_agents_md_for_prompt,
-    };
+    use super::{build_assistant_context, build_system_prompt, parse_llm_response};
     use crate::types::{AssistMode, LlmAction};
     use serde_json::json;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "goldbot-react-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn parse_final_prefers_last_closed_tag() {
@@ -729,43 +684,6 @@ mod tests {
         }
     }
     #[test]
-    fn agents_summary_keeps_headings_only_and_skips_code_fences() {
-        let md = "\
-# Repo Guide
-
-Intro prose paragraph should be skipped in summary mode.
-
-## Build
-- cargo check
-- cargo test
-
-```bash
-rm -rf target
-```
-
-### Style
-1. use rustfmt
-2. keep changes small
-";
-        let summary = summarize_agents_md_for_prompt(md);
-        assert!(summary.contains("# Repo Guide"));
-        assert!(summary.contains("## Build"));
-        assert!(summary.contains("### Style"));
-        assert!(!summary.contains("rm -rf target"));
-        assert!(!summary.contains("Intro prose paragraph"));
-        assert!(!summary.contains("- cargo check"));
-        assert!(!summary.contains("1. use rustfmt"));
-    }
-
-    #[test]
-    fn agents_summary_truncates_long_content_with_notice() {
-        let long_heading = format!("# {}\n", "x".repeat(5000));
-        let md = format!("# Title\n{long_heading}");
-        let summary = summarize_agents_md_for_prompt(&md);
-        assert!(summary.contains("# Title"));
-        assert!(summary.contains("summary truncated"));
-    }
-    #[test]
     fn build_assistant_context_off_does_not_include_plan_rules() {
         let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Off);
         assert!(!ctx.contains("Plan decision order (simplified):"));
@@ -787,5 +705,24 @@ rm -rf target
         assert!(!prompt.contains("<tool>plan</tool>"));
         assert!(!prompt.contains("Plan decision order (simplified):"));
         assert!(!prompt.contains("Todo progress panel (shows a live checklist in the terminal):"));
+    }
+
+    #[test]
+    fn build_assistant_context_includes_full_agents_runtime_prompt_ascii() {
+        let root = unique_temp_dir("agents-full-ascii");
+        fs::create_dir_all(&root).expect("should create workspace dir");
+        fs::write(
+            root.join("AGENTS.md"),
+            "# Repo Rules\n\n## Read local knowledge base first\nRead ./.AIDB/README.md before searching the whole repo.\n\n```md\nexample block\n```\n",
+        )
+        .expect("should write AGENTS");
+
+        let ctx = build_assistant_context(&root, AssistMode::Off);
+        assert!(ctx.contains("----- BEGIN AGENTS.md -----"));
+        assert!(ctx.contains("## Read local knowledge base first"));
+        assert!(ctx.contains("Read ./.AIDB/README.md before searching the whole repo."));
+        assert!(ctx.contains("```md"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
