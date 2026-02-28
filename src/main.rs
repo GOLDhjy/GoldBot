@@ -9,9 +9,9 @@ use std::{io, time::Duration};
 
 use agent::{
     executor::{
-        handle_llm_stream_delta, handle_llm_thinking_delta, maybe_flush_and_compact_before_call,
-        process_llm_result, refresh_llm_status, start_task, handle_shell_exec_result,
-        ShellExecResult,
+        ShellExecResult, handle_llm_stream_delta, handle_llm_thinking_delta,
+        handle_shell_exec_result, maybe_flush_and_compact_before_call, process_llm_result,
+        refresh_llm_status, start_task, sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_assistant_context, build_system_prompt},
@@ -32,7 +32,6 @@ use ui::ge::drain_ge_events;
 use ui::input::{handle_key, handle_paste};
 use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
 
-pub(crate) const MAX_MESSAGES_BEFORE_COMPACTION: usize = 48;
 pub(crate) const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
 pub(crate) const MAX_COMPACTION_SUMMARY_ITEMS: usize = 8;
 
@@ -120,6 +119,8 @@ pub(crate) struct App {
     /// 当前活跃的 SubAgent 句柄
     pub sub_agent_handles: Vec<SubAgentHandle>,
     pub total_usage: crate::agent::provider::Usage,
+    pub prompt_token_scale: f32,
+    pub recent_completion_tokens_ema: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +283,8 @@ impl App {
             sub_agent_id_gen: SubAgentIdGen::new(),
             sub_agent_handles: Vec::new(),
             total_usage: Default::default(),
+            prompt_token_scale: 1.0,
+            recent_completion_tokens_ema: 0,
         }
     }
 
@@ -346,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
     };
     screen.workspace = app.workspace.to_string_lossy().replace('\\', "/");
     screen.assist_mode = app.assist_mode;
+    sync_context_budget(&app, &mut screen);
 
     // Display discovered skills below the banner.
     let skill_names: Vec<String> = app.skills.iter().map(|s| s.name.clone()).collect();
@@ -580,10 +584,7 @@ fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
     }
 }
 
-async fn handle_terminal_events(
-    app: &mut App,
-    screen: &mut Screen,
-) -> anyhow::Result<()> {
+async fn handle_terminal_events(app: &mut App, screen: &mut Screen) -> anyhow::Result<()> {
     if !event::poll(Duration::from_millis(50))? {
         return Ok(());
     }

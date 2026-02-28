@@ -1,6 +1,8 @@
 use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
 
-use crate::agent::executor::{execute_command, finish, push_tool_result_to_llm};
+use crate::agent::executor::{
+    execute_command, finish, push_tool_result_to_llm, sync_context_budget,
+};
 use crate::agent::provider::BACKEND_PRESETS;
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
@@ -253,6 +255,7 @@ fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             app.messages.push(Message::user(format!(
                 "User rejected the pending risky command and added instruction:\n{note}\nPending command was:\n{pending_cmd}"
             )));
+            sync_context_budget(app, screen);
             let ev = Event::Thinking {
                 text: format!("User note: {note}"),
             };
@@ -808,8 +811,8 @@ fn interrupt_llm_chat_loop(app: &mut App, screen: &mut Screen) {
     } else {
         "LLM loop interrupted. Type a message and press Enter to interject."
     }
-        .dark_yellow()
-        .to_string();
+    .dark_yellow()
+    .to_string();
     if canceling_shell {
         screen.emit(&[String::from(
             "  Interrupt requested. Cancelling shell command...",
@@ -832,6 +835,7 @@ fn submit_interjection_input(app: &mut App, screen: &mut Screen, task: &str) {
     app.final_summary = None;
     let wrapped = build_interjection_user_message(task);
     app.messages.push(Message::user(wrapped));
+    sync_context_budget(app, screen);
     let ev = Event::UserTask {
         text: task.to_string(),
     };
@@ -1396,6 +1400,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             app.last_task_elapsed = None;
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
+            sync_context_budget(app, screen);
             screen.status.clear();
             screen.clear_screen();
         }
@@ -1411,6 +1416,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
                 let kept: Vec<_> = app.messages[keep_from..].to_vec();
                 app.messages.truncate(2);
                 app.messages.extend(kept);
+                sync_context_budget(app, screen);
                 screen.emit(&[format!(
                     "  /compact: 已保留最近 {} 条消息（压缩前共 {} 条）。",
                     keep, total
@@ -1647,8 +1653,11 @@ fn select_model_item(app: &mut App, screen: &mut Screen) {
                 "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
                 _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
             };
+            app.prompt_token_scale = 1.0;
+            app.recent_completion_tokens_ema = 0;
             // 持久化到 ~/.goldbot/.env
             persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());
+            sync_context_budget(app, screen);
             cancel_model_picker(app, screen);
             clear_input_buffer(app, screen);
             let mut lines = vec![format!(

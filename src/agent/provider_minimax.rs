@@ -248,13 +248,27 @@ fn drain_sse_frames<F, G>(
         if let Some(pos) = pending.find("\n\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 2);
-            handle_sse_frame(&frame, merged, reasoning_seen, final_usage, on_delta, on_thinking_delta);
+            handle_sse_frame(
+                &frame,
+                merged,
+                reasoning_seen,
+                final_usage,
+                on_delta,
+                on_thinking_delta,
+            );
             continue;
         }
         if let Some(pos) = pending.find("\r\n\r\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 4);
-            handle_sse_frame(&frame, merged, reasoning_seen, final_usage, on_delta, on_thinking_delta);
+            handle_sse_frame(
+                &frame,
+                merged,
+                reasoning_seen,
+                final_usage,
+                on_delta,
+                on_thinking_delta,
+            );
             continue;
         }
         break;

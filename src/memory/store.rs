@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_migrates_legacy_long_term_file() {
+    fn build_memory_message_migrates_legacy_long_term_file() {
         let base = unique_base();
         fs::create_dir_all(&base).expect("mkdir");
         fs::write(
@@ -747,7 +747,9 @@ mod tests {
         .expect("write legacy");
 
         let store = MemoryStore { base: base.clone() };
-        let prompt = store.build_system_prompt("BASE");
+        let prompt = store
+            .build_memory_message()
+            .expect("memory message should be present");
 
         let content = fs::read_to_string(base.join("MEMORY.md")).expect("read migrated");
         assert!(content.starts_with("# Long-term Memory"));
@@ -755,6 +757,7 @@ mod tests {
         assert!(content.contains(LT_SECTION_MEM_ZH));
         assert!(content.contains("- 以后默认使用中文回答。"));
         assert!(content.contains("- 默认展示 compact 视图。"));
+        assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("### Long-term Memory"));
         assert!(prompt.contains("- 以后默认使用中文回答。"));
 

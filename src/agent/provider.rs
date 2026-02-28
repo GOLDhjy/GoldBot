@@ -73,9 +73,16 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ("GLM", &["GLM-4.7", "glm-5"]),
-    ("Kimi", &["kimi-for-coding", "kimi-k2.5", "kimi-k2-thinking"]),
+    (
+        "Kimi",
+        &["kimi-for-coding", "kimi-k2.5", "kimi-k2-thinking"],
+    ),
     ("MiniMax", &["MiniMax-M2.5", "MiniMax-M2.1"]),
 ];
+
+const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
+const DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
+const DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS: u32 = 204_800;
 
 fn default_kimi_model() -> String {
     let explicit_base = std::env::var("KIMI_BASE_URL").unwrap_or_default();
@@ -106,7 +113,9 @@ pub(crate) enum LlmBackend {
 
 impl LlmBackend {
     pub(crate) fn from_env() -> Self {
-        let provider = std::env::var("LLM_PROVIDER").unwrap_or_default().to_lowercase();
+        let provider = std::env::var("LLM_PROVIDER")
+            .unwrap_or_default()
+            .to_lowercase();
 
         match provider.as_str() {
             "kimi" => {
@@ -114,7 +123,8 @@ impl LlmBackend {
                 LlmBackend::Kimi(model)
             }
             "minimax" => {
-                let model = std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+                let model =
+                    std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
                 LlmBackend::MiniMax(model)
             }
             "glm" => {
@@ -124,13 +134,18 @@ impl LlmBackend {
             _ => {
                 // 自动检测优先级：Kimi > MiniMax > GLM
                 if std::env::var("KIMI_API_KEY").is_ok() {
-                    let model = std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
+                    let model =
+                        std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
                     LlmBackend::Kimi(model)
-                } else if std::env::var("MINIMAX_API_KEY").is_ok() && std::env::var("BIGMODEL_API_KEY").is_err() {
-                    let model = std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+                } else if std::env::var("MINIMAX_API_KEY").is_ok()
+                    && std::env::var("BIGMODEL_API_KEY").is_err()
+                {
+                    let model = std::env::var("MINIMAX_MODEL")
+                        .unwrap_or_else(|_| "MiniMax-M2.5".to_string());
                     LlmBackend::MiniMax(model)
                 } else {
-                    let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
+                    let model =
+                        std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
                     LlmBackend::Glm(model)
                 }
             }
@@ -151,6 +166,20 @@ impl LlmBackend {
         match self {
             Self::Glm(m) | Self::Kimi(m) | Self::MiniMax(m) => m,
         }
+    }
+
+    pub(crate) fn context_window_tokens(&self) -> u32 {
+        env_u32("GOLDBOT_CONTEXT_WINDOW_TOKENS")
+            .or_else(|| match self {
+                Self::Glm(_) => env_u32("BIGMODEL_CONTEXT_WINDOW_TOKENS"),
+                Self::Kimi(_) => env_u32("KIMI_CONTEXT_WINDOW_TOKENS"),
+                Self::MiniMax(_) => env_u32("MINIMAX_CONTEXT_WINDOW_TOKENS"),
+            })
+            .unwrap_or_else(|| match self {
+                Self::Glm(_) => DEFAULT_GLM_CONTEXT_WINDOW_TOKENS,
+                Self::Kimi(_) => DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS,
+                Self::MiniMax(_) => DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS,
+            })
     }
 
     /// 调用 LLM 流式接口，对外隐藏底层 provider 差异。
@@ -225,8 +254,7 @@ impl LlmBackend {
                 };
                 (
                     model.clone(),
-                    std::env::var("KIMI_BASE_URL")
-                        .unwrap_or_else(|_| default_base.to_string()),
+                    std::env::var("KIMI_BASE_URL").unwrap_or_else(|_| default_base.to_string()),
                 )
             }
             Self::MiniMax(model) => (
@@ -250,4 +278,8 @@ impl LlmBackend {
     pub(crate) fn api_key_missing(&self) -> bool {
         std::env::var(self.required_key_name()).is_err()
     }
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.trim().parse::<u32>().ok()
 }

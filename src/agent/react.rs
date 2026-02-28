@@ -1,4 +1,4 @@
-﻿use crate::{
+use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
@@ -789,4 +789,3 @@ rm -rf target
         assert!(!prompt.contains("Todo progress panel (shows a live checklist in the terminal):"));
     }
 }
-

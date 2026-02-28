@@ -23,6 +23,7 @@ pub(crate) struct Screen {
     /// When true, all TUI rendering is suppressed (used with -p headless mode).
     pub headless: bool,
     pub status: String,
+    pub status_right: String,
     pub input: String,
     pub task_lines: usize,
     pub task_rendered: Vec<String>,
@@ -67,6 +68,7 @@ impl Screen {
             stdout: io::stdout(),
             headless: true,
             status: String::new(),
+            status_right: String::new(),
             input: String::new(),
             task_lines: 0,
             task_rendered: Vec::new(),
@@ -96,6 +98,7 @@ impl Screen {
             stdout: io::stdout(),
             headless: false,
             status: String::new(),
+            status_right: String::new(),
             input: String::new(),
             task_lines: 0,
             task_rendered: Vec::new(),
@@ -265,10 +268,14 @@ impl Screen {
             } else {
                 self.status.clone()
             };
-            let status_budget = cols.saturating_sub(rendered_text_width("  "));
             let max_status_lines = if self.is_running { 3 } else { 1 };
-            let status_lines =
-                split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
+            let status_budget = cols.saturating_sub(rendered_text_width("  "));
+            let status_lines = compose_status_lines(
+                &status_display,
+                &self.status_right,
+                status_budget,
+                max_status_lines,
+            );
             let status_rows = if status_lines.is_empty() {
                 1
             } else {
@@ -346,8 +353,7 @@ impl Screen {
             // 光标归位
             if self.input_focused {
                 let (cursor_row, cursor_col) = self.cursor_row_col();
-                let lines_below_cursor =
-                    (input_row_count - 1 - cursor_row) + 1; // +1 for hint line
+                let lines_below_cursor = (input_row_count - 1 - cursor_row) + 1; // +1 for hint line
                 let col_offset = if cursor_row == 0 {
                     prompt_width + cursor_col
                 } else {
@@ -606,9 +612,14 @@ impl Screen {
             self.status.clone()
         };
 
-        let max_status_lines = if self.is_running { 3 } else { 1 };
         let status_budget = cols.saturating_sub(rendered_text_width("  "));
-        let new_lines = split_tail_lines_by_width(&status_display, status_budget, max_status_lines);
+        let max_status_lines = if self.is_running { 3 } else { 1 };
+        let new_lines = compose_status_lines(
+            &status_display,
+            &self.status_right,
+            status_budget,
+            max_status_lines,
+        );
         let new_rows = new_lines.len().max(1);
 
         // 行数变了需要全刷（否则会错位）
@@ -1059,6 +1070,45 @@ pub(crate) fn split_tail_lines_by_width(
         *first = fit_single_line_tail(&format!("{}{}", ellipsis, plain), max_width);
     }
     tail
+}
+
+fn compose_status_lines(
+    status_left: &str,
+    status_right: &str,
+    max_width: usize,
+    max_lines: usize,
+) -> Vec<String> {
+    let mut lines = split_tail_lines_by_width(status_left, max_width, max_lines);
+    let right_plain = strip_ansi(status_right);
+    if right_plain.is_empty() || max_width == 0 {
+        return lines;
+    }
+
+    let gap = "  ";
+    let gap_width = rendered_text_width(gap);
+    let right_width = rendered_text_width(&right_plain);
+    if right_width >= max_width {
+        return vec![fit_single_line_tail(status_right, max_width)];
+    }
+
+    let last = lines.pop().unwrap_or_default();
+    let left_budget = max_width.saturating_sub(right_width + gap_width);
+    let left = if left_budget == 0 {
+        String::new()
+    } else {
+        fit_single_line_tail(&last, left_budget)
+    };
+    let left_width = rendered_text_width(&strip_ansi(&left));
+    let padding = max_width
+        .saturating_sub(left_width)
+        .saturating_sub(right_width);
+
+    let mut combined = String::new();
+    combined.push_str(&left);
+    combined.push_str(&" ".repeat(padding));
+    combined.push_str(status_right);
+    lines.push(combined);
+    lines
 }
 
 /// Format discovered skills as a single styled line for `Screen::emit()`.

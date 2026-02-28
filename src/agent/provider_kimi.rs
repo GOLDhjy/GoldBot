@@ -375,12 +375,14 @@ mod tests {
     fn handle_sse_frame_routes_reasoning_to_callback() {
         let frame = r#"data: {"choices":[{"delta":{"content":null,"reasoning":"step 1"}}]}"#;
         let mut merged = String::new();
+        let mut usage = Usage::default();
         let mut content_parts = Vec::new();
         let mut thinking_parts = Vec::new();
 
         handle_sse_frame(
             frame,
             &mut merged,
+            &mut usage,
             &mut |s: &str| content_parts.push(s.to_string()),
             &mut |s: &str| thinking_parts.push(s.to_string()),
         );
@@ -394,12 +396,14 @@ mod tests {
     fn handle_sse_frame_routes_content_to_merged() {
         let frame = r#"data: {"choices":[{"delta":{"content":"hello","reasoning":null}}]}"#;
         let mut merged = String::new();
+        let mut usage = Usage::default();
         let mut content_parts = Vec::new();
         let mut thinking_parts = Vec::new();
 
         handle_sse_frame(
             frame,
             &mut merged,
+            &mut usage,
             &mut |s: &str| content_parts.push(s.to_string()),
             &mut |s: &str| thinking_parts.push(s.to_string()),
         );
@@ -424,7 +428,8 @@ mod tests {
 
     #[test]
     fn non_stream_response_parses_correctly() {
-        let json = r#"{"choices":[{"message":{"content":"answer","reasoning_content":"thinking"}}]}"#;
+        let json =
+            r#"{"choices":[{"message":{"content":"answer","reasoning_content":"thinking"}}]}"#;
         let resp: ApiResponse = serde_json::from_str(json).unwrap();
         let choice = &resp.choices[0];
         assert_eq!(choice.message.content.as_deref(), Some("answer"));
@@ -440,7 +445,10 @@ mod tests {
             normalize_model_for_endpoint("kimi-k2.5", true),
             "kimi-for-coding"
         );
-        assert_eq!(normalize_model_for_endpoint("k2p5", true), "kimi-for-coding");
+        assert_eq!(
+            normalize_model_for_endpoint("k2p5", true),
+            "kimi-for-coding"
+        );
         assert_eq!(
             normalize_model_for_endpoint("kimi-k2-thinking", true),
             "kimi-k2-thinking"

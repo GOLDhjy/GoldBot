@@ -102,7 +102,10 @@ pub fn search_files(pattern: &str, path: &str) -> anyhow::Result<SearchResult> {
                     None => return WalkState::Continue,
                 };
 
-                let rel = entry.path().strip_prefix(root.as_ref()).unwrap_or(entry.path());
+                let rel = entry
+                    .path()
+                    .strip_prefix(root.as_ref())
+                    .unwrap_or(entry.path());
                 let rel_str = rel.to_string_lossy().replace(path::MAIN_SEPARATOR, "/");
 
                 let mut local_lines = String::new();
@@ -126,7 +129,12 @@ pub fn search_files(pattern: &str, path: &str) -> anyhow::Result<SearchResult> {
                     } else {
                         line.to_string()
                     };
-                    local_lines.push_str(&format!("{}:{}: {}\n", rel_str, lineno + 1, line_display));
+                    local_lines.push_str(&format!(
+                        "{}:{}: {}\n",
+                        rel_str,
+                        lineno + 1,
+                        line_display
+                    ));
                 }
 
                 if !file_had_match {
@@ -161,7 +169,11 @@ pub fn search_files(pattern: &str, path: &str) -> anyhow::Result<SearchResult> {
         output = "(no matches found)".to_string();
     }
 
-    Ok(SearchResult { output, match_count, file_count })
+    Ok(SearchResult {
+        output,
+        match_count,
+        file_count,
+    })
 }
 
 /// 单文件搜索（search_root 本身是文件时）
@@ -174,7 +186,10 @@ fn search_single_file(path: &Path, re: &Regex) -> SearchResult {
         };
     };
 
-    let name = path.file_name().map(PathBuf::from).unwrap_or_else(|| path.to_path_buf());
+    let name = path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf());
     let rel_str = name.to_string_lossy().replace(path::MAIN_SEPARATOR, "/");
     let mut output = String::new();
     let mut match_count = 0usize;
@@ -226,7 +241,10 @@ fn should_skip_entry(path: &Path, root: &Path) -> bool {
 fn read_text(path: &Path) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let mut buf = Vec::new();
-    file.by_ref().take(MAX_FILE_BYTES).read_to_end(&mut buf).ok()?;
+    file.by_ref()
+        .take(MAX_FILE_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
     if buf.contains(&0u8) {
         return None;
     }

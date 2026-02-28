@@ -11,10 +11,21 @@ use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
 };
 use crate::ui::screen::Screen;
-use crate::{
-    App, KEEP_RECENT_MESSAGES_AFTER_COMPACTION, MAX_COMPACTION_SUMMARY_ITEMS,
-    MAX_MESSAGES_BEFORE_COMPACTION,
-};
+use crate::{App, KEEP_RECENT_MESSAGES_AFTER_COMPACTION, MAX_COMPACTION_SUMMARY_ITEMS};
+
+const MIN_RECENT_MESSAGES_AFTER_COMPACTION: usize = 6;
+const MIN_COMPACT_RESERVE_TOKENS: u32 = 8_192;
+const MAX_COMPACT_RESERVE_TOKENS: u32 = 32_768;
+const COMPLETION_RESERVE_MULTIPLIER: u32 = 3;
+
+#[derive(Debug, Clone, Copy)]
+struct ContextBudget {
+    context_window_tokens: u32,
+    used_prompt_tokens: u32,
+    hard_left_tokens: u32,
+    compact_reserve_tokens: u32,
+    should_compact: bool,
+}
 
 #[derive(Debug)]
 pub(crate) enum ShellExecResult {
@@ -72,6 +83,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.total_usage = Default::default();
     screen.todo_items.clear();
     app.messages.push(Message::user(task.clone()));
+    sync_context_budget(app, screen);
 
     // TUI 显示用 override（如命令展开时只显示占位符），否则显示完整 task
     let display = app.task_display_override.take().unwrap_or(task);
@@ -115,6 +127,8 @@ pub(crate) fn process_llm_result(
             return;
         }
     };
+    update_prompt_token_scale(app, usage.prompt_tokens);
+    update_completion_token_ema(app, usage.completion_tokens);
     app.total_usage.prompt_tokens += usage.prompt_tokens;
     app.total_usage.completion_tokens += usage.completion_tokens;
     app.total_usage.total_tokens += usage.total_tokens;
@@ -133,6 +147,7 @@ pub(crate) fn process_llm_result(
             screen.status = format!("↻ Retrying invalid response format: {e}")
                 .grey()
                 .to_string();
+            sync_context_budget(app, screen);
             screen.refresh();
             app.needs_agent_executor = true;
             return;
@@ -147,6 +162,7 @@ pub(crate) fn process_llm_result(
         app.task_events.push(ev);
     }
     app.messages.push(Message::assistant(response));
+    sync_context_budget(app, screen);
 
     // Execute actions in document order.
     // - Plan: render immediately (unless it's an echo after confirmation), push [plan shown].
@@ -685,7 +701,11 @@ pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, command
     });
 }
 
-pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, result: ShellExecResult) {
+pub(crate) fn handle_shell_exec_result(
+    app: &mut App,
+    screen: &mut Screen,
+    result: ShellExecResult,
+) {
     match result {
         ShellExecResult::Command { result } => match result {
             Ok(out) => {
@@ -752,6 +772,7 @@ pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, resul
     }
 
     screen.status.clear();
+    sync_context_budget(app, screen);
     app.needs_agent_executor = true;
     screen.refresh();
 }
@@ -1083,6 +1104,7 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
         format!("Skill '{}' not found.", name)
     };
     app.messages.push(Message::user(msg));
+    sync_context_budget(app, screen);
 }
 
 pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json::Value) {
@@ -1131,7 +1153,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
             app.total_usage.completion_tokens,
         ));
     }
-    
+
     app.final_summary = Some(summary.clone());
     app.task_collapsed = true;
 
@@ -1167,6 +1189,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     if app.headless {
         app.quit = true;
     }
+    sync_context_budget(app, screen);
     screen.refresh();
 }
 
@@ -1255,6 +1278,7 @@ pub(crate) fn refresh_llm_status(app: &mut App, screen: &mut Screen) {
     };
     let started_at = app.task_started_at.or(app.llm_call_started_at);
     screen.status = format_llm_status_with_elapsed(base, started_at);
+    sync_context_budget(app, screen);
     screen.refresh_status_only();
 }
 
@@ -1343,26 +1367,171 @@ fn trim_left_to_max_bytes(s: &mut String, max_bytes: usize) {
     s.drain(..cut);
 }
 
+pub(crate) fn sync_context_budget(app: &App, screen: &mut Screen) {
+    let budget = current_context_budget(app);
+    let label = format!(
+        "{} used / {} left",
+        format_token_count_short(budget.used_prompt_tokens),
+        format_token_count_short(budget.hard_left_tokens)
+    );
+    screen.status_right = if budget.should_compact {
+        label.dark_yellow().to_string()
+    } else {
+        label.grey().to_string()
+    };
+}
+
+fn current_context_budget(app: &App) -> ContextBudget {
+    let estimated_prompt_tokens = estimate_prompt_tokens(&app.messages, app.prompt_token_scale);
+    let context_window_tokens = app.backend.context_window_tokens();
+    let hard_left_tokens = context_window_tokens.saturating_sub(estimated_prompt_tokens);
+    let compact_reserve_tokens =
+        dynamic_compact_reserve_tokens(app.recent_completion_tokens_ema, context_window_tokens);
+    ContextBudget {
+        context_window_tokens,
+        used_prompt_tokens: estimated_prompt_tokens,
+        hard_left_tokens,
+        compact_reserve_tokens,
+        should_compact: hard_left_tokens <= compact_reserve_tokens,
+    }
+}
+
+fn update_prompt_token_scale(app: &mut App, prompt_tokens: u32) {
+    if prompt_tokens == 0 {
+        return;
+    }
+
+    let estimated = estimate_prompt_tokens(&app.messages, 1.0);
+    if estimated == 0 {
+        return;
+    }
+
+    let observed = (prompt_tokens as f32 / estimated as f32).clamp(0.5, 4.0);
+    app.prompt_token_scale = if (app.prompt_token_scale - 1.0).abs() < f32::EPSILON {
+        observed
+    } else {
+        (app.prompt_token_scale * 0.7) + (observed * 0.3)
+    };
+}
+
+fn update_completion_token_ema(app: &mut App, completion_tokens: u32) {
+    if completion_tokens == 0 {
+        return;
+    }
+
+    app.recent_completion_tokens_ema = if app.recent_completion_tokens_ema == 0 {
+        completion_tokens
+    } else {
+        ((app.recent_completion_tokens_ema * 3) + completion_tokens) / 4
+    };
+}
+
+fn dynamic_compact_reserve_tokens(
+    recent_completion_tokens_ema: u32,
+    context_window_tokens: u32,
+) -> u32 {
+    let dynamic = recent_completion_tokens_ema.saturating_mul(COMPLETION_RESERVE_MULTIPLIER);
+    let reserve = dynamic.max(MIN_COMPACT_RESERVE_TOKENS);
+    let max_reserve =
+        MAX_COMPACT_RESERVE_TOKENS.min(context_window_tokens.saturating_div(4).max(1));
+    reserve
+        .min(max_reserve.max(MIN_COMPACT_RESERVE_TOKENS.min(context_window_tokens)))
+        .min(context_window_tokens.saturating_sub(1_024).max(1))
+}
+
+fn estimate_prompt_tokens(messages: &[Message], scale: f32) -> u32 {
+    let raw = estimate_prompt_tokens_raw(messages);
+    ((raw as f32) * scale.clamp(0.5, 4.0)).ceil() as u32
+}
+
+fn estimate_prompt_tokens_raw(messages: &[Message]) -> u32 {
+    let mut total = 3u32;
+    for msg in messages {
+        total = total
+            .saturating_add(estimate_text_tokens(&msg.content))
+            .saturating_add(8);
+    }
+    total
+}
+
+fn estimate_text_tokens(text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+
+    let bytes = text.len() as u32;
+    let non_ws_chars = text.chars().filter(|c| !c.is_whitespace()).count() as u32;
+    let lines = text.lines().count() as u32;
+
+    bytes
+        .div_ceil(4)
+        .max(non_ws_chars.div_ceil(2))
+        .saturating_add(lines.min(32))
+}
+
+fn format_token_count_short(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        return format!("{:.1}M", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 10_000 {
+        return format!("{:.0}k", tokens as f64 / 1_000.0);
+    }
+    if tokens >= 1_000 {
+        return format!("{:.1}k", tokens as f64 / 1_000.0);
+    }
+    tokens.to_string()
+}
+
 pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
-    let total_chars: usize = app.messages.iter().map(|m| m.content.chars().count()).sum();
-    let should_compact = app.messages.len() > MAX_MESSAGES_BEFORE_COMPACTION || total_chars > 30000;
-
-    if !should_compact {
-        return;
-    }
-    if app.messages.len() <= KEEP_RECENT_MESSAGES_AFTER_COMPACTION + 1 {
+    let budget = current_context_budget(app);
+    if !budget.should_compact {
         return;
     }
 
-    let split_at = app
-        .messages
-        .len()
-        .saturating_sub(KEEP_RECENT_MESSAGES_AFTER_COMPACTION);
-    if split_at <= 1 {
+    let prefix_end = app.messages.len().min(2);
+    if app.messages.len() <= prefix_end + 1 {
         return;
     }
 
-    let older: Vec<Message> = app.messages[1..split_at].to_vec();
+    let total = app.messages.len();
+    let preferred_recent =
+        KEEP_RECENT_MESSAGES_AFTER_COMPACTION.min(total.saturating_sub(prefix_end));
+    let min_recent = MIN_RECENT_MESSAGES_AFTER_COMPACTION.min(total.saturating_sub(prefix_end));
+    let max_split_at = total.saturating_sub(min_recent.max(1));
+    if max_split_at <= prefix_end {
+        return;
+    }
+
+    let mut chosen_split_at = total.saturating_sub(preferred_recent);
+    if chosen_split_at <= prefix_end {
+        chosen_split_at = prefix_end + 1;
+    }
+    chosen_split_at = chosen_split_at.min(max_split_at);
+
+    let compacted = loop {
+        let older = &app.messages[prefix_end..chosen_split_at];
+        if older.is_empty() {
+            return;
+        }
+
+        let summary = summarize_for_compaction(older);
+        let mut candidate = app.messages[..prefix_end].to_vec();
+        if !summary.is_empty() {
+            candidate.push(Message::user(format!("[Context compacted]\n{summary}")));
+        }
+        candidate.extend_from_slice(&app.messages[chosen_split_at..]);
+
+        let candidate_tokens = estimate_prompt_tokens(&candidate, app.prompt_token_scale);
+        if candidate_tokens.saturating_add(budget.compact_reserve_tokens)
+            <= budget.context_window_tokens
+            || chosen_split_at >= max_split_at
+        {
+            break candidate;
+        }
+        chosen_split_at += 1;
+    };
+
+    let older: Vec<Message> = app.messages[prefix_end..chosen_split_at].to_vec();
     let store = MemoryStore::new();
     let mut flushed = 0usize;
     let mut last_user_task: Option<String> = None;
@@ -1395,15 +1564,8 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
         }
     }
 
-    let summary = summarize_for_compaction(&older);
-    // Preserve system + fixed assistant context; ephemeral memory is already gone by now.
-    let prefix_end = app.messages.len().min(2);
-    let mut compacted = app.messages[..prefix_end].to_vec();
-    if !summary.is_empty() {
-        compacted.push(Message::user(format!("[Context compacted]\n{summary}")));
-    }
-    compacted.extend_from_slice(&app.messages[split_at..]);
     app.messages = compacted;
+    sync_context_budget(app, screen);
 
     screen.status = if flushed > 0 {
         format!("🧠 pre-compaction flush: {flushed} long-term notes")
@@ -1474,7 +1636,11 @@ fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_utf8_prefix;
+    use super::{
+        COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS, dynamic_compact_reserve_tokens,
+        estimate_prompt_tokens_raw, format_token_count_short, truncate_utf8_prefix,
+    };
+    use crate::agent::provider::Message;
     use crate::types::{TodoItem, TodoStatus};
 
     #[test]
@@ -1511,5 +1677,37 @@ mod tests {
         assert!(s.starts_with(out));
         assert!(out.is_char_boundary(out.len()));
         assert!(out.len() <= 60);
+    }
+
+    #[test]
+    fn estimate_prompt_tokens_adds_message_overhead() {
+        let messages = vec![
+            Message::system("BASE"),
+            Message::user("整理当前目录里的大文件"),
+        ];
+        assert!(estimate_prompt_tokens_raw(&messages) > 16);
+    }
+
+    #[test]
+    fn format_token_count_short_uses_compact_suffixes() {
+        assert_eq!(format_token_count_short(980), "980");
+        assert_eq!(format_token_count_short(1_250), "1.2k");
+        assert_eq!(format_token_count_short(24_000), "24k");
+    }
+
+    #[test]
+    fn dynamic_compact_reserve_starts_from_small_floor() {
+        assert_eq!(
+            dynamic_compact_reserve_tokens(0, 200_000),
+            MIN_COMPACT_RESERVE_TOKENS
+        );
+    }
+
+    #[test]
+    fn dynamic_compact_reserve_grows_with_recent_completion_usage() {
+        assert_eq!(
+            dynamic_compact_reserve_tokens(10_000, 200_000),
+            10_000 * COMPLETION_RESERVE_MULTIPLIER
+        );
     }
 }
