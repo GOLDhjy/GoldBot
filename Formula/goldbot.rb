@@ -1,21 +1,21 @@
 class Goldbot < Formula
   desc "GoldBot TUI Automation Agent"
   homepage "https://github.com/GOLDhjy/GoldBot"
-  version "0.8.11"
+  version "0.8.12"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.11/goldbot-v0.8.11-macos-aarch64.tar.gz"
-      sha256 "cc0e4b7c1f4e0aa74f8d927c583731c0453fb4ffe021505ee44e8a321f04c247"
+      url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.12/goldbot-v0.8.12-macos-aarch64.tar.gz"
+      sha256 "c7579e4cb55a984f4923aaeacdaa61cd46411f723d9a78e196198d31d7ff6a4b"
     else
-      url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.11/goldbot-v0.8.11-macos-x86_64.tar.gz"
-      sha256 "a18fea1a655a4e80dd529cd6e7f9f182f2a52e563c9fc00f325b94f85f5d44f0"
+      url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.12/goldbot-v0.8.12-macos-x86_64.tar.gz"
+      sha256 "05af35b638e9755876abc690d58cef6320ae35ab555a5064ced603df4b6f9646"
     end
   end
 
   on_linux do
-    url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.11/goldbot-v0.8.11-linux-x86_64.tar.gz"
-    sha256 "705ca2753214f0d27acfb694e27aa944df1bde633f88d2805cf66bf6b1872b0d"
+    url "https://github.com/GOLDhjy/GoldBot/releases/download/v0.8.12/goldbot-v0.8.12-linux-x86_64.tar.gz"
+    sha256 "3e93f6a05aa79083817e17644e61f7efbcf33c95e2522b28568757c54e792ab3"
   end
 
   def install
