@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{Message, Role};
+use crate::agent::provider::{Message, Role, Usage};
 
 #[derive(Clone, Copy)]
 pub(crate) struct MiniMaxProvider;
@@ -32,6 +32,7 @@ struct ApiRequest {
 #[derive(Deserialize)]
 struct ApiResponse {
     choices: Vec<ApiChoice>,
+    usage: Option<UsageParam>,
 }
 
 #[derive(Deserialize)]
@@ -53,7 +54,9 @@ struct ReasoningDetail {
 
 #[derive(Deserialize)]
 struct StreamEvent {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    usage: Option<UsageParam>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +72,23 @@ struct StreamDelta {
     reasoning_details: Vec<ReasoningDetail>,
 }
 
+#[derive(Deserialize, Clone)]
+struct UsageParam {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+}
+
+impl UsageParam {
+    fn to_usage(&self) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens.unwrap_or(0),
+            completion_tokens: self.completion_tokens.unwrap_or(0),
+            total_tokens: self.total_tokens.unwrap_or(0),
+        }
+    }
+}
+
 // ── Implementation ────────────────────────────────────────────────────────────
 
 impl MiniMaxProvider {
@@ -80,7 +100,7 @@ impl MiniMaxProvider {
         show_thinking: bool,
         mut on_delta: F,
         mut on_thinking_delta: G,
-    ) -> Result<String>
+    ) -> Result<(String, Usage)>
     where
         F: FnMut(&str),
         G: FnMut(&str),
@@ -116,6 +136,7 @@ impl MiniMaxProvider {
         let mut pending = String::new();
         // reasoning_details 是累积字符串，记录已向上层发送的字节数，避免重复推送
         let mut reasoning_seen = 0usize;
+        let mut final_usage = Usage::default();
 
         while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
             pending.push_str(&String::from_utf8_lossy(&chunk));
@@ -123,6 +144,7 @@ impl MiniMaxProvider {
                 &mut pending,
                 &mut merged,
                 &mut reasoning_seen,
+                &mut final_usage,
                 &mut on_delta,
                 &mut on_thinking_delta,
             );
@@ -131,6 +153,7 @@ impl MiniMaxProvider {
             &mut pending,
             &mut merged,
             &mut reasoning_seen,
+            &mut final_usage,
             &mut on_delta,
             &mut on_thinking_delta,
         );
@@ -138,7 +161,7 @@ impl MiniMaxProvider {
         if merged.is_empty() {
             return Err(anyhow!("API returned empty content"));
         }
-        Ok(merged)
+        Ok((merged, final_usage))
     }
 }
 
@@ -169,7 +192,7 @@ fn build_request(
     let body = ApiRequest {
         model,
         messages: api_messages,
-        max_tokens: Some(4096),
+        max_tokens: None,
         stream: if stream { Some(true) } else { None },
         reasoning_split: if show_thinking { Some(true) } else { None },
         temperature: Some(1.0),
@@ -178,13 +201,14 @@ fn build_request(
     Ok((base_url, api_key, body))
 }
 
-async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
+async fn parse_non_stream_response(resp: reqwest::Response) -> Result<(String, Usage)> {
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(anyhow!("API error {status}: {text}"));
     }
     let parsed: ApiResponse = resp.json().await.context("failed to parse API response")?;
+    let usage = parsed.usage.map(|u| u.to_usage()).unwrap_or_default();
     let choice = parsed
         .choices
         .into_iter()
@@ -206,13 +230,14 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
     if text.is_empty() {
         return Err(anyhow!("API returned empty content"));
     }
-    Ok(text)
+    Ok((text, usage))
 }
 
 fn drain_sse_frames<F, G>(
     pending: &mut String,
     merged: &mut String,
     reasoning_seen: &mut usize,
+    final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
 ) where
@@ -223,13 +248,13 @@ fn drain_sse_frames<F, G>(
         if let Some(pos) = pending.find("\n\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 2);
-            handle_sse_frame(&frame, merged, reasoning_seen, on_delta, on_thinking_delta);
+            handle_sse_frame(&frame, merged, reasoning_seen, final_usage, on_delta, on_thinking_delta);
             continue;
         }
         if let Some(pos) = pending.find("\r\n\r\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 4);
-            handle_sse_frame(&frame, merged, reasoning_seen, on_delta, on_thinking_delta);
+            handle_sse_frame(&frame, merged, reasoning_seen, final_usage, on_delta, on_thinking_delta);
             continue;
         }
         break;
@@ -240,6 +265,7 @@ fn handle_sse_frame<F, G>(
     frame: &str,
     merged: &mut String,
     reasoning_seen: &mut usize,
+    final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
 ) where
@@ -257,6 +283,9 @@ fn handle_sse_frame<F, G>(
         let Ok(event) = serde_json::from_str::<StreamEvent>(data) else {
             continue;
         };
+        if let Some(usage) = event.usage {
+            *final_usage = usage.to_usage();
+        }
         let Some(choice) = event.choices.into_iter().next() else {
             continue;
         };

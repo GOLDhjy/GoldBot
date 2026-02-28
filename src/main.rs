@@ -119,6 +119,7 @@ pub(crate) struct App {
     pub sub_agent_id_gen: SubAgentIdGen,
     /// 当前活跃的 SubAgent 句柄
     pub sub_agent_handles: Vec<SubAgentHandle>,
+    pub total_usage: crate::agent::provider::Usage,
 }
 
 #[derive(Clone, Debug)]
@@ -280,6 +281,7 @@ impl App {
             model_picker: ModelPickerState::default(),
             sub_agent_id_gen: SubAgentIdGen::new(),
             sub_agent_handles: Vec::new(),
+            total_usage: Default::default(),
         }
     }
 
@@ -300,7 +302,7 @@ impl App {
 pub(crate) enum LlmWorkerEvent {
     Delta(String),
     ThinkingDelta(String),
-    Done(anyhow::Result<String>),
+    Done(anyhow::Result<(String, crate::agent::provider::Usage)>),
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

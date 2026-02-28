@@ -13,6 +13,13 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
@@ -154,7 +161,7 @@ impl LlmBackend {
         show_thinking: bool,
         on_delta: F,
         on_thinking_delta: G,
-    ) -> Result<String>
+    ) -> Result<(String, Usage)>
     where
         F: FnMut(&str),
         G: FnMut(&str),

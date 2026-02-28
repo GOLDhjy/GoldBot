@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{Message, Role};
+use crate::agent::provider::{Message, Role, Usage};
 
 #[derive(Clone, Copy)]
 pub(crate) struct KimiProvider;
@@ -42,6 +42,7 @@ struct ApiRequest {
 #[derive(Deserialize)]
 struct ApiResponse {
     choices: Vec<ApiChoice>,
+    usage: Option<UsageParam>,
 }
 
 #[derive(Deserialize)]
@@ -61,7 +62,9 @@ struct ApiChoiceMessage {
 
 #[derive(Deserialize)]
 struct StreamEvent {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    usage: Option<UsageParam>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +79,23 @@ struct StreamDelta {
     reasoning: Option<String>,
 }
 
+#[derive(Deserialize, Clone)]
+struct UsageParam {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+}
+
+impl UsageParam {
+    fn to_usage(&self) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens.unwrap_or(0),
+            completion_tokens: self.completion_tokens.unwrap_or(0),
+            total_tokens: self.total_tokens.unwrap_or(0),
+        }
+    }
+}
+
 // ── Implementation ────────────────────────────────────────────────────────────
 
 impl KimiProvider {
@@ -87,7 +107,7 @@ impl KimiProvider {
         show_thinking: bool,
         mut on_delta: F,
         mut on_thinking_delta: G,
-    ) -> Result<String>
+    ) -> Result<(String, Usage)>
     where
         F: FnMut(&str),
         G: FnMut(&str),
@@ -128,12 +148,14 @@ impl KimiProvider {
 
         let mut merged = String::new();
         let mut pending = String::new();
+        let mut final_usage = Usage::default();
 
         while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
             pending.push_str(&String::from_utf8_lossy(&chunk));
             drain_sse_frames(
                 &mut pending,
                 &mut merged,
+                &mut final_usage,
                 &mut on_delta,
                 &mut on_thinking_delta,
             );
@@ -141,6 +163,7 @@ impl KimiProvider {
         drain_sse_frames(
             &mut pending,
             &mut merged,
+            &mut final_usage,
             &mut on_delta,
             &mut on_thinking_delta,
         );
@@ -148,7 +171,7 @@ impl KimiProvider {
         if merged.is_empty() {
             return Err(anyhow!("API returned empty content"));
         }
-        Ok(merged)
+        Ok((merged, final_usage))
     }
 }
 
@@ -217,7 +240,7 @@ fn normalize_model_for_endpoint(model: &str, coding_endpoint: bool) -> String {
     }
 }
 
-async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
+async fn parse_non_stream_response(resp: reqwest::Response) -> Result<(String, Usage)> {
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -233,12 +256,14 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<String> {
     if text.is_empty() {
         return Err(anyhow!("API returned empty content"));
     }
-    Ok(text)
+    let usage = parsed.usage.map(|u| u.to_usage()).unwrap_or_default();
+    Ok((text, usage))
 }
 
 fn drain_sse_frames<F, G>(
     pending: &mut String,
     merged: &mut String,
+    final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
 ) where
@@ -249,13 +274,13 @@ fn drain_sse_frames<F, G>(
         if let Some(pos) = pending.find("\n\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 2);
-            handle_sse_frame(&frame, merged, on_delta, on_thinking_delta);
+            handle_sse_frame(&frame, merged, final_usage, on_delta, on_thinking_delta);
             continue;
         }
         if let Some(pos) = pending.find("\r\n\r\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 4);
-            handle_sse_frame(&frame, merged, on_delta, on_thinking_delta);
+            handle_sse_frame(&frame, merged, final_usage, on_delta, on_thinking_delta);
             continue;
         }
         break;
@@ -265,6 +290,7 @@ fn drain_sse_frames<F, G>(
 fn handle_sse_frame<F, G>(
     frame: &str,
     merged: &mut String,
+    final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
 ) where
@@ -282,6 +308,9 @@ fn handle_sse_frame<F, G>(
         let Ok(event) = serde_json::from_str::<StreamEvent>(data) else {
             continue;
         };
+        if let Some(usage) = event.usage {
+            *final_usage = usage.to_usage();
+        }
         let Some(choice) = event.choices.into_iter().next() else {
             continue;
         };

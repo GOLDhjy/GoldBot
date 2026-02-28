@@ -69,6 +69,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.todo_items.clear();
     app.shell_task_running = false;
     app.shell_exec_rx = None;
+    app.total_usage = Default::default();
     screen.todo_items.clear();
     app.messages.push(Message::user(task.clone()));
 
@@ -80,7 +81,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
 pub(crate) fn process_llm_result(
     app: &mut App,
     screen: &mut Screen,
-    result: anyhow::Result<String>,
+    result: anyhow::Result<(String, crate::agent::provider::Usage)>,
 ) {
     // 第一次收到回复后，把 messages[1] 的内容截断回纯固定提示词（去掉拼进去的记忆部分）
     if app.has_memory_message {
@@ -91,8 +92,8 @@ pub(crate) fn process_llm_result(
 
     app.steps_taken += 1;
 
-    let response = match result {
-        Ok(r) => r,
+    let (response, usage) = match result {
+        Ok((r, u)) => (r, u),
         Err(e) => {
             let msg = e.to_string();
             // Empty-content errors are often transient; retry once automatically.
@@ -114,6 +115,9 @@ pub(crate) fn process_llm_result(
             return;
         }
     };
+    app.total_usage.prompt_tokens += usage.prompt_tokens;
+    app.total_usage.completion_tokens += usage.completion_tokens;
+    app.total_usage.total_tokens += usage.total_tokens;
 
     let (thought, actions) = match parse_llm_response(&response) {
         Ok(parsed) => parsed,
@@ -1118,7 +1122,16 @@ pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json
 }
 
 pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
-    let summary = sanitize_final_summary_for_tui(&summary);
+    let mut summary = sanitize_final_summary_for_tui(&summary);
+    if app.total_usage.total_tokens > 0 {
+        summary.push_str(&format!(
+            "\n\n[Tokens Used: {} (Prompt: {}, Completion: {})]",
+            app.total_usage.total_tokens,
+            app.total_usage.prompt_tokens,
+            app.total_usage.completion_tokens,
+        ));
+    }
+    
     app.final_summary = Some(summary.clone());
     app.task_collapsed = true;
 
@@ -1331,7 +1344,10 @@ fn trim_left_to_max_bytes(s: &mut String, max_bytes: usize) {
 }
 
 pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
-    if app.messages.len() <= MAX_MESSAGES_BEFORE_COMPACTION {
+    let total_chars: usize = app.messages.iter().map(|m| m.content.chars().count()).sum();
+    let should_compact = app.messages.len() > MAX_MESSAGES_BEFORE_COMPACTION || total_chars > 30000;
+
+    if !should_compact {
         return;
     }
     if app.messages.len() <= KEEP_RECENT_MESSAGES_AFTER_COMPACTION + 1 {
