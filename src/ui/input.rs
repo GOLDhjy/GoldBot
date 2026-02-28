@@ -768,6 +768,7 @@ fn is_placeholder_api_key(key_name: &str, value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     let known_placeholder = match key_name {
         "BIGMODEL_API_KEY" => "your_bigmodel_api_key_here",
+        "KIMI_API_KEY" => "your_kimi_api_key_here",
         "MINIMAX_API_KEY" => "your_minimax_api_key_here",
         _ => "",
     };
@@ -1493,10 +1494,12 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
     let raw = std::fs::read_to_string(&env_path).unwrap_or_default();
 
     let provider_value = match backend_label {
+        "Kimi" => "kimi",
         "MiniMax" => "minimax",
         _ => "glm",
     };
     let model_key = match backend_label {
+        "Kimi" => "KIMI_MODEL",
         "MiniMax" => "MINIMAX_MODEL",
         _ => "BIGMODEL_MODEL",
     };
@@ -1640,6 +1643,7 @@ fn select_model_item(app: &mut App, screen: &mut Screen) {
             let model = value;
             // 切换后端+模型
             app.backend = match backend.as_str() {
+                "Kimi" => crate::agent::provider::LlmBackend::Kimi(model.clone()),
                 "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
                 _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
             };

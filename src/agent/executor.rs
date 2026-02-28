@@ -26,6 +26,9 @@ pub(crate) enum ShellExecResult {
         total: usize,
         command: String,
     },
+    Search {
+        result: Result<crate::tools::search::SearchResult, String>,
+    },
     Explorer {
         commands: Vec<String>,
         outputs: Vec<String>,
@@ -701,6 +704,34 @@ pub(crate) fn handle_shell_exec_result(app: &mut App, screen: &mut Screen, resul
                 app.task_events.push(ev);
             }
         },
+        ShellExecResult::Search { result } => match result {
+            Ok(r) => {
+                let summary = format!(
+                    "{} match{} in {} file{}",
+                    r.match_count,
+                    if r.match_count == 1 { "" } else { "es" },
+                    r.file_count,
+                    if r.file_count == 1 { "" } else { "s" },
+                );
+                let llm_msg = format!("{}\n{}", summary, r.output);
+                push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
+                let ev = Event::ToolResult {
+                    exit_code: 0,
+                    output: llm_msg,
+                };
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+            }
+            Err(err) => {
+                push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
+                let ev = Event::ToolResult {
+                    exit_code: -1,
+                    output: err,
+                };
+                emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+            }
+        },
         ShellExecResult::ExplorerProgress { .. } => {
             return;
         }
@@ -958,6 +989,19 @@ pub(crate) fn execute_read_file(
 }
 
 pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: &str, path: &str) {
+    if app.shell_task_running {
+        let msg = "Another task is still running. Please wait.";
+        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
+        let ev = Event::ToolResult {
+            exit_code: -1,
+            output: msg.to_string(),
+        };
+        emit_live_event(screen, &ev);
+        app.task_events.push(ev);
+        app.needs_agent_executor = true;
+        return;
+    }
+
     let display_path = if path == "." || path.is_empty() {
         ".".to_string()
     } else {
@@ -966,41 +1010,26 @@ pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: 
     let short_pattern = shorten_text(pattern, 40);
     let call_ev = Event::ToolCall {
         label: format!("Searching({short_pattern})"),
-        command: display_path,
+        command: display_path.clone(),
         multiline: false,
     };
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    match crate::tools::search::search_files(pattern, path) {
-        Ok(result) => {
-            let summary = format!(
-                "{} match{} in {} file{}",
-                result.match_count,
-                if result.match_count == 1 { "" } else { "es" },
-                result.file_count,
-                if result.file_count == 1 { "" } else { "s" },
-            );
-            let llm_msg = format!("{}\n{}", summary, result.output);
-            push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
-            let ev = Event::ToolResult {
-                exit_code: 0,
-                output: format!("{}\n{}", summary, result.output),
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
-        }
-        Err(e) => {
-            let err = format!("search failed: {e}");
-            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-            let ev = Event::ToolResult {
-                exit_code: -1,
-                output: err,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
-        }
-    }
+    screen.status = format!("Searching: {short_pattern}");
+    screen.refresh();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.shell_exec_rx = Some(rx);
+    app.shell_task_running = true;
+
+    let pattern_owned = pattern.to_string();
+    let path_owned = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let result = crate::tools::search::search_files(&pattern_owned, &path_owned)
+            .map_err(|e| format!("search failed: {e}"));
+        let _ = tx.send(ShellExecResult::Search { result });
+    });
 }
 
 pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {

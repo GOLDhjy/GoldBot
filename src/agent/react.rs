@@ -45,11 +45,11 @@ Task complete (required):
 `<mode>` 可选值：`agent` / `plan`
 
 Explorer (batch read-only commands; all results returned at once — put everything into ONE call, never repeat):
+prefer native tool: read, search, write/update than explorer.
 <thought>reasoning</thought>
 <tool>explorer</tool>
 <command>first read-only command</command>
 <command>more read-only command</command>
-Only for safe read-only commands (ls, cat, grep, git log …). Do NOT use for writes or commands that depend on each other's output.
 
 Phase update (non-blocking; write what to do next):
 <thought>reasoning</thought>

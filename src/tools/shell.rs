@@ -80,6 +80,10 @@ pub fn request_cancel_running_shell_commands() {
     SHELL_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+pub fn is_cancel_requested() -> bool {
+    SHELL_CANCEL_REQUESTED.load(Ordering::Relaxed)
+}
+
 pub fn clear_running_shell_cancel_request() {
     SHELL_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
 }

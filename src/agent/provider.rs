@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::agent::provider_glm::GlmProvider;
+use crate::agent::provider_kimi::KimiProvider;
 use crate::agent::provider_minimax::MiniMaxProvider;
 
 // ── Conversation message types ────────────────────────────────────────────────
@@ -65,39 +66,67 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ("GLM", &["GLM-4.7", "glm-5"]),
+    ("Kimi", &["kimi-for-coding", "kimi-k2.5", "kimi-k2-thinking"]),
     ("MiniMax", &["MiniMax-M2.5", "MiniMax-M2.1"]),
 ];
+
+fn default_kimi_model() -> String {
+    let explicit_base = std::env::var("KIMI_BASE_URL").unwrap_or_default();
+    if explicit_base.contains("api.kimi.com/coding") {
+        return "kimi-for-coding".to_string();
+    }
+    let key = std::env::var("KIMI_API_KEY").unwrap_or_default();
+    if key.starts_with("sk-kimi-") {
+        return "kimi-for-coding".to_string();
+    }
+    "kimi-k2.5".to_string()
+}
 
 // ── Backend selector ──────────────────────────────────────────────────────────
 
 /// 当前使用的 LLM 后端，内部持有已选定的模型名称。
-/// 通过 `LLM_PROVIDER=minimax/glm` 显式指定，
-/// 或自动检测：只有 MINIMAX_API_KEY 时选 MiniMax，否则默认 GLM。
+/// 通过 `LLM_PROVIDER=minimax/glm/kimi` 显式指定，
+/// 或自动检测：优先顺序为 Kimi > MiniMax > GLM。
 #[derive(Clone)]
 pub(crate) enum LlmBackend {
     /// GLM 后端，持有当前选定的模型名。
     Glm(String),
+    /// Kimi (Moonshot) 后端，持有当前选定的模型名。
+    Kimi(String),
     /// MiniMax 后端，持有当前选定的模型名。
     MiniMax(String),
 }
 
 impl LlmBackend {
     pub(crate) fn from_env() -> Self {
-        let is_minimax = match std::env::var("LLM_PROVIDER").as_deref() {
-            Ok("minimax") => true,
-            Ok("glm") => false,
-            _ => {
-                std::env::var("BIGMODEL_API_KEY").is_err()
-                    && std::env::var("MINIMAX_API_KEY").is_ok()
+        let provider = std::env::var("LLM_PROVIDER").unwrap_or_default().to_lowercase();
+
+        match provider.as_str() {
+            "kimi" => {
+                let model = std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
+                LlmBackend::Kimi(model)
             }
-        };
-        if is_minimax {
-            let model =
-                std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
-            LlmBackend::MiniMax(model)
-        } else {
-            let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
-            LlmBackend::Glm(model)
+            "minimax" => {
+                let model = std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+                LlmBackend::MiniMax(model)
+            }
+            "glm" => {
+                let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
+                LlmBackend::Glm(model)
+            }
+            _ => {
+                // 自动检测优先级：Kimi > MiniMax > GLM
+                if std::env::var("KIMI_API_KEY").is_ok() {
+                    let model = std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
+                    LlmBackend::Kimi(model)
+                } else if std::env::var("MINIMAX_API_KEY").is_ok() && std::env::var("BIGMODEL_API_KEY").is_err() {
+                    let model = std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
+                    LlmBackend::MiniMax(model)
+                } else {
+                    let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
+                    LlmBackend::Glm(model)
+                }
+            }
         }
     }
 
@@ -105,6 +134,7 @@ impl LlmBackend {
     pub(crate) fn backend_label(&self) -> &str {
         match self {
             Self::Glm(_) => "GLM",
+            Self::Kimi(_) => "Kimi",
             Self::MiniMax(_) => "MiniMax",
         }
     }
@@ -112,7 +142,7 @@ impl LlmBackend {
     /// 当前选定的模型名。
     pub(crate) fn model_name(&self) -> &str {
         match self {
-            Self::Glm(m) | Self::MiniMax(m) => m,
+            Self::Glm(m) | Self::Kimi(m) | Self::MiniMax(m) => m,
         }
     }
 
@@ -132,6 +162,18 @@ impl LlmBackend {
         match self {
             Self::Glm(model) => {
                 GlmProvider
+                    .chat_stream_with(
+                        client,
+                        messages,
+                        model,
+                        show_thinking,
+                        on_delta,
+                        on_thinking_delta,
+                    )
+                    .await
+            }
+            Self::Kimi(model) => {
+                KimiProvider
                     .chat_stream_with(
                         client,
                         messages,
@@ -165,6 +207,21 @@ impl LlmBackend {
                 std::env::var("BIGMODEL_BASE_URL")
                     .unwrap_or_else(|_| "https://open.bigmodel.cn/api/coding/paas/v4".to_string()),
             ),
+            Self::Kimi(model) => {
+                let default_base = if std::env::var("KIMI_API_KEY")
+                    .unwrap_or_default()
+                    .starts_with("sk-kimi-")
+                {
+                    "https://api.kimi.com/coding/v1"
+                } else {
+                    "https://api.moonshot.cn/v1"
+                };
+                (
+                    model.clone(),
+                    std::env::var("KIMI_BASE_URL")
+                        .unwrap_or_else(|_| default_base.to_string()),
+                )
+            }
             Self::MiniMax(model) => (
                 model.clone(),
                 std::env::var("MINIMAX_BASE_URL")
@@ -177,6 +234,7 @@ impl LlmBackend {
     pub(crate) fn required_key_name(&self) -> &'static str {
         match self {
             Self::Glm(_) => "BIGMODEL_API_KEY",
+            Self::Kimi(_) => "KIMI_API_KEY",
             Self::MiniMax(_) => "MINIMAX_API_KEY",
         }
     }
