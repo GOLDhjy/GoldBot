@@ -299,7 +299,7 @@ impl Screen {
             } else {
                 status_lines.len()
             };
-            self.last_status_rows = status_rows + dag_tree_rows;
+            self.last_status_rows = status_rows;
             if status_lines.is_empty() {
                 let _ = execute!(self.stdout, Print("\r\n"));
             } else {
@@ -608,7 +608,6 @@ impl Screen {
             || !self.command_labels.is_empty()
             || !self.model_picker_labels.is_empty()
             || self.input.contains('\n')
-            || self.dag_tree.is_some()
         {
             self.refresh();
             return;
