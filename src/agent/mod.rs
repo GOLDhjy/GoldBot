@@ -1,3 +1,4 @@
+pub mod dag;
 pub mod executor;
 pub mod main_agent;
 pub(crate) mod plan;

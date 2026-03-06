@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use crossterm::style::Stylize;
 use serde_json::Value;
 
+use crate::agent::dag::{DagConfig, execute as execute_dag};
 use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
@@ -372,45 +375,57 @@ pub(crate) fn process_llm_result(
                 screen.refresh();
                 app.messages
                     .push(Message::user("[todo updated]".to_string()));
-                // Don't break — continue to next action (todo is non-blocking).
                 had_non_blocking_only = true;
             }
             LlmAction::SubAgent { graph } => {
-                // Sub-agent 调度尚未实现；记录 DAG 摘要并通知 LLM
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
-                // 构造摘要：显示节点 ID、依赖关系和最终输出节点
-                let node_summary: Vec<String> = graph
-                    .nodes
-                    .iter()
-                    .map(|n| {
-                        if n.depends_on.is_empty() {
-                            n.id.clone()
-                        } else {
-                            format!("{}←[{}]", n.id, n.depends_on.join(","))
-                        }
-                    })
-                    .collect();
-                let outputs = if graph.output_nodes.is_empty() {
-                    "all leaves".to_string()
-                } else {
-                    graph.output_nodes.join(",")
+                
+                // 构建 DAG 树形显示（使用共享函数，初始无完成标记）
+                let dag_tree = crate::agent::dag::build_dag_tree(
+                    &graph.nodes,
+                    &graph.output_nodes,
+                    &std::collections::HashMap::new(),
+                );
+
+                // 保存节点信息供进度更新时重建树形
+                app.dag_graph_nodes = graph.nodes.clone();
+                app.dag_output_nodes = graph.output_nodes.clone();
+                app.dag_node_done.clear();
+
+                // 显示在 managed area，实现原地更新
+                screen.dag_tree = Some(dag_tree);
+                screen.refresh();
+
+                // 获取 http_client
+                let Some(http_client) = app.http_client.clone() else {
+                    app.messages.push(Message::user(
+                        "[SubAgent error: HTTP client not initialized]".to_string(),
+                    ));
+                    app.needs_agent_executor = true;
+                    break 'actions;
                 };
-                let ev = Event::Thinking {
-                    text: format!(
-                        "sub_agent DAG: {} — output: {}",
-                        node_summary.join(" → "),
-                        outputs
-                    ),
-                };
-                emit_live_event(screen, &ev);
-                app.task_events.push(ev);
-                app.messages.push(Message::user(
-                    "[sub_agent dispatch not yet implemented; \
-                     please use direct tool calls for now]"
-                        .to_string(),
-                ));
-                app.needs_agent_executor = true;
+
+                // 构建 DagConfig，注入取消标志和进度 channel
+                let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut dag_config = DagConfig::new(
+                    http_client,
+                    app.backend.clone(),
+                    app.base_prompt.clone(),
+                );
+                dag_config.cancel_flag = Some(Arc::clone(&app.dag_cancel_flag));
+                dag_config.progress_tx = Some(progress_tx);
+                app.dag_progress_rx = Some(progress_rx);
+
+                // 异步执行 DAG，结果通过 oneshot channel 回传
+                let (dag_tx, dag_rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let result = execute_dag(graph, dag_config).await;
+                    let _ = dag_tx.send(result);
+                });
+                app.dag_result_rx = Some(dag_rx);
+                app.dag_task_running = true;
+                // 不设置 needs_agent_executor，等 poll_dag_result 收到结果后再触发
                 break 'actions;
             }
             LlmAction::Final { summary } => {
@@ -799,8 +814,8 @@ pub(crate) fn execute_update_file(
         app.workspace.join(path)
     };
 
-    // 返回 (old_content, new_content_normalized) 用于 diff
-    let result: Result<(String, String), std::io::Error> = (|| {
+    // 返回 (old_with_ctx, new_with_ctx, ctx_start, norm_new) 用于 diff
+    let result: Result<(String, String, usize, String), std::io::Error> = (|| {
         let raw = std::fs::read_to_string(&abs_path)?;
         let crlf = raw.contains("\r\n");
         let content = if crlf {
@@ -826,12 +841,22 @@ pub(crate) fn execute_update_file(
         let s = line_start - 1; // 转 0-based
         let e = line_end; // lines[s..e]
 
-        // 旧内容（用于 diff）
-        let old_content = lines[s..e].join("\n");
+        // 旧内容（含前后 3 行上下文，用于 diff 显示）
+        let ctx = 3usize;
+        let ctx_start = s.saturating_sub(ctx);
+        let ctx_end = (e + ctx).min(total);
+        let old_content = lines[ctx_start..ctx_end].join("\n");
 
         // 用新内容替换
         let norm_new = new_string.replace("\r\n", "\n");
         let new_lines: Vec<&str> = norm_new.lines().collect();
+
+        // 新内容（含相同上下文，用于 diff 显示）
+        let mut new_with_ctx: Vec<&str> = lines[ctx_start..s].to_vec();
+        new_with_ctx.extend(new_lines.iter().copied());
+        new_with_ctx.extend(lines[e..ctx_end].iter().copied());
+        let new_content_for_diff = new_with_ctx.join("\n");
+
         lines.splice(s..e, new_lines.iter().copied());
 
         let mut new_normalized = lines.join("\n");
@@ -845,20 +870,19 @@ pub(crate) fn execute_update_file(
             new_normalized.clone()
         };
         std::fs::write(&abs_path, new_file_content)?;
-        Ok((old_content, norm_new))
+        Ok((old_content, new_content_for_diff, ctx_start, norm_new))
     })();
 
     match result {
-        Ok((old_content, norm_new)) => {
-            let line_offset = line_start - 1;
+        Ok((old_content, new_content_for_diff, ctx_start, norm_new)) => {
             let diff_text =
-                crate::tools::shell::render_unified_diff(&old_content, &norm_new, line_offset);
+                crate::tools::shell::render_unified_diff(&old_content, &new_content_for_diff, ctx_start);
             let store = MemoryStore::new();
             let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
             let llm_msg = format!(
-                "File updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})"
+                "File updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})\n{diff_text}"
             );
             push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
@@ -905,17 +929,37 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
         app.workspace.join(path)
     };
 
-    let result = (|| {
+    let result: Result<(String, String), std::io::Error> = (|| {
+        // 读取旧内容（文件不存在则视为空）
+        let old_content = std::fs::read_to_string(&abs_path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         if let Some(parent) = abs_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&abs_path, content)?;
-        Ok::<_, std::io::Error>(())
+        let new_content = content.replace("\r\n", "\n");
+        Ok((old_content, new_content))
     })();
 
     match result {
-        Ok(()) => {
-            push_tool_result_to_llm(app, "Tool result:", "File written successfully.");
+        Ok((old_content, new_content)) => {
+            let diff_text =
+                crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
+            let store = MemoryStore::new();
+            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
+            let llm_msg = format!("File written: {path}\n{diff_text}");
+            push_tool_result_to_llm(app, "Tool result:", &llm_msg);
+            let mut tool_output = format!("Write {path}:\n");
+            for line in diff_text.lines() {
+                tool_output.push_str(&format!("  {line}\n"));
+            }
+            let result_ev = Event::ToolResult {
+                exit_code: 0,
+                output: tool_output,
+            };
+            emit_live_event(screen, &result_ev);
+            app.task_events.push(result_ev);
         }
         Err(e) => {
             let output = format!("写入失败: {e}");

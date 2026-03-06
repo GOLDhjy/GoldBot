@@ -60,6 +60,9 @@ pub(crate) struct Screen {
     pub model_picker_labels: Vec<String>,
     /// /model 选择器：当前选中的索引
     pub model_picker_sel: usize,
+    /// Live DAG tree shown in managed area during SubAgent execution.
+    /// Set when DAG starts, updated on node completion, cleared when DAG ends.
+    pub dag_tree: Option<String>,
 }
 
 impl Screen {
@@ -90,6 +93,7 @@ impl Screen {
             command_sel: 0,
             model_picker_labels: Vec::new(),
             model_picker_sel: 0,
+            dag_tree: None,
         })
     }
 
@@ -120,6 +124,7 @@ impl Screen {
             command_sel: 0,
             model_picker_labels: Vec::new(),
             model_picker_sel: 0,
+            dag_tree: None,
         };
         execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
         for line in TITLE_BANNER {
@@ -268,6 +273,19 @@ impl Screen {
             } else {
                 self.status.clone()
             };
+            // ── Live DAG tree ──
+            let dag_tree_rows = if let Some(tree) = &self.dag_tree.clone() {
+                let mut rows = 0;
+                for line in tree.lines() {
+                    let shown = fit_single_line_tail(line, cols.saturating_sub(2));
+                    let _ = execute!(self.stdout, Print(format!("  {}\r\n", shown.dark_cyan().to_string())));
+                    rows += 1;
+                }
+                rows
+            } else {
+                0
+            };
+
             let max_status_lines = if self.is_running { 3 } else { 1 };
             let status_budget = cols.saturating_sub(rendered_text_width("  "));
             let status_lines = compose_status_lines(
@@ -281,7 +299,7 @@ impl Screen {
             } else {
                 status_lines.len()
             };
-            self.last_status_rows = status_rows;
+            self.last_status_rows = status_rows + dag_tree_rows;
             if status_lines.is_empty() {
                 let _ = execute!(self.stdout, Print("\r\n"));
             } else {
@@ -346,6 +364,7 @@ impl Screen {
                 + at_file_rows
                 + command_rows
                 + model_picker_rows
+                + dag_tree_rows
                 + status_rows
                 + input_row_count
                 + 1;
@@ -589,6 +608,7 @@ impl Screen {
             || !self.command_labels.is_empty()
             || !self.model_picker_labels.is_empty()
             || self.input.contains('\n')
+            || self.dag_tree.is_some()
         {
             self.refresh();
             return;

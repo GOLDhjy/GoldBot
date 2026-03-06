@@ -23,7 +23,7 @@ pub struct TaskNode {
     /// 可选指定后端模型；None = 继承主 Agent 当前模型
     pub model: Option<String>,
     /// 前缀提示词，二选一填法：
-    /// - `role`：内置预设名（"search" / "coding" / "analysis" / "writer" / "reviewer"）
+    /// - `role`：内置预设名（"search" / "coding" / "analysis" / "writer" / "reviewer" / "docs"）
     /// - `system_prompt`：自定义文本（优先级高于 role）
     /// 两者都是在默认执行提示词前面加一段前缀，最终结构：[前缀] + [默认执行提示词]
     pub role: Option<String>,
@@ -104,13 +104,13 @@ impl OutputMerge {
 
 // ── SubAgent 配置 ─────────────────────────────────────────────
 /// 调度器实例化 Sub-Agent 时使用的配置
+#[derive(Clone)]
 pub struct SubAgentConfig {
     pub backend: LlmBackend,
     pub system_prompt: Option<String>,
     pub max_steps: usize,
     pub timeout: Duration,
 }
-
 // ── 请求/响应消息 ────────────────────────────────────────────
 /// 调度器向单个 Sub-Agent 发送的执行请求
 pub struct SubAgentRequest {
@@ -126,6 +126,7 @@ pub struct SubAgentRequest {
 }
 
 /// Sub-Agent 完成后返回给调度器的结果
+#[derive(Clone)]
 pub struct SubAgentResult {
     pub id: SubAgentId,
     pub node_id: NodeId,
@@ -136,6 +137,7 @@ pub struct SubAgentResult {
 }
 
 /// Sub-Agent 任务的完成状态
+#[derive(Clone)]
 pub enum SubAgentStatus {
     Completed,
     Failed(String),

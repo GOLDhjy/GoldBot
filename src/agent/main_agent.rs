@@ -117,7 +117,7 @@ quality insufficient for downstream nodes that depend on it.
 - `task`: complete instruction sent to the sub-agent — include all context inline.
 - `model` *(optional)*: override backend model for this node; omit to inherit current model.
 - `role` / `system_prompt` *(optional, pick one)*: both set a prefix that is prepended to the default execution prompt.
-  - `role`: built-in preset shorthand — `search` | `coding` | `analysis` | `writer` | `reviewer`.
+  - `role`: built-in preset shorthand — `search` | `coding` | `analysis` | `writer` | `reviewer` | `docs`.
   - `system_prompt`: fully custom prefix text (takes precedence over `role` if both are set).
   - Final prompt: `[prefix (role or system_prompt)] + [default execution prompt]`.
 - `depends_on` *(optional)*: node ids to wait for before starting; omit / `[]` = starts immediately.

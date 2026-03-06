@@ -5,9 +5,10 @@ mod tools;
 mod types;
 mod ui;
 
-use std::{io, time::Duration};
+use std::{io, sync::{Arc, atomic::AtomicBool}, time::Duration};
 
 use agent::{
+    dag::DagResult,
     executor::{
         ShellExecResult, handle_llm_stream_delta, handle_llm_thinking_delta,
         handle_shell_exec_result, maybe_flush_and_compact_before_call, process_llm_result,
@@ -52,6 +53,18 @@ pub(crate) struct App {
     pub needs_agent_executor: bool,
     pub shell_task_running: bool,
     pub shell_exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ShellExecResult>>,
+    pub dag_task_running: bool,
+    pub dag_result_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<DagResult>>>,
+    pub dag_progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<agent::dag::NodeProgress>>,
+    pub dag_cancel_flag: Arc<AtomicBool>,
+    /// Index of the DAG tree ToolCall event in task_events, for in-place updates
+    pub dag_tree_event_idx: Option<usize>,
+    /// node_id -> (success, elapsed_secs)
+    pub dag_node_done: std::collections::HashMap<String, (bool, f64)>,
+    /// Snapshot of graph nodes for tree rebuilding on progress updates
+    pub dag_graph_nodes: Vec<crate::agent::sub_agent::TaskNode>,
+    /// Snapshot of output_nodes for tree rebuilding
+    pub dag_output_nodes: Vec<String>,
     /// User pressed Esc to stop the active LLM loop; run_loop should abort the in-flight worker.
     pub interrupt_llm_loop_requested: bool,
     /// Next normal user input should be sent as an in-conversation interjection, not a new task.
@@ -121,6 +134,8 @@ pub(crate) struct App {
     pub total_usage: crate::agent::provider::Usage,
     pub prompt_token_scale: f32,
     pub recent_completion_tokens_ema: u32,
+    /// HTTP client shared with SubAgent DAG executor
+    pub http_client: Option<reqwest::Client>,
 }
 
 #[derive(Clone, Debug)]
@@ -243,6 +258,14 @@ impl App {
             needs_agent_executor: false,
             shell_task_running: false,
             shell_exec_rx: None,
+            dag_task_running: false,
+            dag_result_rx: None,
+            dag_progress_rx: None,
+            dag_cancel_flag: Arc::new(AtomicBool::new(false)),
+            dag_tree_event_idx: None,
+            dag_node_done: std::collections::HashMap::new(),
+            dag_graph_nodes: Vec::new(),
+            dag_output_nodes: Vec::new(),
             interrupt_llm_loop_requested: false,
             interjection_mode: false,
             running: false,
@@ -285,9 +308,9 @@ impl App {
             total_usage: Default::default(),
             prompt_token_scale: 1.0,
             recent_completion_tokens_ema: 0,
+            http_client: None,
         }
     }
-
     pub(crate) fn rebuild_assistant_context_message(&mut self) {
         let mut base_ctx = build_assistant_context(&self.workspace, self.assist_mode);
         if self.has_memory_message
@@ -331,12 +354,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
     ensure_dot_env();
-    for warning in ensure_builtin_commands() {
-        eprintln!("[command] {warning}");
-    }
-    let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
     let http_client = build_http_client()?;
     let mut app = App::new();
+    app.http_client = Some(http_client.clone());
+    let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
 
     if !headless {
         enable_raw_mode()?;
@@ -472,6 +493,7 @@ async fn run_loop(
         }
 
         poll_shell_exec_result(app, screen);
+        poll_dag_result(app, screen);
 
         drain_ge_events(app, screen);
 
@@ -540,6 +562,70 @@ async fn run_loop(
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+fn poll_dag_result(app: &mut App, screen: &mut Screen) {
+    // 轮询节点进度，更新 managed area 中的 DAG 树形显示
+    let mut tree_needs_refresh = false;
+    if let Some(rx) = app.dag_progress_rx.as_mut() {
+        while let Ok(progress) = rx.try_recv() {
+            app.dag_node_done.insert(
+                progress.node_id.clone(),
+                (progress.success, progress.elapsed.as_secs_f64()),
+            );
+            tree_needs_refresh = true;
+        }
+    }
+    if tree_needs_refresh {
+        let new_tree = agent::dag::build_dag_tree(
+            &app.dag_graph_nodes,
+            &app.dag_output_nodes,
+            &app.dag_node_done,
+        );
+        screen.dag_tree = Some(new_tree);
+        screen.refresh();
+    }
+
+    let Some(rx) = app.dag_result_rx.as_mut() else { return; };
+    match rx.try_recv() {
+        Ok(result) => {
+            app.dag_result_rx = None;
+            app.dag_task_running = false;
+            app.dag_cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            // 清掉 managed area 中的 live 树形
+            screen.dag_tree = None;
+            match result {
+                Ok(dag_result) => {
+                    let status = if dag_result.has_failures { "completed with failures" } else { "completed" };
+                    // 把最终带完成标记的树形输出为 task event（滚回记录）
+                    let final_tree = agent::dag::build_dag_tree(
+                        &app.dag_graph_nodes,
+                        &app.dag_output_nodes,
+                        &app.dag_node_done,
+                    );
+                    let tree_ev = crate::types::Event::ToolCall {
+                        label: format!("SubAgent DAG {} ({:.1}s)", status, dag_result.elapsed.as_secs_f64()),
+                        command: final_tree,
+                        multiline: true,
+                    };
+                    crate::ui::format::emit_live_event(screen, &tree_ev);
+                    app.task_events.push(tree_ev);
+                    app.messages.push(Message::user(format!("[SubAgent DAG result]:\n{}", dag_result.output)));
+                }
+                Err(e) => {
+                    app.messages.push(Message::user(format!("[SubAgent DAG failed: {e}]")));
+                }
+            }
+            app.needs_agent_executor = true;
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            app.dag_result_rx = None;
+            app.dag_task_running = false;
+            app.messages.push(Message::user("[SubAgent DAG: worker disconnected]".to_string()));
+            app.needs_agent_executor = true;
+        }
+    }
+}
 
 fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
     let Some(rx) = app.shell_exec_rx.as_mut() else {
@@ -636,6 +722,17 @@ fn interrupt_active_llm_loop(
 ) {
     if app.shell_task_running {
         crate::tools::shell::request_cancel_running_shell_commands();
+    }
+    if app.dag_task_running {
+        app.dag_cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.dag_task_running = false;
+        app.dag_result_rx = None;
+        app.dag_progress_rx = None;
+        app.dag_tree_event_idx = None;
+        app.dag_node_done.clear();
+        app.dag_graph_nodes.clear();
+        app.dag_output_nodes.clear();
+        screen.dag_tree = None;
     }
     app.interrupt_llm_loop_requested = false;
     app.running = false;

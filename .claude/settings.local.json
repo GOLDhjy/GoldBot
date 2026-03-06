@@ -32,7 +32,8 @@
       "Bash(gh search:*)",
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:www.kimi.com)",
-      "WebFetch(domain:moonshotai.github.io)"
+      "WebFetch(domain:moonshotai.github.io)",
+      "Bash(where cargo:*)"
     ]
   }
 }

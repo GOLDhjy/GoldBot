@@ -57,8 +57,8 @@ Update file (replace lines by line number; always use <tool>read</tool> first to
 <thought>reasoning</thought>
 <tool>update</tool>
 <path>relative/or/absolute/path</path>
-<line_start>first line to replace, 1-indexed</line_start>
-<line_end>last line to replace, 1-indexed, inclusive</line_end>
+<line_start>first line to replace (use the line number shown by read)</line_start>
+<line_end>last line to replace, inclusive (use the line number shown by read)</line_end>
 <new_string>replacement content (empty = delete those lines)</new_string>
 
 Write file (create a new file; also overwrites existing):
@@ -67,11 +67,11 @@ Write file (create a new file; also overwrites existing):
 <path>relative/or/absolute/path</path>
 <content>full file content here</content>
 
-Read file (each line prefixed with its line number `N: content`; use these numbers with <tool>update</tool>):
+Read file (each line prefixed with its line number `N: content`; use these numbers directly with <tool>update</tool>):
 <thought>reasoning</thought>
 <tool>read</tool>
 <path>relative/or/absolute/path</path>
-<offset>start line, 1-indexed (optional)</offset>
+<offset>start line (use line number as shown, optional)</offset>
 <limit>number of lines to read (optional)</limit>
 
 Search files (regex search across file contents; native, cross-platform):
@@ -98,6 +98,38 @@ MCP tool (only if listed later in this prompt):
 Load a skill (only if listed later in this prompt):
 <thought>reasoning</thought>
 <skill>skill-name</skill>
+
+Sub-agent DAG (dispatch parallel/sequential sub-tasks to specialized agents; use when the task can be decomposed into independent or dependent subtasks):
+<thought>reasoning</thought>
+<tool>sub_agent</tool>
+<graph>{
+  \"nodes\": [
+    {
+      \"id\": \"node_id\",
+      \"task\": \"detailed task description with all necessary context\",
+      \"role\": \"search|coding|analysis|writer|reviewer|docs\",
+      \"depends_on\": [],
+      \"input_merge\": \"concat\"
+    }
+  ],
+  \"output_nodes\": [\"node_id\"],
+  \"output_merge\": \"all\"
+}</graph>
+Node fields:
+- id: unique string identifier within this graph
+- task: self-contained task description (include all context the sub-agent needs)
+- role (optional): built-in role preset — choose the most specific role for the task:
+  - search: web/file research and information gathering
+  - coding: writing, debugging, or modifying source code
+  - analysis: data analysis, pattern recognition, structured reporting
+  - writer: general prose, copy, non-code long-form writing
+  - reviewer: code or document quality review and verdict
+  - docs: README / API docs / CHANGELOG — reads source code and writes documentation files; use this instead of coding when the output is documentation, not code
+- model (optional): override LLM model for this node
+- system_prompt (optional): fully custom system prompt (overrides role)
+- depends_on (optional): list of node ids this node waits for; empty = run immediately
+- input_merge (optional): how to merge upstream outputs — concat (default) / structured
+output_merge: all (default, returns each node result) / concat / first
 ";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
