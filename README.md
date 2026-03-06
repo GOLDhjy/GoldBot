@@ -11,7 +11,6 @@
 - ReAct 循环：思考-执行-观察-再思考，支持 shell / plan / question / web_search / MCP / SubAgent 多种动作
 - SubAgent 子代理：DAG 任务图调度，拓扑排序自动并行/串行，依赖节点输出自动合并，支持 role 角色预设（search/coding/analysis/writer/reviewer）
 - 三级安全控制：Safe/Confirm/Block，heredoc 内容不误判
-- 三级安全控制：Safe/Confirm/Block，heredoc 内容不误判
 - 文件变更 diff：命令执行后自动对比前后内容，行号级红绿高亮显示
 - 实时 TUI：流式显示思考过程，完成后默认折叠
 - 原生 LLM 深度思考：Tab 键切换，控制 API 层 `reasoning_content` 流
@@ -293,40 +292,38 @@ heredoc 内容不参与评估，仅外层命令生效。
 - **注入**：启动时读取长期记忆（最近 30 条）+ 最近 2 天短期记忆，嵌入 System Prompt，仅注入一次
 - **压缩**：消息超 48 条时自动摘要，保留最近 18 条
 
-### 项目结构
+### TUI 渲染分区
+
+终端屏幕分为两个独立区域：
 
 ```
-src/
-├── main.rs              # 入口 + 主事件循环 + App 状态
-├── types.rs             # 核心类型定义
-├── agent/
-│   ├── react.rs         # 系统提示词 + XML 响应解析
-│   ├── executor.rs      # start_task → process → execute → finish
-│   └── provider.rs      # LLM HTTP + SSE 流式处理
-├── tools/
-│   ├── shell.rs         # 命令执行、分类、diff 捕获
-│   ├── safety.rs        # 风险评估（Safe/Confirm/Block）
-│   ├── mcp.rs           # MCP server 发现与调用
-│   ├── web_search.rs    # Bocha AI 搜索
-│   ├── skills.rs        # Skills 加载
-│   └── command.rs       # Slash 命令定义与发现
-├── memory/
-│   ├── store.rs         # 记忆读写
-│   └── compactor.rs     # 上下文压缩
-├── ui/
-│   ├── screen.rs        # TUI 屏幕管理
-│   ├── format.rs        # 事件格式化与 diff 高亮
-│   ├── input.rs         # 键盘与粘贴处理
-│   └── ge.rs            # GE 模式 UI
-└── consensus/
-    ├── engine.rs        # GE 引擎：状态管理、流程编排
-    ├── evaluate.rs      # 执行验收、done_when 校验
-    ├── external.rs      # 外部 LLM 接口（Claude / Codex）
-    ├── subagent.rs      # 三问生成、Todo 计划生成
-    ├── model.rs         # 数据模型
-    └── audit.rs         # 审计日志
+┌─────────────────────────────────────┐
+│  滚动区（Scrollback Zone）           │ ← emit_live_event() 在此追加输出
+│  已打印内容不可修改                   │   保存在 screen.task_rendered 供重绘
+│                                     │
+│  ⏺ shell  ls -la                   │
+│  ⏺ read   src/main.rs              │
+│  ...                                │
+├─────────────────────────────────────┤ ← clear_managed() 从此行向下清空
+│  管理区（Managed Area）              │ ← 每次 refresh() 完整重绘
+│                                     │
+│  [Todo 进度面板]         (可选)      │
+│  [@ / /model 选择器]    (可选)      │
+│  [Live DAG 树形]         (可选)     │ ← screen.dag_tree: Option<String>
+│  ⣟ Thinking... (3s • esc to stop)  │ ← screen.status / screen.status_right
+│  ❯ 用户输入                          │ ← screen.input
+│    → mode: agent (shift+tab)        │ ← hint 行
+└─────────────────────────────────────┘
 ```
 
+**核心规则**：需要原地实时更新的内容必须放在管理区；滚动区的内容一旦打印就无法修改。
+
+| API | 说明 |
+|---|---|
+| `emit_live_event(screen, &ev)` | 把事件打印到滚动区，追加到 `task_rendered`，然后重绘管理区 |
+| `screen.refresh()` | `clear_managed()` + `draw_managed()`，重绘整个管理区 |
+| `screen.refresh_status_only()` | 仅原地覆写状态行（spinner 跳帧专用，避免闪烁） |
+| `screen.dag_tree: Option<String>` | SubAgent DAG 执行期间的实时树形；节点完成时更新，DAG 结束后清空 |
 ### 技术栈
 
 - Rust 2024 Edition
@@ -334,132 +331,85 @@ src/
 - crossterm（TUI）
 - reqwest（HTTP）
 - similar（diff 计算）
+- serde / serde_json（序列化）
+- toml（配置解析）
+- regex（正则匹配）
+- anyhow（错误处理）
+- chrono（日期时间）
+- dotenvy（环境变量）
+- arboard（剪贴板）
+- unicode-width（Unicode 宽度计算）
+ - ignore（文件忽略规则）
 
-## TODO
-- ~~@ 功能实现~~
-- ~~slash command~~
-- diff 代码语法高亮
-- ~~容易陷入死循环~~
-- 减少 Bash 这些标题，合并成一个，如果一直重复
-- Bash异步
-- 子代理
-- 上下文自动压缩
-- 固定工具:
-  它有专用工具：Read、Write、Edit、Glob、Grep，同时保留了 Bash 工具作为 shell 兜底。                                                                                                             
+## SubAgent 子代理
 
-### claude code                                             
-  所以你的想法和 Claude Code 的实际设计是一致的，没什么不对劲。  
-  大概有的功能：Searching（匹配字符串所有文件） Reading（读文件或者是读某些行） Update(更改) Bash(自由执行的) Write（新建文件）glob（按路径模式列出文件） 
-    ┌────────┬────────────────────────┐
-  │  工具  │          用途          │
-  ├────────┼────────────────────────┤
-  │ glob   │ 按路径模式列出文件     │
-  ├────────┼────────────────────────┤
-  │ search │ 在文件内容中匹配字符串 │
-  ├────────┼────────────────────────┤
-  │ read   │ 读文件（可指定行范围） │
-  ├────────┼────────────────────────┤
-  │ write  │ 创建新文件             │
-  ├────────┼────────────────────────┤
-  │ edit   │ 修改已有文件           │
-  ├────────┼────────────────────────┤
-  │ bash   │ 自由执行命令           │
-  └────────┴────────────────────────┘
+SubAgent 是独立的 ReAct 循环，由 MainAgent 编排，负责实际执行工作。
 
-    另外它还有几个额外的：                                                                                                                                                                         
-  - WebFetch — 抓取指定 URL 内容                            
-  - WebSearch — 网络搜索（GoldBot 已有）                                                                                                                                                         
-  - Task — 启动子 Agent                                                                                                                                                                          
-  - AskUserQuestion — 向用户提问（GoldBot 的 question 工具）
-  - TodoWrite — 任务列表（GoldBot 已有 todo）
-● 这就是关键点——它们根本不执行 shell 命令，直接用语言原生 API 实现，所以完全没有平台差异。                                                                                                       
-                                         
+### DAG 调度机制
 
-  只有 bash 有平台差异，其他五个完全跨平台。
+- **拓扑排序自动分层**：根据 `depends_on` 依赖关系自动构建执行层级
+- **同层节点并行执行**：无依赖的节点同时启动，提升效率
+- **跨层节点串行执行**：有依赖的节点按顺序执行
+- **依赖输出自动传递**：上游节点的输出自动合并传递给下游
 
-  GoldBot 是 Rust 写的，更直接：
+### 角色预设（role）
 
-  read   → std::fs::read_to_string()
-  write  → std::fs::write()
-  edit   → 读 + 字符串替换 + 写回
-  glob   → walkdir crate 或手写递归（你已经有了）
-  search → regex crate 做内容搜索
+| 角色 | 别名 | 职责 | 可用工具 |
+|---|---|---|---|
+| search | researcher | 信息检索与研究 | shell, read, search, web_search, final |
+| coding | code, dev | 代码编写与调试 | shell, read, write, update, search, final |
+| analysis | analyst | 数据分析与报告 | shell, read, search, final |
+| writer | writing | 文案与文档 | shell, read, write, search, final |
+| reviewer | review, critic | 质量审查 | shell, read, search, final |
+| docs | doc, readme | 项目文档维护 | read, write, update, search, final |
 
-                                           
-  GoldBot 是 Rust，直接加两个 crate 就行：                                                                                                                                                       
-                                                                                                                                                                                                 
-  regex = "1"      # 正则匹配，search 用                                                                                                                                                         
-  walkdir = "2"    # 递归遍历，glob 用     
+### 输入合并（input_merge）
 
+- `concat`（默认）：纯文本拼接
+- `structured`：JSON 结构化，保留来源信息
 
-  ## 临时
+### 输出汇总（output_merge）
 
-    ✓ ## 重构建议
-    
-    1. main.rs (585行) - 巨型结构体
-    问题: App 结构体包含 30+ 字段，职责过于庞杂
-    rust
-    pub(crate) struct App {
-        // 分散在各处的大量字段...
-    }
+- `all`（默认）：返回所有输出节点的完整 JSON
+- `first`：竞争模式，仅返回最先完成的节点
+- `concat`：文本拼接
 
-    建议: 拆分为多个子结构
-    rust
-    pub(crate) struct App {
-        pub llm: LlmState,        // LLM 相关状态
-        pub ui: UiState,          // UI 状态
-        pub task: TaskState,      // 任务状态
-        pub picker: PickerState,  // 各种 picker 状态
-        // ...
-    }
+### 支持的工具
 
-    
-    ─────────────────────────────
-    
-    2. tools/mcp.rs (~63KB) - 最大的单一文件
-    问题: MCP 注册、发现、执行逻辑全在一起
-    建议: 拆分为
-    • mcp/registry.rs - 注册表管理
-    • mcp/discovery.rs - 动态发现
-    • mcp/executor.rs - 工具执行
-    • mcp/types.rs - 类型定义
-    
-    ─────────────────────────────
-    
-    4. ui/ 模块 (多文件 ~120KB)
-    问题: 输入、渲染、格式化耦合
-    ui/input.rs   (54KB)  - 输入处理 + 粘贴 + @文件选择
-    ui/screen.rs  (31KB)  - 屏幕渲染
-    ui/format.rs  (34KB)  - 格式化
+`shell`, `read`, `write`, `update`, `search`, `web_search`, `final`
 
-    建议
-    • 提取 ui/input/parser.rs - 输入解析
-    • 提取 ui/components.rs - 可复用 UI 组件
-    
-    ─────────────────────────────
-    
-    5. 重复代码模式
-    状态管理: 多个 PickerState 结构相似
-    rust
-    // CmdPickerState, AtFilePickerState, ModelPickerState 都有类似的:
-    // - query: Option<String>
-    // - candidates: Vec<...>
-    // - sel: usize
+> 注意：SubAgent 不支持 MCP、skill、嵌套 sub_agent
 
-    建议: 泛型化或提取公共 trait
-    
-    ─────────────────────────────
-    
-    6. types.rs (6KB) - 散落的类型
-    问题: 许多内联结构如 PasteChunk, AtFileChunk 分散在 main.rs
-    建议: 集中到 types/ 目录
-    
-    ─────────────────────────────
-    
-    优先级建议
-    优先级  │  重构项  │  收益
-    ─────────────────────────────
-    P0  │  main.rs App 拆分  │  降低复杂度
-    P1  │  mcp.rs 拆分  │  改善可维护性
-    P2  │  Picker 状态泛型化  │  减少重复
-    P3  │  ui/ 模块解耦  │  便于 UI 测试
+### 配置参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| max_steps | 30 | 最大步数 |
+| timeout | 600s | 超时时间 |
+
+### JSON 配置示例
+
+```json
+{
+  "nodes": [
+    {"id": "search", "task": "搜索 Rust 异步最佳实践", "role": "search"},
+    {"id": "analyze", "task": "分析结果", "role": "analysis", "depends_on": ["search"]},
+    {"id": "code", "task": "编写示例代码", "role": "coding", "depends_on": ["analyze"]},
+    {"id": "review", "task": "审查代码", "role": "reviewer", "depends_on": ["code"]}
+  ],
+  "output_nodes": ["review"],
+  "output_merge": "all"
+}
+```
+
+### 架构图
+
+```
+MainAgent (编排：意图理解 → 任务拆解 → DAG 分发 → 结果审查)
+    │
+    ▼
+DAG Scheduler (拓扑排序 → 分层并行 → 输入合并 → 输出汇总)
+    │
+    ▼
+SubAgent Workers (独立 ReAct 循环：LLM → 工具执行 → ... → Final)
+```
