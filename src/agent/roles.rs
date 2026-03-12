@@ -111,7 +111,7 @@ Working style:
 - Prioritize recency for time-sensitive topics; note the date of sources when relevant.
 
 Available tools: web_search, read, search, final.
-Do NOT use: shell, write, update, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: shell, write, update, plan, question, todo, sub_agent, mcp_*.";
 
 const CODING_AGENT_PROMPT: &str = "\
 You are a senior software engineer with deep expertise in system design, debugging, and code quality.
@@ -126,7 +126,7 @@ Working style:
 - Never silently swallow errors; always surface failure details.
 
 Available tools: shell, read, write, update, search, final.
-Do NOT use: web_search, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: web_search, plan, question, todo, sub_agent, mcp_*.";
 
 const ANALYSIS_AGENT_PROMPT: &str = "\
 You are a senior data analyst and quantitative researcher with expertise in pattern recognition and evidence-based reporting.
@@ -140,7 +140,7 @@ Working style:
 - When comparing options, use consistent criteria and avoid cherry-picking metrics.
 
 Available tools: read, search, web_search, shell, final.
-Do NOT use: write, update, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: write, update, plan, question, todo, sub_agent, mcp_*.";
 
 const WRITER_AGENT_PROMPT: &str = "\
 You are a professional technical writer and content strategist with experience across developer documentation, product copy, and long-form writing.
@@ -155,7 +155,7 @@ Working style:
 - Do not invent facts; if context is missing, flag it explicitly rather than guessing.
 
 Available tools: read, write, search, final.
-Do NOT use: shell, update, web_search, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: shell, update, web_search, plan, question, todo, sub_agent, mcp_*.";
 
 const REVIEWER_AGENT_PROMPT: &str = "\
 You are a principal engineer and quality auditor who has conducted hundreds of code and document reviews across high-stakes production systems.
@@ -170,7 +170,7 @@ Working style:
 - Be honest and impartial; do not soften a REJECT verdict to avoid conflict.
 
 Available tools: read, search, final.
-Do NOT use: shell, write, update, web_search, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: shell, write, update, web_search, plan, question, todo, sub_agent, mcp_*.";
 
 const DOCS_AGENT_PROMPT: &str = "\
 You are a technical documentation specialist focused on keeping project documentation accurate, complete, and developer-friendly.
@@ -186,4 +186,30 @@ Working style:
 - Output only the final document content — no commentary, no meta-explanation.
 
 Available tools: read, write, update, search, final.
-Do NOT use: shell, web_search, plan, question, todo, sub_agent, mcp_*, skill.";
+Do NOT use: shell, web_search, plan, question, todo, sub_agent, mcp_*.";
+
+#[cfg(test)]
+mod tests {
+    use super::BuiltinRole;
+
+    #[test]
+    fn builtin_role_prompts_do_not_forbid_skill_loading() {
+        let roles = [
+            BuiltinRole::Search,
+            BuiltinRole::Coding,
+            BuiltinRole::Analysis,
+            BuiltinRole::Writer,
+            BuiltinRole::Reviewer,
+            BuiltinRole::Docs,
+        ];
+
+        for role in roles {
+            let prompt = role.system_prompt();
+            assert!(
+                !prompt.contains("mcp_*, skill"),
+                "role {:?} should not block skill loading",
+                role
+            );
+        }
+    }
+}

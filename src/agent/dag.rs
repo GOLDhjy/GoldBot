@@ -5,15 +5,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::agent::provider::{LlmBackend, Message, Role};
 use crate::agent::react::parse_llm_response;
-use crate::agent::roles::{build_sub_agent_prompt, BuiltinRole};
+use crate::agent::roles::{BuiltinRole, build_sub_agent_prompt};
 use crate::agent::sub_agent::{
-    InputMerge, NodeId, OutputMerge, SubAgentIdGen, SubAgentResult, SubAgentStatus,
-    TaskGraph, TaskNode,
+    InputMerge, NodeId, OutputMerge, SubAgentIdGen, SubAgentResult, SubAgentStatus, TaskGraph,
+    TaskNode,
 };
+use crate::tools::skills::{Skill, skill_tool_result};
 
 const DEFAULT_SUBAGENT_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_SUBAGENT_MAX_STEPS: usize = 30;
@@ -31,6 +32,7 @@ pub struct DagConfig {
     pub http_client: reqwest::Client,
     pub backend: LlmBackend,
     pub base_system_prompt: String,
+    pub skills: Arc<Vec<Skill>>,
     pub max_steps: usize,
     pub timeout: Duration,
     pub cancel_flag: Option<Arc<AtomicBool>>,
@@ -38,11 +40,17 @@ pub struct DagConfig {
 }
 
 impl DagConfig {
-    pub fn new(http_client: reqwest::Client, backend: LlmBackend, base_system_prompt: String) -> Self {
+    pub fn new(
+        http_client: reqwest::Client,
+        backend: LlmBackend,
+        base_system_prompt: String,
+        skills: Arc<Vec<Skill>>,
+    ) -> Self {
         Self {
             http_client,
             backend,
             base_system_prompt,
+            skills,
             max_steps: DEFAULT_SUBAGENT_MAX_STEPS,
             timeout: Duration::from_secs(DEFAULT_SUBAGENT_TIMEOUT_SECS),
             cancel_flag: None,
@@ -79,7 +87,11 @@ fn compute_execution_layers(graph: &TaskGraph) -> Result<Vec<Vec<&TaskNode>>> {
     for node in &graph.nodes {
         for dep_id in &node.depends_on {
             if !in_degree.contains_key(dep_id) {
-                return Err(anyhow!("Node \"{}\" depends on unknown node \"{}\"", node.id, dep_id));
+                return Err(anyhow!(
+                    "Node \"{}\" depends on unknown node \"{}\"",
+                    node.id,
+                    dep_id
+                ));
             }
             *in_degree.get_mut(&node.id).unwrap() += 1;
             dependents.get_mut(dep_id).unwrap().push(&node.id);
@@ -193,16 +205,26 @@ async fn run_subagent_worker(
     let node_id = node.id.clone();
     let started_at = Instant::now();
 
-    if cancel_flag.as_ref().map(|f| f.load(Ordering::SeqCst)).unwrap_or(false) {
+    if cancel_flag
+        .as_ref()
+        .map(|f| f.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
         return SubAgentResult {
-            id, node_id, status: SubAgentStatus::Cancelled,
-            output: String::new(), messages: vec![], elapsed: started_at.elapsed(),
+            id,
+            node_id,
+            status: SubAgentStatus::Cancelled,
+            output: String::new(),
+            messages: vec![],
+            elapsed: started_at.elapsed(),
         };
     }
 
     let role = node.role.as_ref().and_then(|r| BuiltinRole::from_str(r));
     let system_prompt = build_sub_agent_prompt(
-        node.system_prompt.as_deref(), role.as_ref(), &config.base_system_prompt,
+        node.system_prompt.as_deref(),
+        role.as_ref(),
+        &config.base_system_prompt,
     );
     let mut messages: Vec<Message> = vec![Message::system(&system_prompt)];
     let user_content = match merged_input {
@@ -211,17 +233,25 @@ async fn run_subagent_worker(
     };
     messages.push(Message::user(&user_content));
 
-    let backend = node.model.as_ref().map(|m| match &config.backend {
-        LlmBackend::Glm(_) => LlmBackend::Glm(m.clone()),
-        LlmBackend::Kimi(_) => LlmBackend::Kimi(m.clone()),
-        LlmBackend::MiniMax(_) => LlmBackend::MiniMax(m.clone()),
-    }).unwrap_or_else(|| config.backend.clone());
+    let backend = node
+        .model
+        .as_ref()
+        .map(|m| match &config.backend {
+            LlmBackend::Glm(_) => LlmBackend::Glm(m.clone()),
+            LlmBackend::Kimi(_) => LlmBackend::Kimi(m.clone()),
+            LlmBackend::MiniMax(_) => LlmBackend::MiniMax(m.clone()),
+        })
+        .unwrap_or_else(|| config.backend.clone());
 
     let mut output = String::new();
     let mut status = SubAgentStatus::Completed;
 
     'react_loop: for _step in 0..config.max_steps {
-        if cancel_flag.as_ref().map(|f| f.load(Ordering::SeqCst)).unwrap_or(false) {
+        if cancel_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
             status = SubAgentStatus::Cancelled;
             break;
         }
@@ -248,34 +278,62 @@ async fn run_subagent_worker(
                                     break;
                                 }
                                 crate::types::LlmAction::Shell { command } => {
-                                    tokio::task::spawn_blocking(move || execute_shell_command(command))
-                                        .await.unwrap_or_else(|_| "[Shell: task panicked]".to_string())
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_shell_command(command)
+                                    })
+                                    .await
+                                    .unwrap_or_else(|_| "[Shell: task panicked]".to_string())
                                 }
-                                crate::types::LlmAction::ReadFile { path, offset, limit } => {
-                                    tokio::task::spawn_blocking(move || execute_read(&path, offset, limit))
-                                        .await.unwrap_or_else(|_| "[Read: task panicked]".to_string())
-                                }
+                                crate::types::LlmAction::ReadFile {
+                                    path,
+                                    offset,
+                                    limit,
+                                } => tokio::task::spawn_blocking(move || {
+                                    execute_read(&path, offset, limit)
+                                })
+                                .await
+                                .unwrap_or_else(|_| "[Read: task panicked]".to_string()),
                                 crate::types::LlmAction::WriteFile { path, content } => {
-                                    tokio::task::spawn_blocking(move || execute_write(&path, &content))
-                                        .await.unwrap_or_else(|_| "[Write: task panicked]".to_string())
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_write(&path, &content)
+                                    })
+                                    .await
+                                    .unwrap_or_else(|_| "[Write: task panicked]".to_string())
                                 }
-                                crate::types::LlmAction::UpdateFile { path, line_start, line_end, new_string } => {
-                                    tokio::task::spawn_blocking(move || execute_update(&path, line_start, line_end, &new_string))
-                                        .await.unwrap_or_else(|_| "[Update: task panicked]".to_string())
-                                }
+                                crate::types::LlmAction::UpdateFile {
+                                    path,
+                                    line_start,
+                                    line_end,
+                                    new_string,
+                                } => tokio::task::spawn_blocking(move || {
+                                    execute_update(&path, line_start, line_end, &new_string)
+                                })
+                                .await
+                                .unwrap_or_else(|_| "[Update: task panicked]".to_string()),
                                 crate::types::LlmAction::SearchFiles { pattern, path } => {
-                                    tokio::task::spawn_blocking(move || execute_search(&pattern, &path))
-                                        .await.unwrap_or_else(|_| "[Search: task panicked]".to_string())
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_search(&pattern, &path)
+                                    })
+                                    .await
+                                    .unwrap_or_else(|_| "[Search: task panicked]".to_string())
                                 }
                                 crate::types::LlmAction::WebSearch { query } => {
                                     tokio::task::spawn_blocking(move || execute_web_search(&query))
-                                        .await.unwrap_or_else(|_| "[WebSearch: task panicked]".to_string())
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            "[WebSearch: task panicked]".to_string()
+                                        })
+                                }
+                                crate::types::LlmAction::Skill { name } => {
+                                    skill_tool_result(config.skills.as_ref(), &name)
                                 }
                                 _ => "[Action not supported in SubAgent]".to_string(),
                             };
                             messages.push(Message::user(&tool_result));
                         }
-                        if found_final { break 'react_loop; }
+                        if found_final {
+                            break 'react_loop;
+                        }
                     }
                     Err(e) => messages.push(Message::user(format!("[Parse error: {e}]"))),
                 }
@@ -288,7 +346,9 @@ async fn run_subagent_worker(
     }
 
     if matches!(status, SubAgentStatus::Completed) && output.is_empty() {
-        output = messages.iter().rev()
+        output = messages
+            .iter()
+            .rev()
             .find(|m| matches!(m.role, Role::Assistant))
             .map(|m| m.content.clone())
             .unwrap_or_else(|| "[No output]".to_string());
@@ -297,23 +357,42 @@ async fn run_subagent_worker(
     let elapsed = started_at.elapsed();
     if let Some(tx) = &config.progress_tx {
         let success = matches!(status, SubAgentStatus::Completed);
-        let _ = tx.send(NodeProgress { node_id: node_id.clone(), elapsed, success });
+        let _ = tx.send(NodeProgress {
+            node_id: node_id.clone(),
+            elapsed,
+            success,
+        });
     }
-    SubAgentResult { id, node_id, status, output, messages, elapsed }
+    SubAgentResult {
+        id,
+        node_id,
+        status,
+        output,
+        messages,
+        elapsed,
+    }
 }
 
 fn execute_shell_command(command: String) -> String {
     use std::process::Command;
     #[cfg(target_os = "windows")]
-    let output = Command::new("powershell").args(["-Command", &command]).output();
+    let output = Command::new("powershell")
+        .args(["-Command", &command])
+        .output();
     #[cfg(not(target_os = "windows"))]
     let output = Command::new("bash").args(["-c", &command]).output();
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if out.status.success() { format!("[Shell exit=0]\n{stdout}") }
-            else { format!("[Shell exit={}]\n{stdout}\n{stderr}", out.status.code().unwrap_or(-1)) }
+            if out.status.success() {
+                format!("[Shell exit=0]\n{stdout}")
+            } else {
+                format!(
+                    "[Shell exit={}]\n{stdout}\n{stderr}",
+                    out.status.code().unwrap_or(-1)
+                )
+            }
         }
         Err(e) => format!("[Shell error: {e}]"),
     }
@@ -327,9 +406,12 @@ fn execute_read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Stri
             let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0).min(total);
             let end = limit.map(|l| (start + l).min(total)).unwrap_or(total);
             let num_width = total.to_string().len().max(1);
-            let body: String = lines[start..end].iter().enumerate()
+            let body: String = lines[start..end]
+                .iter()
+                .enumerate()
                 .map(|(i, l)| format!("{:>num_width$}: {l}", start + i + 1))
-                .collect::<Vec<_>>().join("\n");
+                .collect::<Vec<_>>()
+                .join("\n");
             if end < total {
                 format!("{body}\n... ({} more lines)", total - end)
             } else {
@@ -357,8 +439,9 @@ fn execute_search(pattern: &str, path: &str) -> String {
     use std::path::Path;
 
     let search_path = path.unwrap_or(".");
-    let pattern_regex = Regex::new(pattern).unwrap_or_else(|_| Regex::new(&regex::escape(pattern)).unwrap());
-    
+    let pattern_regex =
+        Regex::new(pattern).unwrap_or_else(|_| Regex::new(&regex::escape(pattern)).unwrap());
+
     let mut results = Vec::new();
     let mut file_count = 0;
     const MAX_FILES: usize = 50;
@@ -372,20 +455,32 @@ fn execute_search(pattern: &str, path: &str) -> String {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if path.file_name().and_then(|n| n.to_str())
+                    if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
                         .map(|n| n.starts_with('.') || n == "target" || n == "node_modules")
-                        .unwrap_or(false) {
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     search_dir(&path, pattern, results, file_count);
                 } else if path.is_file() {
                     *file_count += 1;
-                    if *file_count > MAX_FILES { return; }
+                    if *file_count > MAX_FILES {
+                        return;
+                    }
                     if let Ok(content) = fs::read_to_string(&path) {
                         for (line_num, line) in content.lines().enumerate() {
                             if pattern.is_match(line) {
-                                results.push(format!("{}:{}: {}", path.display(), line_num + 1, line.trim()));
-                                if results.len() >= MAX_MATCHES { return; }
+                                results.push(format!(
+                                    "{}:{}: {}",
+                                    path.display(),
+                                    line_num + 1,
+                                    line.trim()
+                                ));
+                                if results.len() >= MAX_MATCHES {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -394,7 +489,12 @@ fn execute_search(pattern: &str, path: &str) -> String {
         }
     }
 
-    search_dir(Path::new(search_path), &pattern_regex, &mut results, &mut file_count);
+    search_dir(
+        Path::new(search_path),
+        &pattern_regex,
+        &mut results,
+        &mut file_count,
+    );
 
     if results.is_empty() {
         format!("[No matches for: {}]", pattern)
@@ -426,7 +526,11 @@ fn execute_update(path: &str, line_start: usize, line_end: usize, new_string: &s
     if normalized.ends_with('\n') {
         result.push('\n');
     }
-    let final_content = if crlf { result.replace("\n", "\r\n") } else { result };
+    let final_content = if crlf {
+        result.replace("\n", "\r\n")
+    } else {
+        result
+    };
     match std::fs::write(path, final_content) {
         Ok(()) => format!("[Updated {path}: lines {line_start}-{line_end} replaced]"),
         Err(e) => format!("[Update write error: {}]", e),
@@ -454,26 +558,34 @@ pub fn build_dag_tree(
     while changed {
         changed = false;
         for n in nodes {
-            let d = n.depends_on.iter()
+            let d = n
+                .depends_on
+                .iter()
                 .map(|dep| depth.get(dep.as_str()).copied().unwrap_or(0) + 1)
                 .max()
                 .unwrap_or(0);
             let entry = depth.entry(n.id.as_str()).or_insert(0);
-            if *entry < d { *entry = d; changed = true; }
+            if *entry < d {
+                *entry = d;
+                changed = true;
+            }
         }
     }
     let max_depth = depth.values().copied().max().unwrap_or(0);
     let output_set: HashSet<&str> = output_nodes.iter().map(|s| s.as_str()).collect();
     let mut lines = vec![format!("SubAgent DAG  ({} nodes)", nodes.len())];
     for layer in 0..=max_depth {
-        let mut layer_nodes: Vec<&TaskNode> = nodes.iter()
+        let mut layer_nodes: Vec<&TaskNode> = nodes
+            .iter()
             .filter(|n| depth.get(n.id.as_str()).copied().unwrap_or(0) == layer)
             .collect();
         layer_nodes.sort_by(|a, b| a.id.cmp(&b.id));
         let count = layer_nodes.len();
         for (i, n) in layer_nodes.iter().enumerate() {
             let branch = if i + 1 == count { "└─" } else { "├─" };
-            let role_hint = n.role.as_deref()
+            let role_hint = n
+                .role
+                .as_deref()
                 .map(|r| format!(" [{r}]"))
                 .unwrap_or_default();
             let deps = if n.depends_on.is_empty() {
@@ -484,7 +596,11 @@ pub fn build_dag_tree(
             let output_mark = if output_set.contains(n.id.as_str())
                 || (output_set.is_empty()
                     && !nodes.iter().any(|other| other.depends_on.contains(&n.id)))
-            { " ★" } else { "" };
+            {
+                " ★"
+            } else {
+                ""
+            };
             // 完成标记
             let done_mark = if let Some((ok, secs)) = done.get(&n.id) {
                 let sym = if *ok { "✓" } else { "✗" };
@@ -492,7 +608,10 @@ pub fn build_dag_tree(
             } else {
                 String::new()
             };
-            lines.push(format!("  {branch} {}{role_hint}{deps}{output_mark}{done_mark}", n.id));
+            lines.push(format!(
+                "  {branch} {}{role_hint}{deps}{output_mark}{done_mark}",
+                n.id
+            ));
         }
     }
     lines.join("\n")
@@ -513,7 +632,12 @@ pub async fn execute(graph: TaskGraph, config: DagConfig) -> Result<DagResult> {
     };
 
     for layer in &layers {
-        if config.cancel_flag.as_ref().map(|f| f.load(Ordering::SeqCst)).unwrap_or(false) {
+        if config
+            .cancel_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
             break;
         }
 
@@ -524,11 +648,16 @@ pub async fn execute(graph: TaskGraph, config: DagConfig) -> Result<DagResult> {
                 None
             } else {
                 let guard = results.lock().unwrap();
-                let inputs: Vec<(NodeId, String)> = node.depends_on.iter()
+                let inputs: Vec<(NodeId, String)> = node
+                    .depends_on
+                    .iter()
                     .filter_map(|dep| guard.get(dep).map(|r| (dep.clone(), r.output.clone())))
                     .collect();
-                if inputs.len() != node.depends_on.len() { None }
-                else { Some(merge_inputs(&inputs, node.input_merge)) }
+                if inputs.len() != node.depends_on.len() {
+                    None
+                } else {
+                    Some(merge_inputs(&inputs, node.input_merge))
+                }
             };
 
             let node = (*node).clone();
@@ -543,15 +672,25 @@ pub async fn execute(graph: TaskGraph, config: DagConfig) -> Result<DagResult> {
 
         while let Some(join_result) = join_set.join_next().await {
             if let Ok(result) = join_result {
-                results.lock().unwrap().insert(result.node_id.clone(), result);
+                results
+                    .lock()
+                    .unwrap()
+                    .insert(result.node_id.clone(), result);
             }
         }
     }
 
     let results_guard = results.lock().unwrap();
-    let has_failures = results_guard.values().any(|r| !matches!(r.status, SubAgentStatus::Completed));
-    let outputs: Vec<(NodeId, String)> = output_node_ids.iter()
-        .filter_map(|id| results_guard.get(id).map(|r| (id.clone(), r.output.clone())))
+    let has_failures = results_guard
+        .values()
+        .any(|r| !matches!(r.status, SubAgentStatus::Completed));
+    let outputs: Vec<(NodeId, String)> = output_node_ids
+        .iter()
+        .filter_map(|id| {
+            results_guard
+                .get(id)
+                .map(|r| (id.clone(), r.output.clone()))
+        })
         .collect();
 
     Ok(DagResult {
@@ -581,7 +720,10 @@ mod tests {
     #[test]
     fn test_topological_sort() {
         let graph = TaskGraph {
-            nodes: vec![make_node("a", "t1", vec![]), make_node("b", "t2", vec!["a"])],
+            nodes: vec![
+                make_node("a", "t1", vec![]),
+                make_node("b", "t2", vec!["a"]),
+            ],
             output_nodes: vec!["b".to_string()],
             output_merge: OutputMerge::default(),
         };
@@ -592,7 +734,10 @@ mod tests {
     #[test]
     fn test_cycle_detection() {
         let graph = TaskGraph {
-            nodes: vec![make_node("a", "t1", vec!["b"]), make_node("b", "t2", vec!["a"])],
+            nodes: vec![
+                make_node("a", "t1", vec!["b"]),
+                make_node("b", "t2", vec!["a"]),
+            ],
             output_nodes: vec![],
             output_merge: OutputMerge::default(),
         };

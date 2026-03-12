@@ -9,6 +9,7 @@ use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::store::MemoryStore;
 use crate::tools::safety::{RiskLevel, assess_command};
+use crate::tools::skills::skill_tool_result;
 use crate::types::{AssistMode, Event, LlmAction, Mode};
 use crate::ui::format::{
     collapsed_lines, emit_live_event, sanitize_final_summary_for_tui, shorten_text,
@@ -380,7 +381,7 @@ pub(crate) fn process_llm_result(
             LlmAction::SubAgent { graph } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
-                
+
                 // 构建 DAG 树形显示（使用共享函数，初始无完成标记）
                 let dag_tree = crate::agent::dag::build_dag_tree(
                     &graph.nodes,
@@ -412,6 +413,7 @@ pub(crate) fn process_llm_result(
                     http_client,
                     app.backend.clone(),
                     app.base_prompt.clone(),
+                    Arc::new(app.skills.clone()),
                 );
                 dag_config.cancel_flag = Some(Arc::clone(&app.dag_cancel_flag));
                 dag_config.progress_tx = Some(progress_tx);
@@ -875,8 +877,11 @@ pub(crate) fn execute_update_file(
 
     match result {
         Ok((old_content, new_content_for_diff, ctx_start, norm_new)) => {
-            let diff_text =
-                crate::tools::shell::render_unified_diff(&old_content, &new_content_for_diff, ctx_start);
+            let diff_text = crate::tools::shell::render_unified_diff(
+                &old_content,
+                &new_content_for_diff,
+                ctx_start,
+            );
             let store = MemoryStore::new();
             let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
@@ -944,8 +949,7 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
 
     match result {
         Ok((old_content, new_content)) => {
-            let diff_text =
-                crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
+            let diff_text = crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
             let store = MemoryStore::new();
             let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
@@ -1142,11 +1146,7 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    let msg = if let Some(skill) = app.skills.iter().find(|s| s.name == name) {
-        format!("Skill '{}' content:\n{}", name, skill.content)
-    } else {
-        format!("Skill '{}' not found.", name)
-    };
+    let msg = skill_tool_result(&app.skills, name);
     app.messages.push(Message::user(msg));
     sync_context_budget(app, screen);
 }

@@ -102,6 +102,15 @@ pub fn skills_system_prompt(skills: &[Skill]) -> String {
     out
 }
 
+/// Render the synthetic tool-result message injected after a skill is loaded.
+pub fn skill_tool_result(skills: &[Skill], name: &str) -> String {
+    if let Some(skill) = skills.iter().find(|s| s.name == name) {
+        format!("Skill '{}' content:\n{}", name, skill.content)
+    } else {
+        format!("Skill '{}' not found.", name)
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Strip surrounding single or double quotes from a YAML scalar value.
@@ -200,4 +209,27 @@ fn parse_frontmatter(content: &str) -> Option<(HashMap<String, String>, String)>
         return None;
     }
     Some((meta, body_lines.join("\n")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Skill, skill_tool_result};
+
+    #[test]
+    fn skill_tool_result_returns_skill_content() {
+        let skills = vec![Skill {
+            name: "demo-skill".to_string(),
+            description: "demo".to_string(),
+            content: "Use this workflow.".to_string(),
+        }];
+
+        let result = skill_tool_result(&skills, "demo-skill");
+        assert_eq!(result, "Skill 'demo-skill' content:\nUse this workflow.");
+    }
+
+    #[test]
+    fn skill_tool_result_reports_missing_skill() {
+        let result = skill_tool_result(&[], "missing-skill");
+        assert_eq!(result, "Skill 'missing-skill' not found.");
+    }
 }
