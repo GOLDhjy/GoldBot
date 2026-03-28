@@ -72,7 +72,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM", &["GLM-4.7", "glm-5"]),
+    ("GLM", &["GLM-4.7", "glm-5", "glm-5.1"]),
     (
         "Kimi",
         &["kimi-for-coding", "kimi-k2.5", "kimi-k2-thinking"],
@@ -282,4 +282,20 @@ impl LlmBackend {
 
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse::<u32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BACKEND_PRESETS;
+
+    #[test]
+    fn glm_backend_presets_include_glm_5_1() {
+        let glm_models = BACKEND_PRESETS
+            .iter()
+            .find(|(label, _)| *label == "GLM")
+            .map(|(_, models)| *models)
+            .expect("GLM backend preset should exist");
+
+        assert!(glm_models.contains(&"glm-5.1"));
+    }
 }

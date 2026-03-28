@@ -245,7 +245,7 @@ description: 整理和处理 PDF 文件
 |---|---|---|---|
 | `BIGMODEL_API_KEY` | ✅ | — | BigModel API 密钥 |
 | `BIGMODEL_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | API 基础 URL |
-| `BIGMODEL_MODEL` | 否 | `GLM-4.7` | 模型名称 |
+| `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，支持 `GLM-4.7`、`glm-5`、`glm-5.1` |
 | `BOCHA_API_KEY` | 否 | — | Bocha AI 搜索密钥 |
 | `GOLDBOT_TASK` | 否 | — | 启动时直接执行的任务 |
 | `GOLDBOT_MCP_SERVERS` | 否 | — | MCP 配置 JSON（覆盖文件） |
