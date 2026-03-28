@@ -235,7 +235,13 @@ fn normalize_model_for_endpoint(model: &str, coding_endpoint: bool) -> String {
         return model.to_string();
     }
     match model {
-        "kimi-k2.5" | "k2p5" => "kimi-for-coding".to_string(),
+        "kimi-k2.5"
+        | "k2p5"
+        | "kimi-latest"
+        | "kimi-thinking-preview"
+        | "kimi-k2-0711-preview"
+        | "kimi-k2-0905-preview"
+        | "kimi-k2-turbo-preview" => "kimi-for-coding".to_string(),
         other => other.to_string(),
     }
 }
@@ -450,8 +456,20 @@ mod tests {
             "kimi-for-coding"
         );
         assert_eq!(
-            normalize_model_for_endpoint("kimi-k2-thinking", true),
-            "kimi-k2-thinking"
+            normalize_model_for_endpoint("kimi-latest", true),
+            "kimi-for-coding"
+        );
+        assert_eq!(
+            normalize_model_for_endpoint("kimi-thinking-preview", true),
+            "kimi-for-coding"
+        );
+        assert_eq!(
+            normalize_model_for_endpoint("kimi-k2-0905-preview", true),
+            "kimi-for-coding"
+        );
+        assert_eq!(
+            normalize_model_for_endpoint("kimi-k2-turbo-preview", true),
+            "kimi-for-coding"
         );
     }
 

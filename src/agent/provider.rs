@@ -72,12 +72,26 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM", &["GLM-4.7", "glm-5", "glm-5.1"]),
+    ("GLM", &["GLM-4.7", "GLM-4.7-FlashX", "glm-5", "glm-5.1"]),
     (
         "Kimi",
-        &["kimi-for-coding", "kimi-k2.5", "kimi-k2-thinking"],
+        &[
+            "kimi-for-coding",
+            "kimi-k2-0905-preview",
+            "kimi-k2-turbo-preview",
+            "kimi-thinking-preview",
+            "kimi-latest",
+        ],
     ),
-    ("MiniMax", &["MiniMax-M2.5", "MiniMax-M2.1"]),
+    (
+        "MiniMax",
+        &[
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+        ],
+    ),
 ];
 
 const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
@@ -297,5 +311,37 @@ mod tests {
             .expect("GLM backend preset should exist");
 
         assert!(glm_models.contains(&"glm-5.1"));
+    }
+
+    #[test]
+    fn kimi_backend_presets_include_selectable_models() {
+        let kimi_models = BACKEND_PRESETS
+            .iter()
+            .find(|(label, _)| *label == "Kimi")
+            .map(|(_, models)| *models)
+            .expect("Kimi backend preset should exist");
+
+        assert!(kimi_models.contains(&"kimi-for-coding"));
+        assert!(kimi_models.contains(&"kimi-k2-0905-preview"));
+        assert!(kimi_models.contains(&"kimi-k2-turbo-preview"));
+        assert!(kimi_models.contains(&"kimi-thinking-preview"));
+        assert!(kimi_models.contains(&"kimi-latest"));
+    }
+
+    #[test]
+    fn minimax_backend_presets_include_current_models() {
+        let minimax_models = BACKEND_PRESETS
+            .iter()
+            .find(|(label, _)| *label == "MiniMax")
+            .map(|(_, models)| *models)
+            .expect("MiniMax backend preset should exist");
+
+        assert!(minimax_models.contains(&"MiniMax-M2.7"));
+        assert!(minimax_models.contains(&"MiniMax-M2.7-highspeed"));
+        assert!(minimax_models.contains(&"MiniMax-M2.5"));
+        assert!(minimax_models.contains(&"MiniMax-M2.5-highspeed"));
+        assert!(!minimax_models.contains(&"MiniMax-M2.1"));
+        assert!(!minimax_models.contains(&"MiniMax-M2.1-highspeed"));
+        assert!(!minimax_models.contains(&"MiniMax-M2"));
     }
 }
