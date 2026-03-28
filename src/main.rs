@@ -87,6 +87,7 @@ pub(crate) struct App {
     pub answering_question: bool,
     /// When Some, input is treated as an API key value for this env var name.
     pub pending_api_key_name: Option<String>,
+    pub message_queue: Vec<String>,
     pub mcp_registry: crate::tools::mcp::McpRegistry,
     pub mcp_discovery_rx:
         Option<std::sync::mpsc::Receiver<(crate::tools::mcp::McpRegistry, Vec<String>)>>,
@@ -283,6 +284,7 @@ impl App {
             pending_question: None,
             answering_question: false,
             pending_api_key_name: None,
+            message_queue: Vec::new(),
             mcp_registry,
             mcp_discovery_rx: None,
             skills,
@@ -496,6 +498,28 @@ async fn run_loop(
         poll_dag_result(app, screen);
 
         drain_ge_events(app, screen);
+
+        // Consume queued user messages as interjections before the next LLM call
+        if app.running
+            && app.pending_confirm.is_none()
+            && !app.llm_calling
+            && !app.shell_task_running
+            && !app.message_queue.is_empty()
+            && !app.needs_agent_executor
+        {
+            let queued: Vec<String> = app.message_queue.drain(..).collect();
+            for msg in queued {
+                let wrapped = agent::react::build_interjection_user_message(&msg);
+                app.messages.push(agent::provider::Message::user(wrapped));
+                let ev = Event::UserTask { text: msg.clone() };
+                ui::format::emit_live_event(screen, &ev);
+                app.task_events.push(ev);
+            }
+            agent::executor::sync_context_budget(app, screen);
+            app.needs_agent_executor = true;
+            screen.status = "Interjection sent. Continuing...".to_string();
+            screen.refresh();
+        }
 
         if app.running
             && app.pending_confirm.is_none()

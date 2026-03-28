@@ -637,6 +637,30 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
 
 fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     match key {
+        KeyCode::Enter
+            if !modifiers.contains(KeyModifiers::SHIFT)
+                && !modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            let raw = expand_input_text(app, &screen.input);
+            let task = raw.trim().to_string();
+            if !task.is_empty() {
+                let at_file_chunks = std::mem::take(&mut app.at_file.chunks);
+                cancel_at_file_mode(app, screen);
+                let final_task = attach_files_to_task(&at_file_chunks, &task);
+                clear_input_buffer(app, screen);
+                let preview: String = final_task.chars().take(40).collect();
+                app.message_queue.push(final_task);
+                screen.status = format!("Queued: {preview}").dark_yellow().to_string();
+                screen.refresh();
+            }
+        }
+        KeyCode::Enter
+            if modifiers.contains(KeyModifiers::SHIFT)
+                || modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            screen.insert_char_at_cursor('\n');
+            screen.refresh();
+        }
         KeyCode::Left => {
             screen.cursor_left();
             screen.refresh();

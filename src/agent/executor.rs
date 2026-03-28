@@ -61,6 +61,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.needs_agent_executor = true;
     app.interrupt_llm_loop_requested = false;
     app.interjection_mode = false;
+    app.message_queue.clear();
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
