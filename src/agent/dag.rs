@@ -317,6 +317,13 @@ async fn run_subagent_worker(
                                     .await
                                     .unwrap_or_else(|_| "[Search: task panicked]".to_string())
                                 }
+                                crate::types::LlmAction::GlobFiles { pattern, path } => {
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_glob(&pattern, &path)
+                                    })
+                                    .await
+                                    .unwrap_or_else(|_| "[Glob: task panicked]".to_string())
+                                }
                                 crate::types::LlmAction::WebSearch { query } => {
                                     tokio::task::spawn_blocking(move || execute_web_search(&query))
                                         .await
@@ -500,6 +507,13 @@ fn execute_search(pattern: &str, path: &str) -> String {
         format!("[No matches for: {}]", pattern)
     } else {
         format!("[Search: {}]\n{}", pattern, results.join("\n"))
+    }
+}
+
+fn execute_glob(pattern: &str, path: &str) -> String {
+    match crate::tools::glob::glob_files(pattern, path) {
+        Ok(result) => result.output,
+        Err(e) => format!("[Glob error: {e}]"),
     }
 }
 

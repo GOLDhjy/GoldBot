@@ -1,4 +1,5 @@
 pub mod command;
+pub mod glob;
 pub mod mcp;
 pub mod safety;
 pub mod search;

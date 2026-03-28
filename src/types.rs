@@ -192,11 +192,6 @@ pub enum LlmAction {
     Shell {
         command: String,
     },
-    /// Batch read-only exploration: multiple commands executed in sequence,
-    /// results combined into a single tool-result message.
-    Explorer {
-        commands: Vec<String>,
-    },
     WebSearch {
         query: String,
     },
@@ -239,6 +234,15 @@ pub enum LlmAction {
     SearchFiles {
         pattern: String,
         path: String,
+    },
+    GlobFiles {
+        pattern: String,
+        path: String,
+    },
+    Task {
+        description: String,
+        subagent_type: String,
+        prompt: String,
     },
     ReadFile {
         path: String,

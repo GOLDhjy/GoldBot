@@ -5,7 +5,7 @@ use crate::{
     },
     types::{AssistMode, LlmAction},
 };
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
@@ -16,7 +16,7 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 ## Rules
 - 优先使用Sub Agent DAG来拆分任务,避免一次性执行过多操作。
 - When asked to plan implementation, use <tool>set_mode</tool> with <mode>plan</mode>, then follow the 'plan mode' flow.
-- One blocking tool call per response. <tool>phase</tool> are non-blocking and may be included too. Use <tool>explorer</tool> to batch read-only lookups with multiple <command> tags.
+- One blocking tool call per response. &lt;tool&gt;phase&lt;/tool&gt; are non-blocking and may be included too.
 - Use <tool>phase</tool> to write what to do next (one short sentence). Update it when the stage changes; omit it if unchanged.
 - <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.
 - Use <final> as soon as done; avoid extra commands.
@@ -41,13 +41,6 @@ Task complete (required):
 <tool>set_mode</tool>
 <mode>agent</mode>
 `<mode>` 可选值：`agent` / `plan`
-
-Explorer (batch read-only commands; all results returned at once — put everything into ONE call, never repeat):
-prefer native tool: read, search, write/update than explorer.
-<thought>reasoning</thought>
-<tool>explorer</tool>
-<command>first read-only command</command>
-<command>more read-only command</command>
 
 Phase update (non-blocking; write what to do next):
 <thought>reasoning</thought>
@@ -81,6 +74,12 @@ Search files (regex search across file contents; native, cross-platform):
 <pattern>regex or literal string</pattern>
 <path>optional/path/to/search (default: .)</path>
 
+Glob (find files by name pattern, respects .gitignore, sorted by modification time):
+<thought>reasoning</thought>
+<tool>glob</tool>
+<pattern>glob pattern (e.g. **/*.rs, src/**/*.toml, *.md)</pattern>
+<path>optional/path/to/search (default: .)</path>
+
 Shell command: prefer native tool: read, search, write/update.
 <thought>reasoning</thought>
 <tool>shell</tool>
@@ -90,6 +89,16 @@ Web search (use when you need up-to-date or online information):
 <thought>reasoning</thought>
 <tool>web_search</tool>
 <query>search query</query>
+
+Task (launch a lightweight sub-agent with independent context; use for exploration, parallel research, or delegating focused sub-work):
+<thought>reasoning</thought>
+<tool>task</tool>
+<description>3-5 word task summary</description>
+<subagent_type>explore|general</subagent_type>
+<prompt>detailed task instructions with all necessary context</prompt>
+subagent_type:
+- explore: fast agent specialized for codebase exploration, file searching and reading
+- general: general-purpose agent for complex multi-step tasks
 
 MCP tool (only if listed later in this prompt):
 <thought>reasoning</thought>
@@ -349,6 +358,25 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let path = extract_last_tag(text, "path").unwrap_or_else(|| ".".to_string());
             Ok(LlmAction::SearchFiles { pattern, path })
         }
+        "glob" => {
+            let pattern = extract_last_tag(text, "pattern")
+                .ok_or_else(|| anyhow!("missing <pattern> for glob tool call"))?;
+            let path = extract_last_tag(text, "path").unwrap_or_else(|| ".".to_string());
+            Ok(LlmAction::GlobFiles { pattern, path })
+        }
+        "task" => {
+            let description = extract_last_tag(text, "description")
+                .ok_or_else(|| anyhow!("missing <description> for task tool call"))?;
+            let subagent_type = extract_last_tag(text, "subagent_type")
+                .ok_or_else(|| anyhow!("missing <subagent_type> for task tool call"))?;
+            let prompt = extract_last_tag(text, "prompt")
+                .ok_or_else(|| anyhow!("missing <prompt> for task tool call"))?;
+            Ok(LlmAction::Task {
+                description,
+                subagent_type,
+                prompt,
+            })
+        }
         "web_search" => {
             let query = extract_last_tag(text, "query")
                 .ok_or_else(|| anyhow!("missing <query> for web_search tool call"))?;
@@ -360,13 +388,6 @@ fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
             let mode = AssistMode::parse_llm_name(&raw_mode)
                 .ok_or_else(|| anyhow!("unsupported <mode> `{raw_mode}` for set_mode tool call"))?;
             Ok(LlmAction::SetMode { mode })
-        }
-        "explorer" => {
-            let commands = extract_all_tags(text, "command");
-            if commands.is_empty() {
-                return Err(anyhow!("missing <command> for explorer tool call"));
-            }
-            Ok(LlmAction::Explorer { commands })
         }
         "sub_agent" => {
             let raw = extract_last_tag(text, "graph")
@@ -603,7 +624,8 @@ mod tests {
 
     #[test]
     fn parse_tools_recovers_after_unclosed_tool_tag() {
-        let raw = "<tool>mcp_builtin_zread_read_file>\n<args>{\"file_path\":\"README.md\"}</args>\n\
+        let raw =
+            "<tool>mcp_builtin_zread_read_file>\n<args>{\"file_path\":\"README.md\"}</args>\n\
                    <tool>read</tool><path>README.md</path>";
         let (_, actions) = parse_llm_response(raw).expect("should recover and parse later tool");
         assert_eq!(actions.len(), 1);

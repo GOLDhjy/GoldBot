@@ -36,19 +36,8 @@ pub(crate) enum ShellExecResult {
     Command {
         result: Result<crate::tools::shell::CommandResult, String>,
     },
-    ExplorerProgress {
-        completed: usize,
-        total: usize,
-        command: String,
-    },
     Search {
         result: Result<crate::tools::search::SearchResult, String>,
-    },
-    Explorer {
-        commands: Vec<String>,
-        outputs: Vec<String>,
-        llm_parts: Vec<String>,
-        final_exit: i32,
     },
 }
 
@@ -264,12 +253,6 @@ pub(crate) fn process_llm_result(
                 }
                 break 'actions;
             }
-            LlmAction::Explorer { commands } => {
-                plan_shown_without_followup = false;
-                had_non_blocking_only = false;
-                execute_explorer_batch(app, screen, &commands);
-                break 'actions;
-            }
             LlmAction::UpdateFile {
                 path,
                 line_start,
@@ -296,6 +279,13 @@ pub(crate) fn process_llm_result(
                 app.needs_agent_executor = true;
                 break 'actions;
             }
+            LlmAction::GlobFiles { pattern, path } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_glob_files(app, screen, &pattern, &path);
+                app.needs_agent_executor = true;
+                break 'actions;
+            }
             LlmAction::ReadFile {
                 path,
                 offset,
@@ -312,6 +302,12 @@ pub(crate) fn process_llm_result(
                 had_non_blocking_only = false;
                 execute_web_search(app, screen, &query);
                 app.needs_agent_executor = true;
+                break 'actions;
+            }
+            LlmAction::Task { description, subagent_type, prompt } => {
+                plan_shown_without_followup = false;
+                had_non_blocking_only = false;
+                execute_task(app, screen, &description, &subagent_type, &prompt);
                 break 'actions;
             }
             LlmAction::Question { text, options } => {
@@ -649,75 +645,6 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
     }
 }
 
-pub(crate) fn execute_explorer_batch(app: &mut App, screen: &mut Screen, commands: &[String]) {
-    if app.shell_task_running {
-        let msg = "Another shell task is still running. Please wait.";
-        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
-        let ev = Event::ToolResult {
-            exit_code: -1,
-            output: msg.to_string(),
-        };
-        emit_live_event(screen, &ev);
-        app.task_events.push(ev);
-        app.needs_agent_executor = true;
-        return;
-    }
-
-    crate::tools::shell::clear_running_shell_cancel_request();
-    let total = commands.len();
-    screen.status = format!("Explorer [0/{total}]");
-    screen.refresh_status_only();
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    app.shell_exec_rx = Some(rx);
-    app.shell_task_running = true;
-
-    let commands_owned = commands.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let mut llm_parts: Vec<String> = Vec::new();
-        let mut outputs: Vec<String> = Vec::new();
-        let mut final_exit: i32 = 0;
-        let total = commands_owned.len();
-
-        for (idx, cmd) in commands_owned.iter().enumerate() {
-            let _ = tx.send(ShellExecResult::ExplorerProgress {
-                completed: idx + 1,
-                total,
-                command: cmd.clone(),
-            });
-            match crate::tools::shell::run_command(cmd) {
-                Ok(out) => {
-                    let mut llm = format!("$ {cmd}\n{}", out.output.trim_end());
-                    if out.exit_code != 0 {
-                        llm.push_str(&format!("\n(exit={})", out.exit_code));
-                        final_exit = out.exit_code;
-                    }
-                    llm_parts.push(llm);
-                    let preview = out
-                        .output
-                        .lines()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("(no output)")
-                        .to_string();
-                    outputs.push(preview);
-                }
-                Err(e) => {
-                    llm_parts.push(format!("$ {cmd}\nexecution failed: {e}"));
-                    outputs.push(format!("execution failed: {e}"));
-                    final_exit = -1;
-                }
-            }
-        }
-
-        let _ = tx.send(ShellExecResult::Explorer {
-            commands: commands_owned,
-            outputs,
-            llm_parts,
-            final_exit,
-        });
-    });
-}
-
 pub(crate) fn handle_shell_exec_result(
     app: &mut App,
     screen: &mut Screen,
@@ -773,19 +700,6 @@ pub(crate) fn handle_shell_exec_result(
                 app.task_events.push(ev);
             }
         },
-        ShellExecResult::ExplorerProgress { .. } => {
-            return;
-        }
-        ShellExecResult::Explorer {
-            commands: _commands,
-            outputs: _outputs,
-            llm_parts,
-            final_exit,
-        } => {
-            let llm_combined = llm_parts.join("\n\n");
-            let header = format!("Tool result (exit={final_exit}):");
-            push_tool_result_to_llm(app, &header, &llm_combined);
-        }
     }
 
     screen.status.clear();
@@ -1135,6 +1049,120 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
             app.task_events.push(ev);
         }
     }
+}
+
+pub(crate) fn execute_glob_files(app: &mut App, screen: &mut Screen, pattern: &str, path: &str) {
+    let short_pattern = shorten_text(pattern, 40);
+    let call_ev = Event::ToolCall {
+        label: format!("Glob({short_pattern})"),
+        command: path.to_string(),
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    match run_blocking_compat(|| crate::tools::glob::glob_files(pattern, path)) {
+        Ok(result) => {
+            let summary = format!(
+                "{} file{} matched",
+                result.match_count,
+                if result.match_count == 1 { "" } else { "s" }
+            );
+            let llm_msg = format!("{}\n{}", summary, result.output);
+            push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
+            let ev = Event::ToolResult {
+                exit_code: 0,
+                output: llm_msg,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+        Err(e) => {
+            let err = format!("glob failed: {e}");
+            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
+            let ev = Event::ToolResult {
+                exit_code: -1,
+                output: err,
+            };
+            emit_live_event(screen, &ev);
+            app.task_events.push(ev);
+        }
+    }
+}
+
+pub(crate) fn execute_task(
+    app: &mut App,
+    screen: &mut Screen,
+    description: &str,
+    subagent_type: &str,
+    prompt: &str,
+) {
+    let call_ev = Event::ToolCall {
+        label: format!("Task({description})"),
+        command: subagent_type.to_string(),
+        multiline: false,
+    };
+    emit_live_event(screen, &call_ev);
+    app.task_events.push(call_ev);
+
+    let role = match subagent_type.trim().to_ascii_lowercase().as_str() {
+        "explore" => Some("search".to_string()),
+        _ => None,
+    };
+
+    let graph = crate::agent::sub_agent::TaskGraph {
+        nodes: vec![crate::agent::sub_agent::TaskNode {
+            id: "task".to_string(),
+            task: prompt.to_string(),
+            model: None,
+            role,
+            system_prompt: None,
+            depends_on: vec![],
+            input_merge: crate::agent::sub_agent::InputMerge::Concat,
+        }],
+        output_nodes: vec!["task".to_string()],
+        output_merge: crate::agent::sub_agent::OutputMerge::All,
+    };
+
+    let dag_tree = crate::agent::dag::build_dag_tree(
+        &graph.nodes,
+        &graph.output_nodes,
+        &std::collections::HashMap::new(),
+    );
+
+    app.dag_graph_nodes = graph.nodes.clone();
+    app.dag_output_nodes = graph.output_nodes.clone();
+    app.dag_node_done.clear();
+
+    screen.dag_tree = Some(dag_tree);
+    screen.refresh();
+
+    let Some(http_client) = app.http_client.clone() else {
+        app.messages.push(Message::user(
+            "[Task error: HTTP client not initialized]".to_string(),
+        ));
+        app.needs_agent_executor = true;
+        return;
+    };
+
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut dag_config = DagConfig::new(
+        http_client,
+        app.backend.clone(),
+        app.base_prompt.clone(),
+        Arc::new(app.skills.clone()),
+    );
+    dag_config.cancel_flag = Some(Arc::clone(&app.dag_cancel_flag));
+    dag_config.progress_tx = Some(progress_tx);
+    app.dag_progress_rx = Some(progress_rx);
+
+    let (dag_tx, dag_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = execute_dag(graph, dag_config).await;
+        let _ = dag_tx.send(result);
+    });
+    app.dag_result_rx = Some(dag_rx);
+    app.dag_task_running = true;
 }
 
 pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {

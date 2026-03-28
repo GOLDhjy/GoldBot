@@ -1,6 +1,6 @@
 [package]
 name = "GoldBot"
-version = "0.9.3"
+version = "0.9.6"
 edition = "2024"
 
 [dependencies]
@@ -17,4 +17,5 @@ unicode-width = "0.1"
 regex = "1"
 ignore = "0.4"
 similar = "2"
+glob = "0.3"
 arboard = "3"
