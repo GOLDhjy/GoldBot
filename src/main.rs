@@ -15,7 +15,7 @@ use agent::{
         refresh_llm_status, start_task, sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
-    react::{build_assistant_context, build_system_prompt},
+    react::{build_workspace_context, build_system_prompt},
     sub_agent::{SubAgentHandle, SubAgentIdGen},
 };
 use crossterm::{
@@ -95,11 +95,6 @@ pub(crate) struct App {
     /// Base system prompt = SYSTEM_PROMPT + skills section.
     /// Used as the foundation when rebuilding the full prompt after MCP discovery.
     pub base_prompt: String,
-    /// True when the memory assistant message is still sitting at messages[1].
-    /// Cleared (and the message removed) after the first LLM response is received.
-    pub has_memory_message: bool,
-    /// Startup memory text appended to messages[1] until the first LLM response arrives.
-    pub assistant_memory_suffix: Option<String>,
     pub mode: Mode,
     pub assist_mode: AssistMode,
     pub workspace: std::path::PathBuf,
@@ -237,19 +232,12 @@ impl App {
         let project = ProjectStore::current();
         project.cleanup_old_sessions();
 
-        // messages[1] = 固定 assistant 提示词，永久保留。
-        // 第一次请求时把当日记忆拼在后面一起发；收到回复后截断，只留固定部分。
+        // messages[0] = system prompt + workspace context（含 AGENTS.md、assist mode 等）。
+        // 记忆在每次 start_task 时按任务过滤后拼入 user 消息。
         let assist_mode = AssistMode::Off;
-        let base_ctx = build_assistant_context(&workspace, assist_mode);
-        let assistant_memory_suffix = project.build_memory_message();
-        let has_memory_message = assistant_memory_suffix.is_some();
-        let first_ctx = match &assistant_memory_suffix {
-            Some(mem) => format!("{base_ctx}\n\n{mem}"),
-            None => base_ctx,
-        };
+        let context = build_workspace_context(&workspace, assist_mode);
         let messages = vec![
-            Message::system(base_prompt.clone()),
-            Message::assistant(first_ctx),
+            Message::system(format!("{base_prompt}\n\n{context}")),
         ];
         Self {
             messages,
@@ -295,8 +283,6 @@ impl App {
             mcp_discovery_rx: None,
             skills,
             base_prompt,
-            has_memory_message,
-            assistant_memory_suffix,
             mode: Mode::Normal,
             assist_mode,
             workspace,
@@ -320,16 +306,12 @@ impl App {
             http_client: None,
         }
     }
-    pub(crate) fn rebuild_assistant_context_message(&mut self) {
-        let mut base_ctx = build_assistant_context(&self.workspace, self.assist_mode);
-        if self.has_memory_message
-            && let Some(mem) = &self.assistant_memory_suffix
-        {
-            base_ctx.push_str("\n\n");
-            base_ctx.push_str(mem);
-        }
-        if let Some(msg) = self.messages.get_mut(1) {
-            msg.content = base_ctx;
+    /// Rebuild messages[0] (system prompt) with the latest base_prompt + MCP tools + workspace context.
+    pub(crate) fn rebuild_system_message(&mut self) {
+        let system = self.mcp_registry.augment_system_prompt(&self.base_prompt);
+        let context = build_workspace_context(&self.workspace, self.assist_mode);
+        if let Some(msg) = self.messages.first_mut() {
+            msg.content = format!("{system}\n\n{context}");
         }
     }
 }
@@ -427,7 +409,7 @@ async fn run_loop(
     // -y / --yes 开启自动接受非 Block 命令
     if auto_accept {
         app.assist_mode = AssistMode::AcceptEdits;
-        app.rebuild_assistant_context_message();
+        app.rebuild_system_message();
         screen.assist_mode = app.assist_mode;
     }
     if let Some(task) = startup_task {
@@ -453,11 +435,8 @@ async fn run_loop(
                 )]);
             }
             app.mcp_registry = registry;
-            // Rebuild system prompt now that tools are known (memory stays in assistant message).
-            let new_prompt = app.mcp_registry.augment_system_prompt(&app.base_prompt);
-            if let Some(sys) = app.messages.first_mut() {
-                sys.content = new_prompt;
-            }
+            // Rebuild system prompt now that tools are known.
+            app.rebuild_system_message();
             // Display result below the banner.
             let status = app.mcp_registry.startup_status();
             if let Some(line) = format_mcp_status_line(&status.ok, &status.failed) {

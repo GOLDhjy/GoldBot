@@ -117,7 +117,7 @@ pub(crate) fn handle_key(
     {
         app.assist_mode = app.assist_mode.cycle();
         screen.assist_mode = app.assist_mode;
-        app.rebuild_assistant_context_message();
+        app.rebuild_system_message();
         screen.refresh();
         return false;
     }
@@ -1464,8 +1464,8 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
         }
 
         BuiltinCommand::Clear => {
-            // 保留 messages[0]（system）和 messages[1]（assistant 上下文），清空其余
-            app.messages.truncate(2);
+            // 保留 messages[0]（system），清空其余
+            app.messages.truncate(1);
             app.task_events.clear();
             app.final_summary = None;
             app.running = false;
@@ -1484,11 +1484,11 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
             if total <= 4 {
                 screen.emit(&[format!("  /compact: 只有 {} 条消息，无需压缩。", total)]);
             } else {
-                // 保留 messages[0..2]（system + assistant ctx）+ 最近 18 条
-                let keep = 18.min(total.saturating_sub(2));
+                // 保留 messages[0]（system）+ 最近 18 条
+                let keep = 18.min(total.saturating_sub(1));
                 let keep_from = total - keep;
                 let kept: Vec<_> = app.messages[keep_from..].to_vec();
-                app.messages.truncate(2);
+                app.messages.truncate(1);
                 app.messages.extend(kept);
                 sync_context_budget(app, screen);
                 screen.emit(&[format!(
@@ -1500,7 +1500,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
 
         BuiltinCommand::Memory => {
             let store = crate::memory::project::ProjectStore::current();
-            match store.build_memory_message() {
+            match store.build_memory_message(None) {
                 Some(mem) => {
                     let lines: Vec<String> = mem.lines().map(|l| format!("  {l}")).collect();
                     screen.emit(&lines);

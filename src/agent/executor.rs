@@ -46,11 +46,11 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
         screen.emit(&[String::new()]);
     }
     screen.reset_task_lines();
-    // Refresh assistant context so workspace-level instructions (e.g. AGENTS.md)
-    // are picked up for each new task without requiring a restart.
-    app.rebuild_assistant_context_message();
 
     app.task = task.clone();
+
+    // 每次新任务重建 system prompt（使 AGENTS.md 变更立即生效）。
+    app.rebuild_system_message();
     app.steps_taken = 0;
     app.running = true;
     app.llm_stream_preview.clear();
@@ -76,7 +76,15 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.shell_exec_rx = None;
     app.total_usage = Default::default();
     screen.todo_items.clear();
-    app.messages.push(Message::user(task.clone()));
+    // 按当前任务关键词过滤记忆，拼到 user 消息头部；assistant context 保持干净。
+    let user_content = {
+        let store = ProjectStore::current();
+        match store.build_memory_message(Some(&task)) {
+            Some(mem) => format!("{mem}\n\n---\n\n{task}"),
+            None => task.clone(),
+        }
+    };
+    app.messages.push(Message::user(user_content));
     sync_context_budget(app, screen);
 
     // TUI 显示用 override（如命令展开时只显示占位符），否则显示完整 task
@@ -89,13 +97,6 @@ pub(crate) fn process_llm_result(
     screen: &mut Screen,
     result: anyhow::Result<(String, crate::agent::provider::Usage)>,
 ) {
-    // 第一次收到回复后，把 messages[1] 的内容截断回纯固定提示词（去掉拼进去的记忆部分）
-    if app.has_memory_message {
-        app.has_memory_message = false;
-        app.assistant_memory_suffix = None;
-        app.rebuild_assistant_context_message();
-    }
-
     app.steps_taken += 1;
 
     let (response, usage) = match result {
@@ -454,7 +455,7 @@ fn apply_assist_mode_change(app: &mut App, screen: &mut Screen, mode: AssistMode
     }
     app.assist_mode = mode;
     screen.assist_mode = mode;
-    app.rebuild_assistant_context_message();
+    app.rebuild_system_message();
     let ev = Event::Thinking {
         text: format!("assist mode -> {}", mode.as_llm_name()),
     };
@@ -1558,7 +1559,7 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
         return;
     }
 
-    let prefix_end = app.messages.len().min(2);
+    let prefix_end = app.messages.len().min(1);
     if app.messages.len() <= prefix_end + 1 {
         return;
     }

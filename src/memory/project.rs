@@ -9,6 +9,8 @@ const MAX_SESSION_FINAL_CHARS: usize = 4000;
 const MAX_MEMORY_NOTE_CHARS: usize = 120;
 const MEMORY_SECTION: &str = "## Memories";
 const SESSION_RETENTION_DAYS: i64 = 15;
+/// Maximum number of notes injected per LLM call.
+const MEMORY_TOP_N: usize = 15;
 
 // ── Process-level statics ─────────────────────────────────────────────────────
 
@@ -97,14 +99,38 @@ impl ProjectStore {
         Ok(true)
     }
 
-    /// Build the memory block injected into the LLM context at conversation start.
-    pub fn build_memory_message(&self) -> Option<String> {
+    /// Build the memory block injected into the LLM context.
+    ///
+    /// When `query` is provided and the total note count exceeds `MEMORY_TOP_N`,
+    /// only the top-scoring notes (by keyword overlap with the query) are included.
+    /// Ties are broken by recency (later entries win). When `query` is `None` or
+    /// fewer notes exist than `MEMORY_TOP_N`, the most-recent notes are returned.
+    pub fn build_memory_message(&self, query: Option<&str>) -> Option<String> {
         let content = fs::read_to_string(self.memory_path()).ok()?;
         let notes = notes_from_file(&content);
         if notes.is_empty() {
             return None;
         }
-        let lines = notes
+
+        let selected: Vec<&str> = if notes.len() <= MEMORY_TOP_N {
+            notes.iter().map(String::as_str).collect()
+        } else if let Some(q) = query.filter(|s| !s.trim().is_empty()) {
+            let q_tokens = tokenize(q);
+            let mut scored: Vec<(usize, usize, &str)> = notes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (keyword_score(&q_tokens, n), i, n.as_str()))
+                .collect();
+            // Higher score first; break ties by higher index (more recent).
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+            scored.truncate(MEMORY_TOP_N);
+            scored.into_iter().map(|(_, _, n)| n).collect()
+        } else {
+            // No query: return the most recent MEMORY_TOP_N notes.
+            notes.iter().rev().take(MEMORY_TOP_N).map(String::as_str).collect()
+        };
+
+        let lines = selected
             .iter()
             .map(|n| format!("- {n}"))
             .collect::<Vec<_>>()
@@ -333,6 +359,46 @@ fn canonicalize(text: &str) -> String {
         .to_lowercase()
 }
 
+/// Tokenise `text` into a set of lowercase tokens for keyword-overlap scoring.
+///
+/// - CJK characters are treated as individual tokens.
+/// - Latin/digit runs of 2+ characters form a single token.
+fn tokenize(text: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    let mut word = String::new();
+    for ch in text.chars() {
+        let is_cjk = matches!(ch, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}'
+            | '\u{F900}'..='\u{FAFF}' | '\u{2CEB0}'..='\u{2EBEF}');
+        if is_cjk {
+            if word.len() >= 2 {
+                tokens.insert(word.to_lowercase());
+            }
+            word.clear();
+            tokens.insert(ch.to_string());
+        } else if ch.is_alphanumeric() {
+            word.push(ch);
+        } else {
+            if word.len() >= 2 {
+                tokens.insert(word.to_lowercase());
+            }
+            word.clear();
+        }
+    }
+    if word.len() >= 2 {
+        tokens.insert(word.to_lowercase());
+    }
+    tokens
+}
+
+/// Count how many tokens from `query_tokens` appear in `note`.
+fn keyword_score(query_tokens: &std::collections::HashSet<String>, note: &str) -> usize {
+    if query_tokens.is_empty() {
+        return 0;
+    }
+    let note_tokens = tokenize(note);
+    query_tokens.intersection(&note_tokens).count()
+}
+
 fn sanitize_fenced(text: &str) -> String {
     text.replace("```", "``\\`")
 }
@@ -384,7 +450,7 @@ mod tests {
     #[test]
     fn build_memory_message_returns_none_when_empty() {
         let (store, base) = temp_store();
-        assert!(store.build_memory_message().is_none());
+        assert!(store.build_memory_message(None).is_none());
         let _ = fs::remove_dir_all(base);
     }
 
@@ -392,9 +458,24 @@ mod tests {
     fn build_memory_message_returns_notes() {
         let (store, base) = temp_store();
         store.append_memory("用 Ctrl+d 折叠").unwrap();
-        let msg = store.build_memory_message().unwrap();
+        let msg = store.build_memory_message(None).unwrap();
         assert!(msg.contains("### Project Memory"));
         assert!(msg.contains("Ctrl+d"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn build_memory_message_filters_by_keyword_when_over_limit() {
+        let (store, base) = temp_store();
+        // Add MEMORY_TOP_N + 2 notes; two are clearly relevant to "rebase git".
+        for i in 0..(MEMORY_TOP_N - 1) {
+            store.append_memory(&format!("数据库连接用 .env 文件 no{i}")).unwrap();
+        }
+        store.append_memory("用 rebase -i 合并 git 提交").unwrap();
+        store.append_memory("git push 前先 cargo test").unwrap();
+        let msg = store.build_memory_message(Some("帮我 rebase 这个 git 分支")).unwrap();
+        assert!(msg.contains("rebase"), "relevant note must be included");
+        assert!(!msg.contains("no0"), "unrelated notes should be filtered out");
         let _ = fs::remove_dir_all(base);
     }
 

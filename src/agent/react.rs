@@ -176,9 +176,9 @@ pub fn build_interjection_user_message(task: &str) -> String {
     )
 }
 
-/// Build the fixed assistant-role context message injected right after the system prompt.
-/// This message is always present and never removed during context compaction.
-pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistMode) -> String {
+/// Build workspace-specific context (paths, memory rules, AGENTS.md, plan-mode addendum)
+/// that is appended to the system prompt in messages[0].
+pub fn build_workspace_context(workspace: &std::path::Path, assist_mode: AssistMode) -> String {
     let project_store = crate::memory::project::ProjectStore::new(workspace);
     let memory_path = project_store.memory_path_display();
     let workspace_display = workspace.display();
@@ -584,7 +584,7 @@ fn extract_last_tag_preserve_block(text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_assistant_context, build_system_prompt, parse_llm_response};
+    use super::{build_workspace_context, build_system_prompt, parse_llm_response};
     use crate::types::{AssistMode, LlmAction};
     use serde_json::json;
     use std::{
@@ -768,14 +768,14 @@ mod tests {
         }
     }
     #[test]
-    fn build_assistant_context_off_does_not_include_plan_rules() {
-        let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Off);
+    fn build_workspace_context_off_does_not_include_plan_rules() {
+        let ctx = build_workspace_context(std::path::Path::new("."), AssistMode::Off);
         assert!(!ctx.contains("Plan decision order (simplified):"));
         assert!(!ctx.contains("<tool>plan</tool>"));
     }
     #[test]
-    fn build_assistant_context_plan_includes_plan_rules() {
-        let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Plan);
+    fn build_workspace_context_plan_includes_plan_rules() {
+        let ctx = build_workspace_context(std::path::Path::new("."), AssistMode::Plan);
         assert!(ctx.contains("Plan Mode Rules"));
         assert!(ctx.contains("<tool>plan</tool>"));
         assert!(ctx.contains("Todo progress panel (shows a live checklist in the terminal):"));
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn build_assistant_context_includes_full_agents_runtime_prompt_ascii() {
+    fn build_workspace_context_includes_full_agents_runtime_prompt_ascii() {
         let root = unique_temp_dir("agents-full-ascii");
         fs::create_dir_all(&root).expect("should create workspace dir");
         fs::write(
@@ -801,7 +801,7 @@ mod tests {
         )
         .expect("should write AGENTS");
 
-        let ctx = build_assistant_context(&root, AssistMode::Off);
+        let ctx = build_workspace_context(&root, AssistMode::Off);
         assert!(ctx.contains("----- BEGIN AGENTS.md -----"));
         assert!(ctx.contains("## Read local knowledge base first"));
         assert!(ctx.contains("Read ./.AIDB/README.md before searching the whole repo."));
