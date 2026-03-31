@@ -24,7 +24,7 @@ use crossterm::{
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use memory::store::MemoryStore;
+use memory::project::{ProjectStore, init_workspace};
 use tokio::sync::mpsc;
 use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
@@ -127,6 +127,10 @@ pub(crate) struct App {
     // ── /model picker ──────────────────────────────────────────────────────────
     pub model_picker: ModelPickerState,
 
+    // ── /Session picker ────────────────────────────────────────────────────────
+    /// Session IDs shown in the /Session picker (None = picker not active).
+    pub pending_session_list: Option<Vec<String>>,
+
     // ── Sub-Agent ────────────────────────────────────────────────────────────
     /// SubAgent ID 生成器
     pub sub_agent_id_gen: SubAgentIdGen,
@@ -203,9 +207,6 @@ pub(crate) struct AtFilePickerState {
 
 impl App {
     fn new() -> Self {
-        let store = MemoryStore::new();
-        // 启动时清理超过 15 天的短期记忆文件
-        store.cleanup_old_short_term();
         let backend = LlmBackend::from_env();
         let (mut mcp_registry, mcp_warnings) = crate::tools::mcp::McpRegistry::from_env();
         mcp_registry.inject_builtin_for_backend(backend.backend_label());
@@ -231,11 +232,16 @@ impl App {
         // chdir into workspace so all shell commands run relative to it.
         let _ = std::env::set_current_dir(&workspace);
 
+        // Initialise project store (sets process-level workspace + session ID).
+        init_workspace(workspace.clone());
+        let project = ProjectStore::current();
+        project.cleanup_old_sessions();
+
         // messages[1] = 固定 assistant 提示词，永久保留。
         // 第一次请求时把当日记忆拼在后面一起发；收到回复后截断，只留固定部分。
         let assist_mode = AssistMode::Off;
         let base_ctx = build_assistant_context(&workspace, assist_mode);
-        let assistant_memory_suffix = store.build_memory_message();
+        let assistant_memory_suffix = project.build_memory_message();
         let has_memory_message = assistant_memory_suffix.is_some();
         let first_ctx = match &assistant_memory_suffix {
             Some(mem) => format!("{base_ctx}\n\n{mem}"),
@@ -305,6 +311,7 @@ impl App {
             user_commands: Vec::new(),
             cmd_picker: CmdPickerState::default(),
             model_picker: ModelPickerState::default(),
+            pending_session_list: None,
             sub_agent_id_gen: SubAgentIdGen::new(),
             sub_agent_handles: Vec::new(),
             total_usage: Default::default(),

@@ -29,6 +29,7 @@ pub enum BuiltinCommand {
     Clear,
     Compact,
     Memory,
+    Session,
     Thinking,
     Skills,
     Mcp,
@@ -48,12 +49,9 @@ const BUILTIN_COMMANDS: &[(BuiltinCommand, &str, &str)] = &[
     ),
     (BuiltinCommand::Help, "help", "显示键位绑定和可用命令列表"),
     (BuiltinCommand::Mcp, "mcp", "列出所有已注册的 MCP 工具"),
-    (
-        BuiltinCommand::Memory,
-        "memory",
-        "查看当前长期和短期记忆内容",
-    ),
+    (BuiltinCommand::Memory, "memory", "查看当前项目记忆内容"),
     (BuiltinCommand::Model, "model", "切换 LLM 后端与模型"),
+    (BuiltinCommand::Session, "Session", "浏览并恢复历史会话"),
     (BuiltinCommand::Skills, "skills", "列出所有已发现的 Skill"),
     (
         BuiltinCommand::Status,

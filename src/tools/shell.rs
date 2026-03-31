@@ -190,10 +190,10 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
     let after = snapshot_files(&cwd);
     let (fs_summary, diffs) = build_fs_summary(&cwd, &before, &after, &before_compare);
 
-    // 将文件差异写入今日短期记忆，方便后续查阅或恢复
+    // 将文件差异写入当前 session 记忆，方便后续查阅或恢复
     if !diffs.is_empty() {
-        let store = crate::memory::store::MemoryStore::new();
-        let _ = store.append_diff_to_short_term(cmd, &diffs);
+        let _ = crate::memory::project::ProjectStore::current()
+            .append_diff_to_session(cmd, &diffs);
     }
 
     let mut text = String::new();

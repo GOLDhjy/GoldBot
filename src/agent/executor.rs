@@ -7,7 +7,7 @@ use crate::agent::dag::{DagConfig, execute as execute_dag};
 use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
-use crate::memory::store::MemoryStore;
+use crate::memory::project::ProjectStore;
 use crate::tools::safety::{RiskLevel, assess_command};
 use crate::tools::skills::skill_tool_result;
 use crate::types::{AssistMode, Event, LlmAction, Mode};
@@ -191,6 +191,10 @@ pub(crate) fn process_llm_result(
                 if !text.is_empty() {
                     emit_phase_event(app, screen, text);
                 }
+                had_non_blocking_only = true;
+            }
+            LlmAction::Memory { note } => {
+                let _ = ProjectStore::current().append_memory(&note);
                 had_non_blocking_only = true;
             }
             LlmAction::Shell { command } => {
@@ -797,8 +801,7 @@ pub(crate) fn execute_update_file(
                 &new_content_for_diff,
                 ctx_start,
             );
-            let store = MemoryStore::new();
-            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
+            let _ = ProjectStore::current().append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
             let llm_msg = format!(
@@ -865,8 +868,7 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
     match result {
         Ok((old_content, new_content)) => {
             let diff_text = crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
-            let store = MemoryStore::new();
-            let _ = store.append_diff_to_short_term(path, &[(path.to_string(), diff_text.clone())]);
+            let _ = ProjectStore::current().append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
             push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             let mut tool_output = format!("Write {path}:\n");
@@ -1232,12 +1234,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     screen.collapse_to(&collapsed_lines(app));
 
-    let store = MemoryStore::new();
-    let _ = store.append_short_term(&app.task, &summary);
-    for note in store.derive_long_term_notes(&app.task, &summary) {
-        let _ = store.append_long_term_if_new(&note);
-    }
-    let _ = store.promote_repeated_short_term_to_long_term();
+    let _ = ProjectStore::current().append_to_session(&app.task, &summary);
 
     let total_elapsed = app.task_started_at.map(|t| t.elapsed());
     app.last_task_elapsed = total_elapsed;
@@ -1605,37 +1602,8 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
     };
 
     let older: Vec<Message> = app.messages[prefix_end..chosen_split_at].to_vec();
-    let store = MemoryStore::new();
-    let mut flushed = 0usize;
-    let mut last_user_task: Option<String> = None;
-
-    for msg in &older {
-        match msg.role {
-            crate::agent::provider::Role::User => {
-                if msg.content.starts_with("Tool result")
-                    || msg
-                        .content
-                        .starts_with("Your last response could not be parsed")
-                    || msg.content.starts_with("[Context compacted]")
-                {
-                    continue;
-                }
-                last_user_task = Some(msg.content.clone());
-            }
-            crate::agent::provider::Role::Assistant => {
-                if let Some(final_text) = extract_last_tag_text(&msg.content, "final") {
-                    if let Some(task) = last_user_task.as_deref() {
-                        for note in store.derive_long_term_notes(task, &final_text) {
-                            if let Ok(true) = store.append_long_term_if_new(&note) {
-                                flushed += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            crate::agent::provider::Role::System => {}
-        }
-    }
+    let flushed = 0usize;
+    let _ = &older; // older messages are compacted away; memory is written via <memory> tags
 
     app.messages = compacted;
     sync_context_budget(app, screen);

@@ -253,6 +253,10 @@ pub enum LlmAction {
     SubAgent {
         graph: crate::agent::sub_agent::TaskGraph,
     },
+    /// Save a note to project-scoped long-term memory (non-blocking; may appear alongside Final).
+    Memory {
+        note: String,
+    },
     Final {
         summary: String,
     },

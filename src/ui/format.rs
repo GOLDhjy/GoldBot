@@ -977,7 +977,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize_final_keeps_markdown_structure_but_drops_fences() {
+    fn sanitize_final_keeps_markdown_structure_and_fences() {
         let raw = "## Title\n- **a**\n- `b`\n```bash\nls -la\n```\n1. item";
         let got = sanitize_final_summary_for_tui(raw);
         assert!(got.contains("## Title"));
@@ -985,7 +985,8 @@ mod tests {
         assert!(got.contains("- `b`"));
         assert!(got.contains("ls -la"));
         assert!(got.contains("1. item"));
-        assert!(!got.contains("```"));
+        // Fence markers are preserved so format_final_lines can render code blocks.
+        assert!(got.contains("```"));
     }
 
     #[test]

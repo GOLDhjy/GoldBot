@@ -138,6 +138,54 @@ pub(crate) fn handle_key(
 fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
     let sel = screen.confirm_selected.unwrap();
 
+    if app.pending_session_list.is_some() {
+        // ── /Session picker: ↑/↓ navigate, Enter to restore, Esc to cancel ──
+        let count = screen.question_labels.len();
+        match key {
+            KeyCode::Up => {
+                screen.confirm_selected = Some(sel.saturating_sub(1));
+                screen.refresh();
+            }
+            KeyCode::Down => {
+                screen.confirm_selected = Some((sel + 1).min(count.saturating_sub(1)));
+                screen.refresh();
+            }
+            KeyCode::Enter => {
+                let sessions = app.pending_session_list.take().unwrap();
+                screen.confirm_selected = None;
+                screen.question_labels.clear();
+                screen.input_focused = true;
+
+                if let Some(id) = sessions.get(sel) {
+                    let store = crate::memory::project::ProjectStore::current();
+                    match store.read_session(id) {
+                        Ok(content) => {
+                            let ts = crate::memory::project::ProjectStore::format_session_timestamp(id);
+                            app.messages.push(crate::agent::provider::Message::user(format!(
+                                "[Restored session from {ts}]\n{content}"
+                            )));
+                            sync_context_budget(app, screen);
+                            screen.emit(&[format!("  ✓ 已恢复会话：{ts}")]);
+                        }
+                        Err(e) => {
+                            screen.emit(&[format!("  ✗ 无法读取会话：{e}")]);
+                        }
+                    }
+                }
+                screen.refresh();
+            }
+            KeyCode::Esc => {
+                app.pending_session_list = None;
+                screen.confirm_selected = None;
+                screen.question_labels.clear();
+                screen.input_focused = true;
+                screen.refresh();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.pending_question.is_some() {
         // ── Question mode: ↑/↓ navigate options, Enter to confirm ────────
         let opt_count = screen.question_labels.len();
@@ -1451,15 +1499,50 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
         }
 
         BuiltinCommand::Memory => {
-            let store = crate::memory::store::MemoryStore::new();
+            let store = crate::memory::project::ProjectStore::current();
             match store.build_memory_message() {
                 Some(mem) => {
-                    let lines: Vec<String> = mem.lines().map(|l| format!("  {}", l)).collect();
+                    let lines: Vec<String> = mem.lines().map(|l| format!("  {l}")).collect();
                     screen.emit(&lines);
                 }
                 None => {
-                    screen.emit(&["  （暂无记忆内容）".to_string()]);
+                    screen.emit(&["  （暂无项目记忆内容）".to_string()]);
                 }
+            }
+        }
+
+        BuiltinCommand::Session => {
+            let store = crate::memory::project::ProjectStore::current();
+            let sessions = store.list_sessions();
+            if sessions.is_empty() {
+                screen.emit(&["  （暂无历史会话）".to_string()]);
+            } else {
+                // Build display labels with creation timestamps.
+                let labels: Vec<String> = sessions
+                    .iter()
+                    .map(|id| {
+                        let ts = crate::memory::project::ProjectStore::format_session_timestamp(id);
+                        let marker = if id.as_str() == crate::memory::project::session_id() {
+                            "  ← 当前"
+                        } else {
+                            ""
+                        };
+                        format!("{ts}{marker}")
+                    })
+                    .collect();
+                screen.emit(&{
+                    let mut v = vec!["  历史会话（↑↓ 选择，Enter 恢复）:".to_string()];
+                    for (i, l) in labels.iter().enumerate() {
+                        v.push(format!("  {}. {l}", i + 1));
+                    }
+                    v
+                });
+                // Enter question/selection mode.
+                screen.question_labels = labels;
+                screen.confirm_selected = Some(0);
+                screen.input_focused = false;
+                app.pending_session_list = Some(sessions);
+                screen.refresh();
             }
         }
 

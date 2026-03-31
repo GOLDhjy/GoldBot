@@ -35,6 +35,13 @@ Task complete (required):
 - If files were changed, include the file paths.
 - No Emoji
 
+Save to project memory (optional; use alongside <final> or standalone):
+<memory>concise note (under 80 chars)</memory>
+Memory guidelines:
+- Only save preferences, rules, or facts that affect future behavior. Skip one-off results.
+- Do not save what can be read from the codebase or git history.
+- One note per tag; emit multiple tags for multiple notes.
+
 ### Process Tools
 
 <thought>reasoning</thought>
@@ -172,15 +179,15 @@ pub fn build_interjection_user_message(task: &str) -> String {
 /// Build the fixed assistant-role context message injected right after the system prompt.
 /// This message is always present and never removed during context compaction.
 pub fn build_assistant_context(workspace: &std::path::Path, assist_mode: AssistMode) -> String {
-    let memory_dir = crate::memory::store::MemoryStore::new().base_dir_display();
+    let project_store = crate::memory::project::ProjectStore::new(workspace);
+    let memory_path = project_store.memory_path_display();
     let workspace_display = workspace.display();
     let mut out = format!(
         "Current workspace: `{workspace_display}`\n\
          All shell commands run in this directory, and file paths are resolved relative to it.\n\
          \n\
-         I can access an internal memory system at `{memory_dir}`:\n\
-         - Long-term memory: `{memory_dir}/MEMORY.md`\n\
-         - Short-term memory: `{memory_dir}/memory/YYYY-MM-DD.md` (daily logs)\n\
+         I maintain a project memory at `{memory_path}`.\n\
+         Use the <memory> tag to save notes that affect future behavior.\n\
          \n\
          Every file change I make is automatically recorded as a diff in today's short-term \
          memory. If a file must be restored, I can read that diff and reverse it: lines \
@@ -263,12 +270,17 @@ fn nearest_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
 pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
     let thought = extract_last_tag(text, "thought").unwrap_or_default();
 
+    // Collect memory actions first — they are non-blocking and may appear alongside any other tag.
+    let mut memory_actions = collect_memory_actions(text);
+
     // These special tags are never wrapped in <tool>; handle them first.
     if let Some(summary) = extract_last_tag(text, "final") {
-        return Ok((thought, vec![LlmAction::Final { summary }]));
+        memory_actions.push(LlmAction::Final { summary });
+        return Ok((thought, memory_actions));
     }
     if let Some(name) = extract_last_tag(text, "skill") {
-        return Ok((thought, vec![LlmAction::Skill { name }]));
+        memory_actions.push(LlmAction::Skill { name });
+        return Ok((thought, memory_actions));
     }
     if let Some(raw) = extract_last_tag(text, "create_mcp") {
         let config: Value =
@@ -276,13 +288,14 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
         if !config.is_object() {
             return Err(anyhow!("<create_mcp> must be a JSON object"));
         }
-        return Ok((thought, vec![LlmAction::CreateMcp { config }]));
+        memory_actions.push(LlmAction::CreateMcp { config });
+        return Ok((thought, memory_actions));
     }
 
     // Collect all <tool> tags in document order and parse each one.
     let tools = extract_all_tags(text, "tool");
     if !tools.is_empty() {
-        let mut actions = Vec::with_capacity(tools.len());
+        let mut actions = memory_actions;
         for tool in tools {
             actions.push(parse_tool_action(text, &tool)?);
         }
@@ -291,12 +304,28 @@ pub fn parse_llm_response(text: &str) -> Result<(String, Vec<LlmAction>)> {
 
     // Backward compatibility: bare <command> without a wrapping <tool>.
     if let Some(command) = extract_last_tag(text, "command") {
-        return Ok((thought, vec![LlmAction::Shell { command }]));
+        memory_actions.push(LlmAction::Shell { command });
+        return Ok((thought, memory_actions));
+    }
+
+    // Memory-only response (LLM saved notes without any other action).
+    if !memory_actions.is_empty() {
+        return Ok((thought, memory_actions));
     }
 
     Err(anyhow!(
         "cannot parse LLM response — expected shell call, MCP call, or <final>...</final>"
     ))
+}
+
+/// Extract all `<memory>` tags from the response as non-blocking Memory actions.
+fn collect_memory_actions(text: &str) -> Vec<LlmAction> {
+    extract_all_tags(text, "memory")
+        .into_iter()
+        .map(|note| note.trim().to_string())
+        .filter(|note| !note.is_empty())
+        .map(|note| LlmAction::Memory { note })
+        .collect()
 }
 
 fn parse_tool_action(text: &str, tool: &str) -> Result<LlmAction> {
@@ -747,7 +776,7 @@ mod tests {
     #[test]
     fn build_assistant_context_plan_includes_plan_rules() {
         let ctx = build_assistant_context(std::path::Path::new("."), AssistMode::Plan);
-        assert!(ctx.contains("Plan decision order (simplified):"));
+        assert!(ctx.contains("Plan Mode Rules"));
         assert!(ctx.contains("<tool>plan</tool>"));
         assert!(ctx.contains("Todo progress panel (shows a live checklist in the terminal):"));
         assert!(ctx.contains("<tool>todo</tool>"));
@@ -758,7 +787,7 @@ mod tests {
     fn build_system_prompt_does_not_include_old_plan_block() {
         let prompt = build_system_prompt();
         assert!(!prompt.contains("<tool>plan</tool>"));
-        assert!(!prompt.contains("Plan decision order (simplified):"));
+        assert!(!prompt.contains("Plan Mode Rules"));
         assert!(!prompt.contains("Todo progress panel (shows a live checklist in the terminal):"));
     }
 

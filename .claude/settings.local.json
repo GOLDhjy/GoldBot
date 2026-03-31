@@ -33,7 +33,10 @@
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:www.kimi.com)",
       "WebFetch(domain:moonshotai.github.io)",
-      "Bash(where cargo:*)"
+      "Bash(where cargo:*)",
+      "Bash(openspec new:*)",
+      "Bash(openspec status:*)",
+      "Bash(openspec instructions:*)"
     ]
   }
 }
