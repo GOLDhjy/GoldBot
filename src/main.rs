@@ -514,7 +514,7 @@ async fn run_loop(
             && !app.shell_task_running
         {
             //在compact之前写入长期记忆把
-            maybe_flush_and_compact_before_call(app, screen);
+            maybe_flush_and_compact_before_call(app, screen).await;
             app.needs_agent_executor = false;
             app.llm_calling = true;
             app.llm_call_started_at = Some(std::time::Instant::now());

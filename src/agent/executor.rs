@@ -1553,7 +1553,7 @@ fn format_token_count_short(tokens: u32) -> String {
     tokens.to_string()
 }
 
-pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
+pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
     let budget = current_context_budget(app);
     if !budget.should_compact {
         return;
@@ -1579,17 +1579,21 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
     }
     chosen_split_at = chosen_split_at.min(max_split_at);
 
-    let compacted = loop {
-        let older = &app.messages[prefix_end..chosen_split_at];
-        if older.is_empty() {
-            return;
-        }
+    // 在确定 split 点后，用 LLM 生成摘要（同步等待）
+    let older = app.messages[prefix_end..chosen_split_at].to_vec();
+    screen.status = "🧠 compacting context...".grey().to_string();
+    screen.refresh();
 
-        let summary = summarize_for_compaction(older);
-        let mut candidate = app.messages[..prefix_end].to_vec();
-        if !summary.is_empty() {
-            candidate.push(Message::user(format!("[Context compacted]\n{summary}")));
+    let summary = match &app.http_client {
+        Some(client) => {
+            llm_summarize_for_compaction(&older, client, &app.backend).await
         }
+        None => summarize_for_compaction_fallback(&older),
+    };
+
+    let compacted = loop {
+        let mut candidate = app.messages[..prefix_end].to_vec();
+        candidate.push(Message::user(format!("[Context compacted]\n{summary}")));
         candidate.extend_from_slice(&app.messages[chosen_split_at..]);
 
         let candidate_tokens = estimate_prompt_tokens(&candidate, app.prompt_token_scale);
@@ -1602,25 +1606,70 @@ pub(crate) fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Sc
         chosen_split_at += 1;
     };
 
-    let older: Vec<Message> = app.messages[prefix_end..chosen_split_at].to_vec();
-    let flushed = 0usize;
-    let _ = &older; // older messages are compacted away; memory is written via <memory> tags
-
     app.messages = compacted;
     sync_context_budget(app, screen);
-
-    screen.status = if flushed > 0 {
-        format!("🧠 pre-compaction flush: {flushed} long-term notes")
-            .grey()
-            .to_string()
-    } else {
-        "🧠 context compacted".grey().to_string()
-    };
+    screen.status = "🧠 context compacted".grey().to_string();
     screen.refresh();
 }
 
-//总结之后压缩记忆，发送重要结论
-fn summarize_for_compaction(messages: &[Message]) -> String {
+const COMPACTION_SYSTEM_PROMPT: &str = "\
+你是一个对话历史压缩助手。请将下面这段 AI Agent 与用户的对话历史压缩成一份简洁的结构化摘要，\
+用于让 Agent 在压缩后的上下文中继续工作。
+
+摘要须包含：
+1. 用户的原始任务目标
+2. 已完成的关键步骤和结果
+3. 重要的工具调用结果或文件变更
+4. 当前进度和下一步计划
+
+要求：输出纯文本，不超过 400 字，不要输出任何 XML 标签或 markdown 标题。";
+
+/// 调用 LLM 生成摘要；失败时降级到本地提取。
+async fn llm_summarize_for_compaction(
+    messages: &[Message],
+    client: &reqwest::Client,
+    backend: &crate::agent::provider::LlmBackend,
+) -> String {
+    // 把待压缩的消息拼成纯文本喂给摘要模型
+    let mut history = String::new();
+    for msg in messages {
+        let role = match msg.role {
+            crate::agent::provider::Role::User => "user",
+            crate::agent::provider::Role::Assistant => "assistant",
+            crate::agent::provider::Role::System => continue,
+        };
+        history.push_str(&format!("[{}]: {}\n\n", role, msg.content));
+    }
+
+    let prompt_messages = vec![
+        Message::system(COMPACTION_SYSTEM_PROMPT),
+        Message::user(history),
+    ];
+
+    match backend
+        .chat_stream_with(client, &prompt_messages, false, |_| {}, |_| {})
+        .await
+    {
+        Ok((summary, _)) => {
+            let s = summary.trim().to_string();
+            if s.is_empty() {
+                summarize_for_compaction_fallback(messages)
+            } else {
+                s
+            }
+        }
+        Err(e) => {
+            eprintln!("[compaction] LLM 摘要失败，降级到本地提取: {e}");
+            format!(
+                "[context compaction failed, messages truncated]\n{}",
+                summarize_for_compaction_fallback(messages)
+            )
+        }
+    }
+}
+
+/// 本地降级摘要：提取 <final>、<phase>、user 任务等关键信息。
+fn summarize_for_compaction_fallback(messages: &[Message]) -> String {
     let mut items = Vec::new();
     for msg in messages.iter().rev() {
         match msg.role {
