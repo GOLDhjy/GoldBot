@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
@@ -18,7 +18,7 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 - When asked to plan implementation, use <tool>set_mode</tool> with <mode>plan</mode>, then follow the 'plan mode' flow.
 - One blocking tool call per response. &lt;tool&gt;phase&lt;/tool&gt; are non-blocking and may be included too.
 - Use <tool>phase</tool> to write what to do next (one short sentence). Update it when the stage changes; omit it if unchanged.
-- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.
+- <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.不要有 Emoji
 - Use <final> as soon as done; avoid extra commands.
 - The current phase is shown in the running UI and fed back with later tool results, so you must maintain it yourself when the task enters a new stage.
 - On failure, diagnose from output and try a different approach.

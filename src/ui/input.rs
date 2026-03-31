@@ -387,11 +387,11 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                     let query = app.at_file.query.as_mut().unwrap();
                     if query.is_empty() {
                         // Remove the @ from input and exit picker
-                        screen.input.pop();
+                        screen.delete_char_before_cursor();
                         cancel_at_file_mode(app, screen);
                     } else {
                         query.pop();
-                        screen.input.pop();
+                        screen.delete_char_before_cursor();
                         let q = query.clone();
                         update_at_file_candidates(app, screen, &q);
                     }
@@ -488,11 +488,11 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                     let query = app.cmd_picker.query.as_mut().unwrap();
                     if query.is_empty() {
                         // Remove the / from input and exit picker
-                        screen.input.pop();
+                        screen.delete_char_before_cursor();
                         cancel_command_mode(app, screen);
                     } else {
                         query.pop();
-                        screen.input.pop();
+                        screen.delete_char_before_cursor();
                         let q = query.clone();
                         update_command_candidates(app, screen, &q);
                     }
@@ -593,12 +593,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
                 screen.refresh();
             }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                screen.insert_char_at_cursor(c);
-                if c == '@' {
-                    enter_at_file_mode(app, screen);
-                } else if c == '/' && screen.input == "/" {
-                    enter_command_mode(app, screen);
-                }
+                insert_char_with_trigger(app, screen, c);
                 screen.refresh();
             }
             KeyCode::Backspace => {
@@ -618,12 +613,7 @@ fn handle_idle_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers:
             }
             KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
                 screen.input_focused = true;
-                screen.insert_char_at_cursor(c);
-                if c == '@' {
-                    enter_at_file_mode(app, screen);
-                } else if c == '/' && screen.input == "/" {
-                    enter_command_mode(app, screen);
-                }
+                insert_char_with_trigger(app, screen, c);
                 screen.refresh();
             }
             KeyCode::Backspace => {
@@ -679,7 +669,7 @@ fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
         }
         KeyCode::Char(c) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             screen.input_focused = true;
-            screen.insert_char_at_cursor(c);
+            insert_char_with_trigger(app, screen, c);
             screen.refresh();
         }
         KeyCode::Backspace => {
@@ -688,6 +678,17 @@ fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
             screen.refresh();
         }
         _ => {}
+    }
+}
+
+/// Insert a character and activate `@` / `/` pickers when appropriate.
+/// This is the single source of truth for character-level input triggers.
+fn insert_char_with_trigger(app: &mut App, screen: &mut Screen, c: char) {
+    screen.insert_char_at_cursor(c);
+    if c == '@' {
+        enter_at_file_mode(app, screen);
+    } else if c == '/' && screen.input == "/" {
+        enter_command_mode(app, screen);
     }
 }
 
@@ -1246,6 +1247,7 @@ fn select_at_file(app: &mut App, screen: &mut Screen) {
     let replace_start = at_pos.saturating_sub(1);
     screen.input.truncate(replace_start);
     screen.input.push_str(&placeholder);
+    screen.input_cursor = screen.input.len();
 
     // Store absolute path so read works regardless of CWD changes
     let abs_path = app.workspace.join(&rel_path);
