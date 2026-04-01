@@ -252,12 +252,22 @@ impl ProjectStore {
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 fn project_base(workspace: &Path) -> PathBuf {
-    let sanitized = workspace
-        .to_string_lossy()
-        .trim_start_matches('/')
-        .replace('/', "-");
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let name = workspace
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    let mut hasher = DefaultHasher::new();
+    workspace.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+    
+    let sanitized = format!("{}-{}", name, &hash[..8]);
+    
     crate::memory::store::default_memory_base_dir()
-        .join("projects")
+        .join("memory")
         .join(sanitized)
 }
 
