@@ -67,6 +67,26 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             lines
         }
         Event::Final { summary } => format_final_lines(summary),
+        Event::ConversationCompacted {
+            summary,
+            messages_dropped,
+        } => {
+            let mut lines = vec![format!(
+                "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
+                sym.bullet, messages_dropped
+            )
+            .dark_grey()
+            .to_string()];
+            if !summary.is_empty() {
+                let excerpt: String = summary.lines().take(4).collect::<Vec<_>>().join(" ");
+                lines.push(
+                    format!("    {}", shorten_text(&excerpt, 200))
+                        .dark_grey()
+                        .to_string(),
+                );
+            }
+            lines
+        }
     }
 }
 
@@ -102,6 +122,7 @@ pub(crate) fn format_event_live(event: &Event) -> Vec<String> {
         }
         Event::ToolResult { output, exit_code } => compact_tool_result_lines(*exit_code, output),
         Event::NeedsConfirmation { .. } => format_event(event),
+        Event::ConversationCompacted { .. } => format_event(event),
     }
 }
 
@@ -147,6 +168,15 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
             lines
         }
         Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
+        Event::ConversationCompacted { messages_dropped, .. } => {
+            let sym = Symbols::current();
+            vec![format!(
+                "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
+                sym.bullet, messages_dropped
+            )
+            .dark_grey()
+            .to_string()]
+        }
     }
 }
 
@@ -886,7 +916,8 @@ pub(crate) fn collapsed_task_event_lines(events: &[Event]) -> Vec<String> {
                         Event::Phase { .. } => break,
                         Event::NeedsConfirmation { .. }
                         | Event::Final { .. }
-                        | Event::UserTask { .. } => break,
+                        | Event::UserTask { .. }
+                        | Event::ConversationCompacted { .. } => break,
                     }
                 }
 

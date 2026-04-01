@@ -183,6 +183,33 @@ impl ProjectStore {
         append_file(path, &block)
     }
 
+    /// Overwrite the current session file with the compaction summary.
+    ///
+    /// After context compaction the old session history is no longer accurate —
+    /// overwriting ensures that a session restore injects only the compact summary
+    /// rather than the full (now-discarded) history.
+    pub fn rewrite_session_after_compaction(
+        &self,
+        summary: &str,
+        messages_dropped: usize,
+    ) -> Result<()> {
+        let path = self.current_session_path();
+        let active_session_id = session_id();
+        let ts = ProjectStore::format_session_timestamp(&active_session_id);
+        let now = Local::now().format("%H:%M:%S");
+        let content = format!(
+            "# Session {ts}\n\n\
+             ## {now} [context compacted · {messages_dropped} messages dropped]\n\n\
+             {}\n",
+            summary.trim()
+        );
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, content)?;
+        Ok(())
+    }
+
     /// Append file diffs produced by a shell command to the current session file.
     pub fn append_diff_to_session(&self, cmd: &str, diffs: &[(String, String)]) -> Result<()> {
         if diffs.is_empty() {

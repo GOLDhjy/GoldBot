@@ -1623,8 +1623,23 @@ pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &
         chosen_split_at += 1;
     };
 
+    let messages_dropped = chosen_split_at - prefix_end;
     app.messages = compacted;
     sync_context_budget(app, screen);
+
+    let ev = Event::ConversationCompacted {
+        summary: summary.clone(),
+        messages_dropped,
+    };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+
+    if let Err(e) = crate::memory::project::ProjectStore::current()
+        .rewrite_session_after_compaction(&summary, messages_dropped)
+    {
+        eprintln!("[compaction] 会话文件覆写失败: {e}");
+    }
+
     screen.status = "🧠 context compacted".grey().to_string();
     screen.refresh();
 }

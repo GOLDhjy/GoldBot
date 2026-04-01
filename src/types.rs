@@ -224,6 +224,11 @@ pub enum Event {
     Final {
         summary: String,
     },
+    /// 上下文压缩完成后向 TUI 面板发出的持久事件。
+    ConversationCompacted {
+        summary: String,
+        messages_dropped: usize,
+    },
 }
 
 #[derive(Debug, Clone)]

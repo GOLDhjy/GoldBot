@@ -6,7 +6,7 @@ When GoldBot compacts context to free token budget, users receive only a fleetin
 
 - Add a `ConversationCompacted` variant to the `Event` enum in `types.rs` carrying the compaction summary and message count.
 - Emit this event into the TUI event stream whenever `maybe_flush_and_compact_before_call` runs, so it renders as a permanent banner in the conversation panel rather than a transient status-bar message.
-- Improve `summarize_for_compaction` to extract higher-quality context: preserve the last `<final>` output, phase label, and any `<memory>` tags emitted before compaction.
+- Replace `summarize_for_compaction` with an LLM-driven summarisation call: send the messages being dropped to the same GLM backend with a dedicated compaction system prompt; use the returned summary as the `[Context compacted]` block. If the LLM call fails, fall back to tag extraction (last `<final>`, phase, `<memory>` notes) and mark the event with `[context compaction failed, messages truncated]`.
 - Record compaction events in the session log (`ProjectStore::append_compaction_to_session`) so post-session review shows what was dropped.
 - Remove the dead `flushed = 0` / `CompactState` dead-code artefacts left from earlier iterations.
 

@@ -11,13 +11,14 @@ Dead code remains from an earlier design: `flushed = 0` in `maybe_flush_and_comp
 **Goals:**
 - Emit a `ConversationCompacted` event that persists in the TUI panel when compaction fires.
 - Record the compaction event (timestamp, dropped-message count, summary excerpt) in the session log via `ProjectStore`.
-- Improve `summarize_for_compaction` to extract the last `<final>` output, current phase, and any `<memory>` tags so the compacted summary is more informative.
+- **LLM-driven summarisation**: call the same GLM backend with a dedicated compaction system prompt to generate a structured natural-language summary; use it as the `[Context compacted]` block injected into the retained history. The call is synchronous and blocks the current step until the summary returns.
+- On LLM failure, fall back to deterministic tag extraction (last `<final>`, `<phase>`, `<memory>` notes) and surface `[context compaction failed, messages truncated]` in the UI event; never propagate the error to the main task flow.
 - Remove dead code (`flushed`, orphaned `CompactState` usage if confirmed unused).
 
 **Non-Goals:**
-- LLM-based summarisation (adds latency and a synchronous API call mid-step; deferred).
 - User-initiated compaction (no keybinding for manual compact in this change).
 - Changing the compaction trigger heuristic (`dynamic_compact_reserve_tokens` stays as-is).
+- Introducing a separate lighter model for compaction (add `GOLDBOT_COMPACT_MODEL` env var later if needed).
 
 ## Decisions
 
@@ -31,20 +32,27 @@ Dead code remains from an earlier design: `flushed = 0` in `maybe_flush_and_comp
 
 **Rationale:** Typed events are the established pattern for in-panel notifications (thinking, tool call, tool result). A dedicated variant lets `format.rs` render it distinctively (dimmed border, "Context compacted" label) without adding noise to the LLM message list.
 
-### D2 — Summary extraction: last `<final>`, phase, `<memory>` tags
+### D2 — LLM-driven summarisation with tag-extraction fallback
 
-**Decision:** `summarize_for_compaction` is extended to scan the messages being dropped in reverse order and extract:
-1. The most recent `<final>…</final>` block content (truncated to 400 chars).
-2. The current phase string (last `<phase>…</phase>` seen).
-3. Any `<memory>…</memory>` notes (de-duplicated).
+**Decision:** Replace `summarize_for_compaction` with an async-blocking LLM call using a dedicated compaction system prompt (separate from the GoldBot agent prompt). The prompt instructs the model to output plain text only (no tool tags). The call reuses the same GLM backend and HTTP client already in use.
 
-These are assembled into the `[Context compacted]` user message already injected into the retained history.
+**Compaction system prompt template:**
+```
+You are a conversation summarizer. The following messages are about to be discarded from an AI agent's context window. Produce a concise structured summary (≤ 300 words) covering:
+1. Main task goal
+2. Key decisions and outcomes
+3. Important tool results or file changes
+4. Current progress state and next intended step
+
+Output plain text only. No XML tags, no markdown headings, no tool calls.
+```
+
+**Failure handling:** If the LLM call fails (network error, timeout, non-200 response), fall back to deterministic extraction: scan dropped messages in reverse for the last `<final>` block (≤ 400 chars), the last `<phase>` string, and unique `<memory>` notes. Prefix the injected block with `[context compaction failed, messages truncated]` so the LLM knows summarisation was degraded. The error is logged (`eprintln!`) but not propagated — it must not crash or stall the main task.
 
 **Alternatives considered:**
-- LLM summarisation call — deferred (latency concern noted above).
-- Keep current plain text extraction — retained as fallback when no structured tags are found.
-
-**Rationale:** Structured tags are already parsed throughout the codebase. Extracting them deterministically is zero-latency and produces more actionable context than counting "N thoughts, M tool calls".
+- Reuse GoldBot system prompt — rejected; contains tool definitions that could cause the model to emit `<tool>` tags instead of a plain summary, wasting tokens.
+- Introduce a lighter model via `GOLDBOT_COMPACT_MODEL` — deferred; adds config complexity now, easy to add later.
+- Keep current plain text extraction only — rejected; produces low-quality context ("N thoughts, M tool calls") that doesn't help the LLM resume work.
 
 ### D3 — Session log integration via `ProjectStore::append_compaction_to_session`
 
