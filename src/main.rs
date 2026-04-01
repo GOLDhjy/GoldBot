@@ -5,7 +5,11 @@ mod tools;
 mod types;
 mod ui;
 
-use std::{io, sync::{Arc, atomic::AtomicBool}, time::Duration};
+use std::{
+    io,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use agent::{
     dag::DagResult,
@@ -15,7 +19,7 @@ use agent::{
         refresh_llm_status, start_task, sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
-    react::{build_workspace_context, build_system_prompt},
+    react::{build_system_prompt, build_workspace_context},
     sub_agent::{SubAgentHandle, SubAgentIdGen},
 };
 use crossterm::{
@@ -28,7 +32,7 @@ use memory::project::{ProjectStore, init_workspace};
 use tokio::sync::mpsc;
 use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
-use types::{AssistMode, Event, Mode};
+use types::{AssistMode, Event, InputQueue, Mode};
 use ui::ge::drain_ge_events;
 use ui::input::{handle_key, handle_paste};
 use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
@@ -87,7 +91,7 @@ pub(crate) struct App {
     pub answering_question: bool,
     /// When Some, input is treated as an API key value for this env var name.
     pub pending_api_key_name: Option<String>,
-    pub message_queue: Vec<String>,
+    pub message_queue: InputQueue,
     pub mcp_registry: crate::tools::mcp::McpRegistry,
     pub mcp_discovery_rx:
         Option<std::sync::mpsc::Receiver<(crate::tools::mcp::McpRegistry, Vec<String>)>>,
@@ -236,9 +240,7 @@ impl App {
         // 记忆在每次 start_task 时按任务过滤后拼入 user 消息。
         let assist_mode = AssistMode::Off;
         let context = build_workspace_context(&workspace, assist_mode);
-        let messages = vec![
-            Message::system(format!("{base_prompt}\n\n{context}")),
-        ];
+        let messages = vec![Message::system(format!("{base_prompt}\n\n{context}"))];
         Self {
             messages,
 
@@ -278,7 +280,7 @@ impl App {
             pending_question: None,
             answering_question: false,
             pending_api_key_name: None,
-            message_queue: Vec::new(),
+            message_queue: InputQueue::default(),
             mcp_registry,
             mcp_discovery_rx: None,
             skills,
@@ -313,6 +315,27 @@ impl App {
         if let Some(msg) = self.messages.first_mut() {
             msg.content = format!("{system}\n\n{context}");
         }
+    }
+
+    pub(crate) fn sync_message_queue_labels(&self, screen: &mut Screen) {
+        screen.message_queue_labels = self.message_queue.labels();
+    }
+
+    pub(crate) fn enqueue_message(&mut self, screen: &mut Screen, text: String) -> usize {
+        let len = self.message_queue.push(text);
+        self.sync_message_queue_labels(screen);
+        len
+    }
+
+    pub(crate) fn dequeue_message(&mut self, screen: &mut Screen) -> Option<String> {
+        let item = self.message_queue.pop().map(|queued| queued.text);
+        self.sync_message_queue_labels(screen);
+        item
+    }
+
+    pub(crate) fn clear_message_queue(&mut self, screen: &mut Screen) {
+        self.message_queue.clear();
+        self.sync_message_queue_labels(screen);
     }
 }
 
@@ -493,11 +516,10 @@ async fn run_loop(
             && !app.message_queue.is_empty()
             && !app.needs_agent_executor
         {
-            let queued: Vec<String> = app.message_queue.drain(..).collect();
-            for msg in queued {
+            if let Some(msg) = app.dequeue_message(screen) {
                 let wrapped = agent::react::build_interjection_user_message(&msg);
                 app.messages.push(agent::provider::Message::user(wrapped));
-                let ev = Event::UserTask { text: msg.clone() };
+                let ev = Event::UserTask { text: msg };
                 ui::format::emit_live_event(screen, &ev);
                 app.task_events.push(ev);
             }
@@ -595,17 +617,24 @@ fn poll_dag_result(app: &mut App, screen: &mut Screen) {
         screen.refresh();
     }
 
-    let Some(rx) = app.dag_result_rx.as_mut() else { return; };
+    let Some(rx) = app.dag_result_rx.as_mut() else {
+        return;
+    };
     match rx.try_recv() {
         Ok(result) => {
             app.dag_result_rx = None;
             app.dag_task_running = false;
-            app.dag_cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.dag_cancel_flag
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             // 清掉 managed area 中的 live 树形
             screen.dag_tree = None;
             match result {
                 Ok(dag_result) => {
-                    let status = if dag_result.has_failures { "completed with failures" } else { "completed" };
+                    let status = if dag_result.has_failures {
+                        "completed with failures"
+                    } else {
+                        "completed"
+                    };
                     // 把最终带完成标记的树形输出为 task event（滚回记录）
                     let final_tree = agent::dag::build_dag_tree(
                         &app.dag_graph_nodes,
@@ -613,16 +642,24 @@ fn poll_dag_result(app: &mut App, screen: &mut Screen) {
                         &app.dag_node_done,
                     );
                     let tree_ev = crate::types::Event::ToolCall {
-                        label: format!("SubAgent DAG {} ({:.1}s)", status, dag_result.elapsed.as_secs_f64()),
+                        label: format!(
+                            "SubAgent DAG {} ({:.1}s)",
+                            status,
+                            dag_result.elapsed.as_secs_f64()
+                        ),
                         command: final_tree,
                         multiline: true,
                     };
                     crate::ui::format::emit_live_event(screen, &tree_ev);
                     app.task_events.push(tree_ev);
-                    app.messages.push(Message::user(format!("[SubAgent DAG result]:\n{}", dag_result.output)));
+                    app.messages.push(Message::user(format!(
+                        "[SubAgent DAG result]:\n{}",
+                        dag_result.output
+                    )));
                 }
                 Err(e) => {
-                    app.messages.push(Message::user(format!("[SubAgent DAG failed: {e}]")));
+                    app.messages
+                        .push(Message::user(format!("[SubAgent DAG failed: {e}]")));
                 }
             }
             app.needs_agent_executor = true;
@@ -631,7 +668,9 @@ fn poll_dag_result(app: &mut App, screen: &mut Screen) {
         Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
             app.dag_result_rx = None;
             app.dag_task_running = false;
-            app.messages.push(Message::user("[SubAgent DAG: worker disconnected]".to_string()));
+            app.messages.push(Message::user(
+                "[SubAgent DAG: worker disconnected]".to_string(),
+            ));
             app.needs_agent_executor = true;
         }
     }
@@ -719,7 +758,8 @@ fn interrupt_active_llm_loop(
         crate::tools::shell::request_cancel_running_shell_commands();
     }
     if app.dag_task_running {
-        app.dag_cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.dag_cancel_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         app.dag_task_running = false;
         app.dag_result_rx = None;
         app.dag_progress_rx = None;

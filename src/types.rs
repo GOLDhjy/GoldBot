@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +13,43 @@ pub enum TodoStatus {
 pub struct TodoItem {
     pub label: String,
     pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedInput {
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InputQueue {
+    items: VecDeque<QueuedInput>,
+}
+
+impl InputQueue {
+    pub(crate) fn push(&mut self, text: String) -> usize {
+        self.items.push_back(QueuedInput { text });
+        self.items.len()
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<QueuedInput> {
+        self.items.pop_front()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub(crate) fn labels(&self) -> Vec<String> {
+        self.items.iter().map(|item| item.text.clone()).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,7 +303,7 @@ pub enum LlmAction {
 
 #[cfg(test)]
 mod tests {
-    use super::AssistMode;
+    use super::{AssistMode, InputQueue};
 
     #[test]
     fn assist_mode_cycle_off_to_accept_edits() {
@@ -290,5 +329,33 @@ mod tests {
             Some(AssistMode::AcceptEdits)
         );
         assert_eq!(AssistMode::parse_llm_name("plan"), Some(AssistMode::Plan));
+    }
+
+    #[test]
+    fn input_queue_preserves_fifo_order() {
+        let mut queue = InputQueue::default();
+        queue.push("first".to_string());
+        queue.push("second".to_string());
+
+        assert_eq!(queue.pop().map(|item| item.text), Some("first".to_string()));
+        assert_eq!(
+            queue.pop().map(|item| item.text),
+            Some("second".to_string())
+        );
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn input_queue_labels_reflect_pending_items() {
+        let mut queue = InputQueue::default();
+        queue.push("alpha".to_string());
+        queue.push("beta".to_string());
+
+        assert_eq!(
+            queue.labels(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.is_empty());
     }
 }

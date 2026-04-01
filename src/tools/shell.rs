@@ -192,8 +192,7 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
 
     // 将文件差异写入当前 session 记忆，方便后续查阅或恢复
     if !diffs.is_empty() {
-        let _ = crate::memory::project::ProjectStore::current()
-            .append_diff_to_session(cmd, &diffs);
+        let _ = crate::memory::project::ProjectStore::current().append_diff_to_session(cmd, &diffs);
     }
 
     let mut text = String::new();

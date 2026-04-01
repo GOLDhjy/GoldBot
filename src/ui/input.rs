@@ -160,12 +160,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                     let store = crate::memory::project::ProjectStore::current();
                     match store.read_session(id) {
                         Ok(content) => {
-                            let ts = crate::memory::project::ProjectStore::format_session_timestamp(id);
-                            app.messages.push(crate::agent::provider::Message::user(format!(
-                                "[Restored session from {ts}]\n{content}"
-                            )));
-                            sync_context_budget(app, screen);
-                            screen.emit(&[format!("  ✓ 已恢复会话：{ts}")]);
+                            switch_to_restored_session(app, screen, id, &content);
                         }
                         Err(e) => {
                             screen.emit(&[format!("  ✗ 无法读取会话：{e}")]);
@@ -288,6 +283,76 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
             _ => {}
         }
     }
+}
+
+fn switch_to_restored_session(app: &mut App, screen: &mut Screen, id: &str, content: &str) {
+    let ts = crate::memory::project::ProjectStore::format_session_timestamp(id);
+    crate::memory::project::switch_session(id);
+
+    app.messages.truncate(1);
+    app.rebuild_system_message();
+    app.messages.push(crate::agent::provider::Message::user(format!(
+        "[Restored session: {ts}]\nTreat the following session log as the active conversation context.\n\n{content}"
+    )));
+
+    app.task.clear();
+    app.steps_taken = 0;
+    app.running = false;
+    app.llm_calling = false;
+    app.llm_call_started_at = None;
+    app.task_started_at = None;
+    app.last_task_elapsed = None;
+    app.needs_agent_executor = false;
+    app.interrupt_llm_loop_requested = false;
+    app.interjection_mode = false;
+    app.pending_confirm = None;
+    app.pending_confirm_note = false;
+    app.current_phase = None;
+    app.task_events.clear();
+    app.final_summary = None;
+    app.task_collapsed = false;
+    app.pending_question = None;
+    app.answering_question = false;
+    app.pending_api_key_name = None;
+    app.paste_counter = 0;
+    app.paste_chunks.clear();
+    app.task_display_override = None;
+    app.todo_items.clear();
+    app.shell_task_running = false;
+    app.shell_exec_rx = None;
+    app.dag_task_running = false;
+    app.dag_result_rx = None;
+    app.dag_progress_rx = None;
+    app.dag_tree_event_idx = None;
+    app.dag_node_done.clear();
+    app.dag_graph_nodes.clear();
+    app.dag_output_nodes.clear();
+    app.total_usage = Default::default();
+    app.at_file = Default::default();
+    app.cmd_picker = Default::default();
+    app.model_picker = Default::default();
+    app.pending_session_list = None;
+    app.clear_message_queue(screen);
+    sync_context_budget(app, screen);
+
+    screen.question_labels.clear();
+    screen.confirm_selected = None;
+    screen.todo_items.clear();
+    screen.dag_tree = None;
+    screen.at_file_labels.clear();
+    screen.at_file_sel = 0;
+    screen.command_labels.clear();
+    screen.command_sel = 0;
+    screen.model_picker_labels.clear();
+    screen.model_picker_sel = 0;
+    screen.status.clear();
+    screen.status_right.clear();
+    screen.input.clear();
+    screen.input_cursor = 0;
+    screen.input_focused = true;
+    screen.reset_task_lines();
+    screen.clear_screen();
+    screen.emit(&[format!("  ✓ 已切换到会话：{ts}")]);
 }
 
 fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
@@ -687,8 +752,10 @@ fn handle_running_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                 let final_task = attach_files_to_task(&at_file_chunks, &task);
                 clear_input_buffer(app, screen);
                 let preview: String = final_task.chars().take(40).collect();
-                app.message_queue.push(final_task);
-                screen.status = format!("Queued: {preview}").dark_yellow().to_string();
+                let queue_len = app.enqueue_message(screen, final_task);
+                screen.status = format!("Queued ({queue_len}): {preview}")
+                    .dark_yellow()
+                    .to_string();
                 screen.refresh();
             }
         }
@@ -1522,7 +1589,8 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
                     .iter()
                     .map(|id| {
                         let ts = crate::memory::project::ProjectStore::format_session_timestamp(id);
-                        let marker = if id.as_str() == crate::memory::project::session_id() {
+                        let active_session_id = crate::memory::project::session_id();
+                        let marker = if id == &active_session_id {
                             "  ← 当前"
                         } else {
                             ""

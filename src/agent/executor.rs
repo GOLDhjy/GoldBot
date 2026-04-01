@@ -61,7 +61,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.needs_agent_executor = true;
     app.interrupt_llm_loop_requested = false;
     app.interjection_mode = false;
-    app.message_queue.clear();
+    app.clear_message_queue(screen);
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
@@ -310,7 +310,11 @@ pub(crate) fn process_llm_result(
                 app.needs_agent_executor = true;
                 break 'actions;
             }
-            LlmAction::Task { description, subagent_type, prompt } => {
+            LlmAction::Task {
+                description,
+                subagent_type,
+                prompt,
+            } => {
                 plan_shown_without_followup = false;
                 had_non_blocking_only = false;
                 execute_task(app, screen, &description, &subagent_type, &prompt);
@@ -802,7 +806,8 @@ pub(crate) fn execute_update_file(
                 &new_content_for_diff,
                 ctx_start,
             );
-            let _ = ProjectStore::current().append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
+            let _ = ProjectStore::current()
+                .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
             let llm_msg = format!(
@@ -869,7 +874,8 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
     match result {
         Ok((old_content, new_content)) => {
             let diff_text = crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
-            let _ = ProjectStore::current().append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
+            let _ = ProjectStore::current()
+                .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
             push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             let mut tool_output = format!("Write {path}:\n");
@@ -1230,6 +1236,19 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
         ));
     }
 
+    if !app.message_queue.is_empty() {
+        let ev = Event::Final {
+            summary: summary.clone(),
+        };
+        emit_live_event(screen, &ev);
+        app.task_events.push(ev);
+        screen.status = format!("Queued follow-up pending ({})", app.message_queue.len())
+            .grey()
+            .to_string();
+        screen.refresh();
+        return;
+    }
+
     app.final_summary = Some(summary.clone());
     app.task_collapsed = true;
 
@@ -1585,9 +1604,7 @@ pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &
     screen.refresh();
 
     let summary = match &app.http_client {
-        Some(client) => {
-            llm_summarize_for_compaction(&older, client, &app.backend).await
-        }
+        Some(client) => llm_summarize_for_compaction(&older, client, &app.backend).await,
         None => summarize_for_compaction_fallback(&older),
     };
 

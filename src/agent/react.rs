@@ -1,11 +1,11 @@
-﻿use crate::{
+use crate::{
     agent::{
         plan,
         sub_agent::{InputMerge, NodeId, OutputMerge, TaskGraph, TaskNode},
     },
     types::{AssistMode, LlmAction},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
@@ -584,7 +584,7 @@ fn extract_last_tag_preserve_block(text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_workspace_context, build_system_prompt, parse_llm_response};
+    use super::{build_system_prompt, build_workspace_context, parse_llm_response};
     use crate::types::{AssistMode, LlmAction};
     use serde_json::json;
     use std::{
@@ -653,8 +653,7 @@ mod tests {
 
     #[test]
     fn parse_tools_recovers_after_unclosed_tool_tag() {
-        let raw =
-            "<tool>mcp_builtin_zread_read_file>\n<args>{\"file_path\":\"README.md\"}</args>\n\
+        let raw = "<tool>mcp_builtin_zread_read_file>\n<args>{\"file_path\":\"README.md\"}</args>\n\
                    <tool>read</tool><path>README.md</path>";
         let (_, actions) = parse_llm_response(raw).expect("should recover and parse later tool");
         assert_eq!(actions.len(), 1);

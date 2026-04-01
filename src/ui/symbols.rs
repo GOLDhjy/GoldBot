@@ -39,7 +39,7 @@ const UNICODE_SYMBOLS: Symbols = Symbols {
     arrow_right: "⏵",
     ellipsis: "…",
     dot: "·",
-    record: "⏺",
+    record: "▸",
     corner: "⎿",
     bullet: "•",
     warning: "⚠",

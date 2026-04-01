@@ -1,4 +1,7 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use chrono::{Duration, Local};
@@ -17,16 +20,31 @@ const MEMORY_TOP_N: usize = 15;
 /// Workspace set once at startup; accessible throughout the process.
 static CURRENT_WORKSPACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// Session identifier — one per process lifetime (YYYYMMDD-HHMMSS).
-static SESSION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Active session identifier for the current process context (YYYYMMDD-HHMMSS).
+static SESSION_ID: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
 
 /// Call once at startup, before any ProjectStore operations.
 pub fn init_workspace(workspace: PathBuf) {
     let _ = CURRENT_WORKSPACE.set(workspace);
 }
 
-pub fn session_id() -> &'static str {
-    SESSION_ID.get_or_init(|| Local::now().format("%Y%m%d-%H%M%S").to_string())
+fn default_session_id() -> String {
+    Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+fn session_id_cell() -> &'static std::sync::RwLock<String> {
+    SESSION_ID.get_or_init(|| std::sync::RwLock::new(default_session_id()))
+}
+
+pub fn session_id() -> String {
+    session_id_cell()
+        .read()
+        .expect("session id lock poisoned")
+        .clone()
+}
+
+pub fn switch_session(id: &str) {
+    *session_id_cell().write().expect("session id lock poisoned") = id.to_string();
 }
 
 // ── ProjectStore ──────────────────────────────────────────────────────────────
@@ -51,7 +69,9 @@ impl ProjectStore {
     }
 
     pub fn new(workspace: &Path) -> Self {
-        Self { base: project_base(workspace) }
+        Self {
+            base: project_base(workspace),
+        }
     }
 
     // ── Paths ─────────────────────────────────────────────────────────────────
@@ -127,7 +147,12 @@ impl ProjectStore {
             scored.into_iter().map(|(_, _, n)| n).collect()
         } else {
             // No query: return the most recent MEMORY_TOP_N notes.
-            notes.iter().rev().take(MEMORY_TOP_N).map(String::as_str).collect()
+            notes
+                .iter()
+                .rev()
+                .take(MEMORY_TOP_N)
+                .map(String::as_str)
+                .collect()
         };
 
         let lines = selected
@@ -159,11 +184,7 @@ impl ProjectStore {
     }
 
     /// Append file diffs produced by a shell command to the current session file.
-    pub fn append_diff_to_session(
-        &self,
-        cmd: &str,
-        diffs: &[(String, String)],
-    ) -> Result<()> {
+    pub fn append_diff_to_session(&self, cmd: &str, diffs: &[(String, String)]) -> Result<()> {
         if diffs.is_empty() {
             return Ok(());
         }
@@ -254,18 +275,18 @@ impl ProjectStore {
 fn project_base(workspace: &Path) -> PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let name = workspace
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string());
-    
+
     let mut hasher = DefaultHasher::new();
     workspace.hash(&mut hasher);
     let hash = format!("{:x}", hasher.finish());
-    
+
     let sanitized = format!("{}-{}", name, &hash[..8]);
-    
+
     crate::memory::store::default_memory_base_dir()
         .join("memory")
         .join(sanitized)
@@ -288,7 +309,8 @@ fn ensure_session_header(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     if !path.exists() {
-        let ts = ProjectStore::format_session_timestamp(session_id());
+        let active_session_id = session_id();
+        let ts = ProjectStore::format_session_timestamp(&active_session_id);
         fs::write(path, format!("# Session {ts}\n"))?;
     }
     Ok(())
@@ -479,13 +501,20 @@ mod tests {
         let (store, base) = temp_store();
         // Add MEMORY_TOP_N + 2 notes; two are clearly relevant to "rebase git".
         for i in 0..(MEMORY_TOP_N - 1) {
-            store.append_memory(&format!("数据库连接用 .env 文件 no{i}")).unwrap();
+            store
+                .append_memory(&format!("数据库连接用 .env 文件 no{i}"))
+                .unwrap();
         }
         store.append_memory("用 rebase -i 合并 git 提交").unwrap();
         store.append_memory("git push 前先 cargo test").unwrap();
-        let msg = store.build_memory_message(Some("帮我 rebase 这个 git 分支")).unwrap();
+        let msg = store
+            .build_memory_message(Some("帮我 rebase 这个 git 分支"))
+            .unwrap();
         assert!(msg.contains("rebase"), "relevant note must be included");
-        assert!(!msg.contains("no0"), "unrelated notes should be filtered out");
+        assert!(
+            !msg.contains("no0"),
+            "unrelated notes should be filtered out"
+        );
         let _ = fs::remove_dir_all(base);
     }
 

@@ -179,6 +179,8 @@ pub(crate) struct Screen {
     /// Live DAG tree shown in managed area during SubAgent execution.
     /// Set when DAG starts, updated on node completion, cleared when DAG ends.
     pub dag_tree: Option<String>,
+    /// 排队中的用户消息队列显示（预览文本）
+    pub message_queue_labels: Vec<String>,
 }
 
 impl Screen {
@@ -210,6 +212,7 @@ impl Screen {
             model_picker_labels: Vec::new(),
             model_picker_sel: 0,
             dag_tree: None,
+            message_queue_labels: Vec::new(),
         })
     }
 
@@ -241,6 +244,7 @@ impl Screen {
             model_picker_labels: Vec::new(),
             model_picker_sel: 0,
             dag_tree: None,
+            message_queue_labels: Vec::new(),
         };
         let cols = crossterm::terminal::size()
             .map(|(c, _)| c.max(1) as usize)
@@ -298,6 +302,9 @@ impl Screen {
         // ── Todo panel (topmost in managed area) ──
         let todo_rows = self.draw_todo_panel(cols);
 
+        // ── Queued input panel ──
+        let queue_rows = self.draw_message_queue_panel(cols);
+
         // ── @ file picker panel ──
         let at_file_rows = self.draw_at_file_panel(cols);
 
@@ -347,6 +354,7 @@ impl Screen {
             let hint = fit_single_line_tail(&hint, cols);
             let _ = execute!(self.stdout, Print(hint.dark_yellow().to_string()));
             self.managed_lines = todo_rows
+                + queue_rows
                 + at_file_rows
                 + command_rows
                 + model_picker_rows
@@ -371,7 +379,10 @@ impl Screen {
                 let mut rows = 0;
                 for line in tree.lines() {
                     let shown = fit_single_line_tail(line, cols.saturating_sub(2));
-                    let _ = execute!(self.stdout, Print(format!("  {}\r\n", shown.dark_cyan().to_string())));
+                    let _ = execute!(
+                        self.stdout,
+                        Print(format!("  {}\r\n", shown.dark_cyan().to_string()))
+                    );
                     rows += 1;
                 }
                 rows
@@ -454,6 +465,7 @@ impl Screen {
             };
             let _ = execute!(self.stdout, Print(accept_hint));
             self.managed_lines = todo_rows
+                + queue_rows
                 + at_file_rows
                 + command_rows
                 + model_picker_rows
@@ -531,6 +543,53 @@ impl Screen {
             let _ = execute!(self.stdout, Print(format!("    {} {}\r\n", icon, styled)));
             rows += 1;
         }
+        rows
+    }
+
+    /// Render the queued input panel below the todo panel.
+    /// Returns the number of terminal rows consumed.
+    fn draw_message_queue_panel(&mut self, cols: usize) -> usize {
+        if !self.is_running || self.message_queue_labels.is_empty() {
+            return 0;
+        }
+
+        let sym = Symbols::current();
+        let count = self.message_queue_labels.len();
+        let header = format!("  {} Queued ({count})", sym.arrow_down.grey());
+        let _ = execute!(self.stdout, Print(format!("{}\r\n", header.grey())));
+
+        let max_visible = 3.min(count);
+        let budget = cols.saturating_sub(rendered_text_width("      "));
+        let mut rows = 1;
+        for (idx, label) in self
+            .message_queue_labels
+            .iter()
+            .take(max_visible)
+            .enumerate()
+        {
+            let trimmed = fit_single_line_tail(label, budget);
+            let line = if idx == 0 {
+                format!(
+                    "  {} {}\r\n",
+                    sym.record.cyan().bold(),
+                    trimmed.bold().white()
+                )
+            } else {
+                format!("    {}\r\n", trimmed).grey().to_string()
+            };
+            let _ = execute!(self.stdout, Print(line));
+            rows += 1;
+        }
+
+        if count > max_visible {
+            let remaining = count - max_visible;
+            let _ = execute!(
+                self.stdout,
+                Print(format!("    {}\r\n", format!("+{remaining} more").grey()))
+            );
+            rows += 1;
+        }
+
         rows
     }
 
@@ -697,6 +756,7 @@ impl Screen {
         }
         if self.confirm_selected.is_some()
             || !self.todo_items.is_empty()
+            || !self.message_queue_labels.is_empty()
             || !self.at_file_labels.is_empty()
             || !self.command_labels.is_empty()
             || !self.model_picker_labels.is_empty()
@@ -1307,7 +1367,10 @@ mod tests {
                 "E:/GoldBot".to_string(),
             ],
         );
-        let body = lines.iter().map(|line| strip_ansi(line)).collect::<Vec<_>>();
+        let body = lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
         assert!(body[1].contains("\u{256D}\u{2500}\u{2500}\u{2500}\u{256E}"));
         assert!(body[1].contains("GoldBot v0.9.7"));
         assert!(body[2].contains("</>"));
