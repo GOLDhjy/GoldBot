@@ -10,13 +10,129 @@ use unicode_width::UnicodeWidthChar;
 use crate::types::{AssistMode, TodoItem, TodoStatus};
 use crate::ui::symbols::Symbols;
 
-pub(crate) const TITLE_BANNER: [&str; 5] = [
-    "   ____       _     _ ____        _   ",
-    "  / ___| ___ | | __| | __ )  ___ | |_ ",
-    " | |  _ / _ \\| |/ _` |  _ \\ / _ \\| __|",
-    " | |_| | (_) | | (_| | |_) | (_) | |_ ",
-    "  \\____|\\___/|_|\\__,_|____/ \\___/ \\__|",
-];
+const TITLE_BORDER_COLOR: Color = Color::Rgb {
+    r: 221,
+    g: 120,
+    b: 255,
+};
+const TITLE_TEXT_COLOR: Color = Color::Rgb {
+    r: 235,
+    g: 142,
+    b: 255,
+};
+const TITLE_MUTED_TEXT_COLOR: Color = Color::Rgb {
+    r: 170,
+    g: 170,
+    b: 176,
+};
+const TITLE_LOGO_CYAN: Color = Color::Rgb {
+    r: 61,
+    g: 203,
+    b: 255,
+};
+const TITLE_LOGO_MAGENTA: Color = Color::Rgb {
+    r: 221,
+    g: 120,
+    b: 255,
+};
+const TITLE_LOGO_GOLD: Color = Color::Rgb {
+    r: 255,
+    g: 196,
+    b: 61,
+};
+const TITLE_LOGO_GREEN: Color = Color::Rgb {
+    r: 81,
+    g: 245,
+    b: 171,
+};
+const TITLE_CARD_MAX_INNER_WIDTH: usize = 72;
+
+fn render_title_logo_line(row: usize) -> String {
+    match row {
+        0 => format!(
+            "{}{}{}{}{}",
+            "\u{256D}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{2500}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{2500}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{2500}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{256E}".with(TITLE_LOGO_CYAN).bold()
+        ),
+        1 => format!(
+            "{}{}{}{}{}",
+            "\u{2502}".with(TITLE_LOGO_CYAN).bold(),
+            "<".with(TITLE_LOGO_MAGENTA).bold(),
+            "/".with(TITLE_LOGO_GOLD).bold(),
+            ">".with(TITLE_LOGO_MAGENTA).bold(),
+            "\u{2502}".with(TITLE_LOGO_CYAN).bold()
+        ),
+        _ => format!(
+            "{}{}{}{}{}",
+            "\u{2570}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{2500}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{2581}".with(TITLE_LOGO_GREEN).bold(),
+            "\u{2500}".with(TITLE_LOGO_CYAN).bold(),
+            "\u{256F}".with(TITLE_LOGO_CYAN).bold()
+        ),
+    }
+}
+
+fn title_logo_width() -> usize {
+    (0..3)
+        .map(|row| rendered_text_width(&strip_ansi(&render_title_logo_line(row))))
+        .max()
+        .unwrap_or(0)
+}
+
+fn render_title_border(left: char, right: char, inner_width: usize) -> String {
+    let horizontal = "\u{2500}".repeat(inner_width + 2);
+    format!(
+        "{}{}{}",
+        left.with(TITLE_BORDER_COLOR).bold(),
+        horizontal.as_str().with(TITLE_BORDER_COLOR).bold(),
+        right.with(TITLE_BORDER_COLOR).bold()
+    )
+}
+
+fn render_title_row(content: String, inner_width: usize) -> String {
+    let width = rendered_text_width(&strip_ansi(&content));
+    let padding = inner_width.saturating_sub(width);
+    format!(
+        "{} {}{} {}",
+        "\u{2502}".with(TITLE_BORDER_COLOR).bold(),
+        content,
+        " ".repeat(padding),
+        "\u{2502}".with(TITLE_BORDER_COLOR).bold()
+    )
+}
+
+fn render_title_banner_lines(cols: usize, info_lines: &[String]) -> Vec<String> {
+    let logo_width = title_logo_width();
+    let available = cols.saturating_sub(4);
+    let max_inner_width = available.min(TITLE_CARD_MAX_INNER_WIDTH);
+    let min_inner_width = logo_width + 2 + 16;
+    if max_inner_width < min_inner_width {
+        return info_lines.to_vec();
+    }
+
+    let inner_width = max_inner_width;
+    let text_budget = inner_width.saturating_sub(logo_width + 2);
+    let mut lines = Vec::with_capacity(5);
+    lines.push(render_title_border('\u{256D}', '\u{256E}', inner_width));
+    for (i, raw_line) in info_lines.iter().take(3).enumerate() {
+        let text = fit_single_line_tail(raw_line, text_budget);
+        let styled = if i == 0 {
+            text.with(TITLE_TEXT_COLOR).bold().to_string()
+        } else {
+            text.with(TITLE_MUTED_TEXT_COLOR).to_string()
+        };
+        lines.push(render_title_row(
+            format!("{}  {}", render_title_logo_line(i), styled),
+            inner_width,
+        ));
+    }
+    lines.push(render_title_border('\u{2570}', '\u{256F}', inner_width));
+    lines
+}
 
 pub(crate) struct Screen {
     stdout: io::Stdout,
@@ -126,40 +242,17 @@ impl Screen {
             model_picker_sel: 0,
             dag_tree: None,
         };
-        execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
-        for line in TITLE_BANNER {
-            execute!(
-                s.stdout,
-                cursor::MoveToColumn(0),
-                Clear(ClearType::CurrentLine),
-                Print(format!(
-                    "{}\r\n",
-                    line.with(Color::Rgb {
-                        r: 255,
-                        g: 215,
-                        b: 0
-                    })
-                    .bold()
-                ))
-            )?;
-        }
-
         let cols = crossterm::terminal::size()
             .map(|(c, _)| c.max(1) as usize)
             .unwrap_or(80);
-        let subtitle_budget = cols.saturating_sub(rendered_text_width("  "));
-        for (i, line) in startup_subtitle_lines().iter().enumerate() {
-            let line = fit_single_line_tail(line, subtitle_budget);
-            let styled = match i {
-                0 => line.bold().to_string(),
-                1 => line.grey().to_string(),
-                _ => line.grey().to_string(),
-            };
+        let subtitle_lines = startup_subtitle_lines();
+        execute!(s.stdout, cursor::MoveToColumn(0), Print("\r\n"))?;
+        for line in render_title_banner_lines(cols, &subtitle_lines) {
             execute!(
                 s.stdout,
                 cursor::MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
-                Print(format!("  {}\r\n", styled))
+                Print(format!("{line}\r\n"))
             )?;
         }
 
@@ -1139,7 +1232,7 @@ pub(crate) fn format_skills_status_line(names: &[String]) -> Option<String> {
     let cols = crossterm::terminal::size()
         .map(|(c, _)| c.max(1) as usize)
         .unwrap_or(80);
-    let prefix = "  Skills  ";
+    let prefix = "Skills  ";
     let sep = format!(" {} ", Symbols::current().dot);
     let mut budget = cols.saturating_sub(rendered_text_width(prefix));
 
@@ -1183,4 +1276,42 @@ pub(crate) fn format_mcp_status_line(ok: &[(String, usize)], failed: &[String]) 
         parts.push(name.as_str().red().to_string());
     }
     Some(format!("  {}{}", "MCP  ".grey(), parts.join(&sep)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_title_banner_lines, strip_ansi};
+
+    #[test]
+    fn title_banner_renders_frame() {
+        let lines = render_title_banner_lines(
+            80,
+            &[
+                "GoldBot v0.9.7".to_string(),
+                "glm-5.1 · open.bigmodel.cn".to_string(),
+                "E:/GoldBot".to_string(),
+            ],
+        );
+        assert_eq!(lines.len(), 5);
+        assert!(strip_ansi(&lines[0]).starts_with('\u{256D}'));
+        assert!(strip_ansi(&lines[4]).starts_with('\u{2570}'));
+    }
+
+    #[test]
+    fn title_banner_contains_wrapped_info_lines() {
+        let lines = render_title_banner_lines(
+            80,
+            &[
+                "GoldBot v0.9.7".to_string(),
+                "glm-5.1 · open.bigmodel.cn".to_string(),
+                "E:/GoldBot".to_string(),
+            ],
+        );
+        let body = lines.iter().map(|line| strip_ansi(line)).collect::<Vec<_>>();
+        assert!(body[1].contains("\u{256D}\u{2500}\u{2500}\u{2500}\u{256E}"));
+        assert!(body[1].contains("GoldBot v0.9.7"));
+        assert!(body[2].contains("</>"));
+        assert!(body[2].contains("glm-5.1 · open.bigmodel.cn"));
+        assert!(body[3].contains("E:/GoldBot"));
+    }
 }

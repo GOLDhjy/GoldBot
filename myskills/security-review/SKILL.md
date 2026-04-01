@@ -3,7 +3,7 @@ name: security-review
 description: Security review workflow adapted from Anthropic's .claude/commands/security-review.md. Use when the user asks for /security-review, a security review of pending changes/current branch/PR diff, or a high-confidence vulnerability-focused review before commit or merge.
 ---
 
-# Claude Security Review
+# Security Review
 
 Use this skill to perform a security-focused review of code changes, with emphasis on high-confidence vulnerabilities and low false positives.
 
@@ -158,11 +158,23 @@ Do not report:
 
 ## Output Format
 
+**IMPORTANT**: 输出的第一行必须是状态行，用于解析，只报告高置信度的问题：
+
+```
+✓ 安全
+```
+或
+```
+✗ 有 <N> 个风险
+```
+
 使用中文输出。
-Return findings first (highest severity first). If none exist, state:
 
-`没有在审查的更改中发现高置信度的安全问题。`
+结论部分在最前面（状态行之后）:
+- 无风险: `没有在审查的更改中发现高置信度的安全问题。`
+- 有风险: `有<几个>风险。`
 
+然后列出详细发现（按严重性排序）。
 For each finding, include:
 
 - Severity
