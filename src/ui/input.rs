@@ -8,7 +8,7 @@ use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
 use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
-use crate::ui::format::{emit_live_event, toggle_collapse};
+use crate::ui::format::{emit_live_event, format_event, toggle_collapse};
 use crate::ui::ge::{drain_ge_events, is_ge_mode, parse_ge_command};
 use crate::ui::screen::Screen;
 use crate::{App, AtFileChunk, PasteChunk};
@@ -352,7 +352,141 @@ fn switch_to_restored_session(app: &mut App, screen: &mut Screen, id: &str, cont
     screen.input_focused = true;
     screen.reset_task_lines();
     screen.clear_screen();
-    screen.emit(&[format!("  ✓ 已切换到会话：{ts}")]);
+    screen.emit(&render_restored_session_lines(&ts, content));
+}
+
+fn render_restored_session_lines(ts: &str, content: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("  ✓ 已切换到会话：{ts}").green().to_string(),
+        String::new(),
+    ];
+    lines.extend(parse_restored_session_content(content));
+    lines
+}
+
+fn parse_restored_session_content(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut idx = 0;
+
+    while idx < lines.len() {
+        let line = lines[idx].trim_end();
+        if !line.starts_with("## ") {
+            idx += 1;
+            continue;
+        }
+
+        let heading = line.trim_start_matches("## ").trim().to_string();
+        idx += 1;
+
+        if heading.contains("[diff]") {
+            out.extend(parse_restored_diff_section(&lines, &mut idx, &heading));
+        } else {
+            out.extend(parse_restored_task_section(&lines, &mut idx, &heading));
+        }
+    }
+
+    if out.is_empty() {
+        out.push("  (会话内容为空)".dark_grey().to_string());
+    }
+
+    out
+}
+
+fn parse_restored_task_section(lines: &[&str], idx: &mut usize, heading: &str) -> Vec<String> {
+    let mut task = None;
+    let mut final_text = None;
+
+    while *idx < lines.len() && !lines[*idx].starts_with("## ") {
+        let trimmed = lines[*idx].trim();
+        if trimmed == "- **Task**" {
+            *idx += 1;
+            task = read_fenced_block(lines, idx);
+            continue;
+        }
+        if trimmed == "- **Final**" {
+            *idx += 1;
+            final_text = read_fenced_block(lines, idx);
+            continue;
+        }
+        *idx += 1;
+    }
+
+    let mut out = Vec::new();
+    out.push(format!("  {}", heading).dark_grey().to_string());
+    if let Some(task) = task.filter(|t| !t.trim().is_empty()) {
+        out.extend(format_event(&Event::UserTask { text: task }));
+    }
+    if let Some(final_text) = final_text.filter(|t| !t.trim().is_empty()) {
+        out.push(String::new());
+        out.extend(format_event(&Event::Final {
+            summary: final_text,
+        }));
+    }
+    out.push(String::new());
+    out
+}
+
+fn parse_restored_diff_section(lines: &[&str], idx: &mut usize, heading: &str) -> Vec<String> {
+    let mut command = String::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+
+    while *idx < lines.len() && !lines[*idx].starts_with("## ") {
+        let trimmed = lines[*idx].trim();
+        if let Some(rest) = trimmed.strip_prefix("- **Command**:") {
+            command = rest.trim().trim_matches('`').to_string();
+            *idx += 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("- **File**:") {
+            let label = rest.trim().to_string();
+            *idx += 1;
+            if let Some(diff) = read_fenced_block(lines, idx).filter(|d| !d.trim().is_empty()) {
+                files.push((label, diff));
+            }
+            continue;
+        }
+        *idx += 1;
+    }
+
+    let mut out = vec![format!("  {}", heading).dark_grey().to_string()];
+    if !command.is_empty() {
+        out.extend(format_event(&Event::ToolCall {
+            label: format!("Diff({command})"),
+            command: command.clone(),
+            multiline: false,
+        }));
+    }
+    for (label, diff) in files {
+        out.extend(format_event(&Event::ToolResult {
+            exit_code: 0,
+            output: format!("Diff {label}:\n{diff}"),
+        }));
+    }
+    out.push(String::new());
+    out
+}
+
+fn read_fenced_block(lines: &[&str], idx: &mut usize) -> Option<String> {
+    while *idx < lines.len() && lines[*idx].trim().is_empty() {
+        *idx += 1;
+    }
+    if *idx >= lines.len() || !lines[*idx].trim_start().starts_with("```") {
+        return None;
+    }
+
+    *idx += 1;
+    let mut block = Vec::new();
+    while *idx < lines.len() {
+        let line = lines[*idx];
+        if line.trim_start().starts_with("```") {
+            *idx += 1;
+            break;
+        }
+        block.push(line);
+        *idx += 1;
+    }
+    Some(block.join("\n"))
 }
 
 fn handle_note_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifiers: KeyModifiers) {
@@ -1873,5 +2007,57 @@ fn select_model_item(app: &mut App, screen: &mut Screen) {
             }
             screen.emit(&lines);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_restored_session_content;
+
+    #[test]
+    fn restored_session_renders_task_and_final_blocks() {
+        let content = "\
+# Session 2026-04-01  11:15:14
+
+## 11:15:14
+- **Task**
+
+```text
+你好
+```
+- **Final**
+
+```text
+你好！我是 GoldBot。
+```";
+
+        let rendered = parse_restored_session_content(content).join("\n");
+        assert!(rendered.contains("11:15:14"));
+        assert!(rendered.contains("你好"));
+        assert!(rendered.contains("GoldBot"));
+    }
+
+    #[test]
+    fn restored_session_renders_diff_blocks() {
+        let content = "\
+# Session 2026-04-01  11:20:09
+
+## 11:20:09 [diff]
+- **Command**: `src/ui/screen.rs`
+
+- **File**: src/ui/screen.rs
+
+```diff
+@@ -1 +1 @@
+-old
++new
+```";
+
+        let rendered = parse_restored_session_content(content).join("\n");
+        assert!(rendered.contains("11:20:09 [diff]"));
+        assert!(rendered.contains("Diff(src/ui/screen.rs)"));
+        assert!(rendered.contains("Diff src/ui/screen.rs:"));
+        assert!(rendered.contains("-old"));
+        assert!(rendered.contains("+new"));
     }
 }
