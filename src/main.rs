@@ -1,4 +1,5 @@
 mod agent;
+mod cli;
 mod consensus;
 mod memory;
 mod tools;
@@ -9,7 +10,7 @@ use std::{
     io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::AtomicBool,
     },
     time::Duration,
 };
@@ -17,15 +18,20 @@ use std::{
 use agent::{
     dag::DagResult,
     executor::{
-        ShellExecResult, handle_llm_stream_delta, handle_llm_thinking_delta,
-        handle_shell_exec_result, maybe_flush_and_compact_before_call, perform_manual_compact,
-        process_llm_result, refresh_llm_status, start_task, sync_context_budget,
+        LlmWorkerEvent, ShellExecResult,
+        handle_llm_stream_delta, handle_llm_thinking_delta,
+        interrupt_active_llm_loop,
+        maybe_spawn_llm_worker, perform_manual_compact,
+        poll_dag_result, poll_shell_exec_result,
+        process_llm_result, refresh_llm_status,
+        should_run_pending_manual_compact, shutdown_background_work,
+        start_task, sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_system_prompt, build_workspace_context},
 };
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyEventKind},
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -37,13 +43,11 @@ use tools::command::{Command as UserCommand, discover_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::{AssistMode, Event, InputQueue, Mode};
 use ui::ge::drain_ge_events;
-use ui::input::{handle_key, handle_paste};
+use ui::input::handle_terminal_events;
 use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
 
 pub(crate) const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
 pub(crate) const MAX_COMPACTION_SUMMARY_ITEMS: usize = 8;
-const LLM_MAX_RETRIES: usize = 3;
-const LLM_RETRY_BASE_DELAY_MS: u64 = 500;
 
 // ── App ───────────────────────────────────────────────────────────────────────
 pub(crate) struct App {
@@ -339,12 +343,6 @@ impl App {
     }
 }
 
-pub(crate) enum LlmWorkerEvent {
-    Delta(String),
-    ThinkingDelta(String),
-    Done(anyhow::Result<(String, crate::agent::provider::Usage)>),
-}
-
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -363,11 +361,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let (cli_prompt, cli_yes) = parse_cli_args();
+    let (cli_prompt, cli_yes) = cli::parse_cli_args();
     let headless = cli_prompt.is_some();
 
     // Create ~/.goldbot/.env from template if it doesn't exist yet.
-    ensure_dot_env();
+    cli::ensure_dot_env();
     let http_client = build_http_client()?;
     let mut app = App::new();
     app.http_client = Some(http_client.clone());
@@ -534,67 +532,10 @@ async fn run_loop(
             screen.refresh();
         }
 
-        if app.running
-            && app.pending_confirm.is_none()
-            && app.needs_agent_executor
-            && !app.llm_calling
-            && !app.shell_task_running
+        if let Some(handle) =
+            maybe_spawn_llm_worker(app, screen, &tx, &http_client).await
         {
-            //在compact之前写入长期记忆把
-            maybe_flush_and_compact_before_call(app, screen).await;
-            app.needs_agent_executor = false;
-            app.llm_calling = true;
-            app.llm_call_started_at = Some(std::time::Instant::now());
-            app.llm_stream_preview.clear();
-            app.llm_preview_shown.clear();
-            refresh_llm_status(app, screen);
-
-            let tx_done = tx.clone();
-            let tx_delta = tx.clone();
-            let client = http_client.clone();
-            let messages = app.messages.clone();
-            let show_thinking = app.show_thinking;
-            let backend = app.backend.clone();
-            llm_task_handle = Some(tokio::spawn(async move {
-                let mut retry_index = 0usize;
-                let result = loop {
-                    let streamed_any = Arc::new(AtomicBool::new(false));
-                    let delta_streamed_any = streamed_any.clone();
-                    let thinking_streamed_any = streamed_any.clone();
-                    let result = backend
-                        .chat_stream_with(
-                            &client,
-                            &messages,
-                            show_thinking,
-                            |piece| {
-                                delta_streamed_any.store(true, Ordering::Relaxed);
-                                let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
-                            },
-                            |chunk| {
-                                thinking_streamed_any.store(true, Ordering::Relaxed);
-                                let _ = tx_delta
-                                    .try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
-                            },
-                        )
-                        .await;
-
-                    match result {
-                        Ok(response) => break Ok(response),
-                        Err(err)
-                            if retry_index < LLM_MAX_RETRIES
-                                && should_retry_llm_error(
-                                    &err.to_string(),
-                                    streamed_any.load(Ordering::Relaxed),
-                                ) =>
-                        {
-                            retry_index += 1;
-                            tokio::time::sleep(retry_delay_for_attempt(retry_index)).await;
-                        }
-                        Err(err) => break Err(err),
-                    }
-                };
-                let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
-            }));
+            llm_task_handle = Some(handle);
         }
 
         // 同步运行状态，每 400ms 推进一次 spinner 帧，避免频繁刷屏闪烁
@@ -623,142 +564,11 @@ async fn run_loop(
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-fn poll_dag_result(app: &mut App, screen: &mut Screen) {
-    // 轮询节点进度，更新 managed area 中的 DAG 树形显示
-    let mut tree_needs_refresh = false;
-    if let Some(rx) = app.dag_progress_rx.as_mut() {
-        while let Ok(progress) = rx.try_recv() {
-            app.dag_node_done.insert(
-                progress.node_id.clone(),
-                (progress.success, progress.elapsed.as_secs_f64()),
-            );
-            tree_needs_refresh = true;
-        }
-    }
-    if tree_needs_refresh {
-        let new_tree = agent::dag::build_dag_tree(
-            &app.dag_graph_nodes,
-            &app.dag_output_nodes,
-            &app.dag_node_done,
-        );
-        screen.dag_tree = Some(new_tree);
-        screen.refresh();
-    }
-
-    let Some(rx) = app.dag_result_rx.as_mut() else {
-        return;
-    };
-    match rx.try_recv() {
-        Ok(result) => {
-            app.dag_result_rx = None;
-            app.dag_task_running = false;
-            app.dag_cancel_flag
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            // 清掉 managed area 中的 live 树形
-            screen.dag_tree = None;
-            match result {
-                Ok(dag_result) => {
-                    let status = if dag_result.has_failures {
-                        "completed with failures"
-                    } else {
-                        "completed"
-                    };
-                    // 把最终带完成标记的树形输出为 task event（滚回记录）
-                    let final_tree = agent::dag::build_dag_tree(
-                        &app.dag_graph_nodes,
-                        &app.dag_output_nodes,
-                        &app.dag_node_done,
-                    );
-                    let tree_ev = crate::types::Event::ToolCall {
-                        label: format!(
-                            "SubAgent DAG {} ({:.1}s)",
-                            status,
-                            dag_result.elapsed.as_secs_f64()
-                        ),
-                        command: final_tree,
-                        multiline: true,
-                    };
-                    crate::ui::format::emit_live_event(screen, &tree_ev);
-                    app.task_events.push(tree_ev);
-                    app.messages.push(Message::user(format!(
-                        "[SubAgent DAG result]:\n{}",
-                        dag_result.output
-                    )));
-                }
-                Err(e) => {
-                    app.messages
-                        .push(Message::user(format!("[SubAgent DAG failed: {e}]")));
-                }
-            }
-            app.needs_agent_executor = true;
-        }
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-            app.dag_result_rx = None;
-            app.dag_task_running = false;
-            app.messages.push(Message::user(
-                "[SubAgent DAG: worker disconnected]".to_string(),
-            ));
-            app.needs_agent_executor = true;
-        }
-    }
-}
-
-fn parse_retryable_http_status(message: &str) -> Option<u16> {
-    let marker = "API error ";
-    let start = message.find(marker)? + marker.len();
-    let digits: String = message[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.len() != 3 {
-        return None;
-    }
-    digits.parse().ok()
-}
-
-fn should_retry_llm_error(message: &str, streamed_any: bool) -> bool {
-    if streamed_any {
-        return false;
-    }
-
-    if matches!(parse_retryable_http_status(message), Some(status) if (500..600).contains(&status))
-    {
-        return true;
-    }
-
-    [
-        "HTTP request failed",
-        "failed reading stream chunk",
-        "error sending request for url",
-        "connection error",
-        "connection reset",
-        "connection closed",
-        "timed out",
-        "dns error",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
-fn retry_delay_for_attempt(retry_attempt: usize) -> Duration {
-    let shift = retry_attempt.saturating_sub(1).min(3) as u32;
-    Duration::from_millis(LLM_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << shift))
-}
-
-fn should_run_pending_manual_compact(app: &App) -> bool {
-    app.pending_manual_compact
-        && app.pending_confirm.is_none()
-        && !app.llm_calling
-        && !app.shell_task_running
-        && !app.dag_task_running
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_retryable_http_status, retry_delay_for_attempt, should_retry_llm_error,
-        should_run_pending_manual_compact,
+    use crate::agent::executor::{
+        parse_retryable_http_status, retry_delay_for_attempt,
+        should_retry_llm_error, should_run_pending_manual_compact,
     };
     use crate::App;
     use std::time::Duration;
@@ -834,143 +644,3 @@ mod tests {
     }
 }
 
-fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
-    let Some(rx) = app.shell_exec_rx.as_mut() else {
-        return;
-    };
-
-    match rx.try_recv() {
-        Ok(result) => {
-            app.shell_exec_rx = None;
-            app.shell_task_running = false;
-            crate::tools::shell::clear_running_shell_cancel_request();
-            handle_shell_exec_result(app, screen, result);
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            app.shell_exec_rx = None;
-            app.shell_task_running = false;
-            crate::tools::shell::clear_running_shell_cancel_request();
-            handle_shell_exec_result(
-                app,
-                screen,
-                ShellExecResult::Command {
-                    result: Err("shell worker disconnected unexpectedly".to_string()),
-                },
-            );
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-    }
-}
-
-async fn handle_terminal_events(app: &mut App, screen: &mut Screen) -> anyhow::Result<()> {
-    if !event::poll(Duration::from_millis(50))? {
-        return Ok(());
-    }
-
-    let mut events = vec![event::read()?];
-    while event::poll(Duration::ZERO)? {
-        events.push(event::read()?);
-    }
-
-    for ev in events {
-        match ev {
-            CEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                if handle_key(app, screen, k.code, k.modifiers) {
-                    app.quit = true;
-                    break;
-                }
-            }
-            CEvent::Paste(text) => handle_paste(app, screen, &text),
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-async fn shutdown_background_work(
-    app: &mut App,
-    screen: &mut Screen,
-    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    if app.shell_task_running {
-        crate::tools::shell::request_cancel_running_shell_commands();
-        let deadline = std::time::Instant::now() + Duration::from_millis(300);
-        while app.shell_task_running && std::time::Instant::now() < deadline {
-            poll_shell_exec_result(app, screen);
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    if let Some(handle) = llm_task_handle.take() {
-        handle.abort();
-    }
-}
-
-fn interrupt_active_llm_loop(
-    app: &mut App,
-    screen: &mut Screen,
-    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    if app.shell_task_running {
-        crate::tools::shell::request_cancel_running_shell_commands();
-    }
-    if app.dag_task_running {
-        app.dag_cancel_flag
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        app.dag_task_running = false;
-        app.dag_result_rx = None;
-        app.dag_progress_rx = None;
-        app.dag_tree_event_idx = None;
-        app.dag_node_done.clear();
-        app.dag_graph_nodes.clear();
-        app.dag_output_nodes.clear();
-        screen.dag_tree = None;
-    }
-    app.interrupt_llm_loop_requested = false;
-    app.running = false;
-    app.needs_agent_executor = false;
-    app.llm_calling = false;
-    app.llm_call_started_at = None;
-    app.llm_stream_preview.clear();
-    app.llm_preview_shown.clear();
-    screen.status.clear();
-    if let Some(handle) = llm_task_handle.take() {
-        handle.abort();
-    }
-    screen.refresh();
-}
-
-/// Parse CLI arguments, returning (prompt, auto_accept).
-/// Supported flags:
-///   -p / --prompt <text>   Initial chat message to send on startup.
-///   -y / --yes             Auto-accept all Confirm-level commands (non-Block).
-fn parse_cli_args() -> (Option<String>, bool) {
-    let args: Vec<String> = std::env::args().collect();
-    let mut prompt = None;
-    let mut yes = false;
-    let mut i = 1;
-    while i < args.len() {
-        if (args[i] == "-p" || args[i] == "--prompt") && i + 1 < args.len() {
-            prompt = Some(args[i + 1].clone());
-            i += 2;
-        } else if args[i] == "-y" || args[i] == "--yes" {
-            yes = true;
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-    (prompt, yes)
-}
-
-/// If `~/.goldbot/.env` doesn't exist, create it from the bundled template.
-fn ensure_dot_env() {
-    let home = crate::tools::mcp::goldbot_home_dir();
-    let env_path = home.join(".env");
-    if env_path.exists() {
-        return;
-    }
-    let _ = std::fs::create_dir_all(&home);
-    let _ = std::fs::write(&env_path, include_str!("../.env.example"));
-}

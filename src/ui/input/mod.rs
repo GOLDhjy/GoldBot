@@ -1,4 +1,5 @@
-use crossterm::{event::KeyCode, event::KeyModifiers, style::Stylize};
+use crossterm::{event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers}, style::Stylize};
+use std::time::Duration;
 
 use crate::App;
 use crate::types::Mode;
@@ -144,4 +145,30 @@ pub(super) fn insert_char_with_trigger(app: &mut App, screen: &mut Screen, c: ch
     } else if c == '/' && screen.input == "/" {
         enter_command_mode(app, screen);
     }
+}
+
+pub(crate) async fn handle_terminal_events(app: &mut App, screen: &mut Screen) -> anyhow::Result<()> {
+    if !event::poll(Duration::from_millis(50))? {
+        return Ok(());
+    }
+
+    let mut events = vec![event::read()?];
+    while event::poll(Duration::ZERO)? {
+        events.push(event::read()?);
+    }
+
+    for ev in events {
+        match ev {
+            CEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                if handle_key(app, screen, k.code, k.modifiers) {
+                    app.quit = true;
+                    break;
+                }
+            }
+            CEvent::Paste(text) => handle_paste(app, screen, &text),
+            _ => {}
+        }
+    }
+
+    Ok(())
 }

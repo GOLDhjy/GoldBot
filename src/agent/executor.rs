@@ -1,15 +1,20 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use crossterm::style::Stylize;
 use serde_json::Value;
 
-use crate::agent::dag::{DagConfig, execute as execute_dag};
+use crate::agent::dag::{DagConfig, build_dag_tree, execute as execute_dag};
 use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::Session;
 use crate::memory::project::ProjectStore;
 use crate::tools::safety::{RiskLevel, assess_command};
+use crate::tools::shell::{clear_running_shell_cancel_request, request_cancel_running_shell_commands};
 use crate::tools::skills::skill_tool_result;
 use crate::types::{AssistMode, Event, LlmAction, Mode};
 use crate::ui::format::{
@@ -22,6 +27,9 @@ const MIN_RECENT_MESSAGES_AFTER_COMPACTION: usize = 6;
 const MIN_COMPACT_RESERVE_TOKENS: u32 = 8_192;
 const MAX_COMPACT_RESERVE_TOKENS: u32 = 32_768;
 const COMPLETION_RESERVE_MULTIPLIER: u32 = 3;
+
+pub(crate) const LLM_MAX_RETRIES: usize = 3;
+const LLM_RETRY_BASE_DELAY_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy)]
 struct ContextBudget {
@@ -1732,6 +1740,128 @@ async fn llm_summarize_for_compaction(
     }
 }
 
+// ── LLM 重试策略 ──────────────────────────────────────────────────────────────
+
+pub(crate) fn parse_retryable_http_status(message: &str) -> Option<u16> {
+    let marker = "API error ";
+    let start = message.find(marker)? + marker.len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+pub(crate) fn should_retry_llm_error(message: &str, streamed_any: bool) -> bool {
+    if streamed_any {
+        return false;
+    }
+    if matches!(parse_retryable_http_status(message), Some(status) if (500..600).contains(&status))
+    {
+        return true;
+    }
+    [
+        "HTTP request failed",
+        "failed reading stream chunk",
+        "error sending request for url",
+        "connection error",
+        "connection reset",
+        "connection closed",
+        "timed out",
+        "dns error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+// ── LLM Worker ────────────────────────────────────────────────────────────────
+
+pub(crate) enum LlmWorkerEvent {
+    Delta(String),
+    ThinkingDelta(String),
+    Done(anyhow::Result<(String, crate::agent::provider::Usage)>),
+}
+
+pub(crate) async fn maybe_spawn_llm_worker(
+    app: &mut crate::App,
+    screen: &mut Screen,
+    tx: &tokio::sync::mpsc::Sender<LlmWorkerEvent>,
+    http_client: &reqwest::Client,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !(app.running
+        && app.pending_confirm.is_none()
+        && app.needs_agent_executor
+        && !app.llm_calling
+        && !app.shell_task_running)
+    {
+        return None;
+    }
+
+    // 在 compact 之前写入长期记忆
+    maybe_flush_and_compact_before_call(app, screen).await;
+    app.needs_agent_executor = false;
+    app.llm_calling = true;
+    app.llm_call_started_at = Some(std::time::Instant::now());
+    app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
+    refresh_llm_status(app, screen);
+
+    let tx_done = tx.clone();
+    let tx_delta = tx.clone();
+    let client = http_client.clone();
+    let messages = app.messages.clone();
+    let show_thinking = app.show_thinking;
+    let backend = app.backend.clone();
+
+    Some(tokio::spawn(async move {
+        let mut retry_index = 0usize;
+        let result = loop {
+            let streamed_any = Arc::new(AtomicBool::new(false));
+            let delta_streamed_any = streamed_any.clone();
+            let thinking_streamed_any = streamed_any.clone();
+            let result = backend
+                .chat_stream_with(
+                    &client,
+                    &messages,
+                    show_thinking,
+                    |piece| {
+                        delta_streamed_any.store(true, Ordering::Relaxed);
+                        let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
+                    },
+                    |chunk| {
+                        thinking_streamed_any.store(true, Ordering::Relaxed);
+                        let _ = tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
+                    },
+                )
+                .await;
+
+            match result {
+                Ok(response) => break Ok(response),
+                Err(err)
+                    if retry_index < LLM_MAX_RETRIES
+                        && should_retry_llm_error(
+                            &err.to_string(),
+                            streamed_any.load(Ordering::Relaxed),
+                        ) =>
+                {
+                    retry_index += 1;
+                    tokio::time::sleep(retry_delay_for_attempt(retry_index)).await;
+                }
+                Err(err) => break Err(err),
+            }
+        };
+        let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
+    }))
+}
+
+pub(crate) fn retry_delay_for_attempt(retry_attempt: usize) -> Duration {
+    let shift = retry_attempt.saturating_sub(1).min(3) as u32;
+    Duration::from_millis(LLM_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << shift))
+}
+
 /// 本地降级摘要：提取 <final>、<phase>、user 任务等关键信息。
 fn summarize_for_compaction_fallback(messages: &[Message]) -> String {
     let mut items = Vec::new();
@@ -1788,6 +1918,176 @@ fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
 // ── Todo progress tracking ────────────────────────────────────────────────────
 // All todo progress is driven by the LLM via <tool>todo</tool>.
 // GoldBot only renders what the LLM sends — no automatic advancement.
+
+// ── 轮询/生命周期辅助（从 main.rs 迁入）─────────────────────────────────────────
+
+pub(crate) fn poll_dag_result(app: &mut App, screen: &mut Screen) {
+    // 轮询节点进度，更新 managed area 中的 DAG 树形显示
+    let mut tree_needs_refresh = false;
+    if let Some(rx) = app.dag_progress_rx.as_mut() {
+        while let Ok(progress) = rx.try_recv() {
+            app.dag_node_done.insert(
+                progress.node_id.clone(),
+                (progress.success, progress.elapsed.as_secs_f64()),
+            );
+            tree_needs_refresh = true;
+        }
+    }
+    if tree_needs_refresh {
+        let new_tree = build_dag_tree(
+            &app.dag_graph_nodes,
+            &app.dag_output_nodes,
+            &app.dag_node_done,
+        );
+        screen.dag_tree = Some(new_tree);
+        screen.refresh();
+    }
+
+    let Some(rx) = app.dag_result_rx.as_mut() else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(result) => {
+            app.dag_result_rx = None;
+            app.dag_task_running = false;
+            app.dag_cancel_flag.store(false, Ordering::SeqCst);
+            // 清掉 managed area 中的 live 树形
+            screen.dag_tree = None;
+            match result {
+                Ok(dag_result) => {
+                    let status = if dag_result.has_failures {
+                        "completed with failures"
+                    } else {
+                        "completed"
+                    };
+                    // 把最终带完成标记的树形输出为 task event（滚回记录）
+                    let final_tree = build_dag_tree(
+                        &app.dag_graph_nodes,
+                        &app.dag_output_nodes,
+                        &app.dag_node_done,
+                    );
+                    let tree_ev = Event::ToolCall {
+                        label: format!(
+                            "SubAgent DAG {} ({:.1}s)",
+                            status,
+                            dag_result.elapsed.as_secs_f64()
+                        ),
+                        command: final_tree,
+                        multiline: true,
+                    };
+                    emit_live_event(screen, &tree_ev);
+                    app.task_events.push(tree_ev);
+                    app.messages.push(Message::user(format!(
+                        "[SubAgent DAG result]:\n{}",
+                        dag_result.output
+                    )));
+                }
+                Err(e) => {
+                    app.messages
+                        .push(Message::user(format!("[SubAgent DAG failed: {e}]")));
+                }
+            }
+            app.needs_agent_executor = true;
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            app.dag_result_rx = None;
+            app.dag_task_running = false;
+            app.messages.push(Message::user(
+                "[SubAgent DAG: worker disconnected]".to_string(),
+            ));
+            app.needs_agent_executor = true;
+        }
+    }
+}
+
+pub(crate) fn should_run_pending_manual_compact(app: &App) -> bool {
+    app.pending_manual_compact
+        && app.pending_confirm.is_none()
+        && !app.llm_calling
+        && !app.shell_task_running
+        && !app.dag_task_running
+}
+
+pub(crate) fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
+    let Some(rx) = app.shell_exec_rx.as_mut() else {
+        return;
+    };
+
+    match rx.try_recv() {
+        Ok(result) => {
+            app.shell_exec_rx = None;
+            app.shell_task_running = false;
+            clear_running_shell_cancel_request();
+            handle_shell_exec_result(app, screen, result);
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            app.shell_exec_rx = None;
+            app.shell_task_running = false;
+            clear_running_shell_cancel_request();
+            handle_shell_exec_result(
+                app,
+                screen,
+                ShellExecResult::Command {
+                    result: Err("shell worker disconnected unexpectedly".to_string()),
+                },
+            );
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+    }
+}
+
+pub(crate) fn interrupt_active_llm_loop(
+    app: &mut App,
+    screen: &mut Screen,
+    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    if app.shell_task_running {
+        request_cancel_running_shell_commands();
+    }
+    if app.dag_task_running {
+        app.dag_cancel_flag.store(true, Ordering::SeqCst);
+        app.dag_task_running = false;
+        app.dag_result_rx = None;
+        app.dag_progress_rx = None;
+        app.dag_tree_event_idx = None;
+        app.dag_node_done.clear();
+        app.dag_graph_nodes.clear();
+        app.dag_output_nodes.clear();
+        screen.dag_tree = None;
+    }
+    app.interrupt_llm_loop_requested = false;
+    app.running = false;
+    app.needs_agent_executor = false;
+    app.llm_calling = false;
+    app.llm_call_started_at = None;
+    app.llm_stream_preview.clear();
+    app.llm_preview_shown.clear();
+    screen.status.clear();
+    if let Some(handle) = llm_task_handle.take() {
+        handle.abort();
+    }
+    screen.refresh();
+}
+
+pub(crate) async fn shutdown_background_work(
+    app: &mut App,
+    screen: &mut Screen,
+    llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    if app.shell_task_running {
+        request_cancel_running_shell_commands();
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        while app.shell_task_running && std::time::Instant::now() < deadline {
+            poll_shell_exec_result(app, screen);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    if let Some(handle) = llm_task_handle.take() {
+        handle.abort();
+    }
+}
 
 #[cfg(test)]
 mod tests {
