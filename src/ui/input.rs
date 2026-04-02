@@ -6,7 +6,7 @@ use crate::agent::executor::{
 use crate::agent::provider::BACKEND_PRESETS;
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
-use crate::memory::SessionStore;
+use crate::memory::Session;
 use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};
@@ -158,7 +158,7 @@ fn handle_confirm_mode(app: &mut App, screen: &mut Screen, key: KeyCode, modifie
                 screen.input_focused = true;
 
                 if let Some(id) = sessions.get(sel) {
-                    let store = SessionStore::current();
+                    let store = Session::current();
                     if let Err(e) = store.restore(app, screen, id) {
                         screen.emit(&[format!("  ✗ 无法读取会话：{e}")]);
                     }
@@ -1457,7 +1457,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
         }
 
         BuiltinCommand::Clear => {
-            let clear_session_error = SessionStore::current().clear_current_session().err();
+            let clear_session_error = Session::current().clear_current_session().err();
             // 保留 messages[0]（system），清空其余
             app.messages.truncate(1);
             app.task_events.clear();
@@ -1515,7 +1515,7 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
         }
 
         BuiltinCommand::Session => {
-            let store = SessionStore::current();
+            let store = Session::current();
             let sessions = store.list_sessions();
             if sessions.is_empty() {
                 screen.emit(&["  （暂无历史会话）".to_string()]);
@@ -1524,8 +1524,8 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
                 let labels: Vec<String> = sessions
                     .iter()
                     .map(|id| {
-                        let ts = SessionStore::format_session_timestamp(id);
-                        let active_session_id = SessionStore::active_id();
+                        let ts = Session::format_session_timestamp(id);
+                        let active_session_id = Session::active_id();
                         let marker = if id == &active_session_id {
                             "  ← 当前"
                         } else {

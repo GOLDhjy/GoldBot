@@ -85,7 +85,11 @@ impl BuiltinRole {
 /// ---
 /// [base_prompt：默认执行提示词，始终保留]
 /// ```
-pub fn build_sub_agent_prompt(custom_prompt: Option<&str>,role: Option<&BuiltinRole>,base_prompt: &str,) -> String {
+pub fn build_sub_agent_prompt(
+    custom_prompt: Option<&str>,
+    role: Option<&BuiltinRole>,
+    base_prompt: &str,
+) -> String {
     if let Some(custom_prompt) = custom_prompt {
         return format!(
             "{custom_prompt}\n\n---\n\n{SUB_AGENT_SHARED_PROMPT}\n\n---\n\n{base_prompt}"

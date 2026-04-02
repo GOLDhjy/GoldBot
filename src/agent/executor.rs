@@ -7,7 +7,7 @@ use crate::agent::dag::{DagConfig, execute as execute_dag};
 use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
-use crate::memory::SessionStore;
+use crate::memory::Session;
 use crate::memory::project::ProjectStore;
 use crate::tools::safety::{RiskLevel, assess_command};
 use crate::tools::skills::skill_tool_result;
@@ -807,7 +807,7 @@ pub(crate) fn execute_update_file(
                 &new_content_for_diff,
                 ctx_start,
             );
-            let _ = SessionStore::current()
+            let _ = Session::current()
                 .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
@@ -875,7 +875,7 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
     match result {
         Ok((old_content, new_content)) => {
             let diff_text = crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
-            let _ = SessionStore::current()
+            let _ = Session::current()
                 .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
             push_tool_result_to_llm(app, "Tool result:", &llm_msg);
@@ -1240,7 +1240,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     let session_task = session_task_for_round(&app.task, &app.task_events).to_string();
 
     if !app.message_queue.is_empty() {
-        let _ = SessionStore::current().append_to_session(&session_task, &summary);
+        let _ = Session::current().append_to_session(&session_task, &summary);
         let ev = Event::Final {
             summary: summary.clone(),
         };
@@ -1258,7 +1258,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     screen.collapse_to(&collapsed_lines(app));
 
-    let _ = SessionStore::current().append_to_session(&session_task, &summary);
+    let _ = Session::current().append_to_session(&session_task, &summary);
 
     let total_elapsed = app.task_started_at.map(|t| t.elapsed());
     app.last_task_elapsed = total_elapsed;
@@ -1647,7 +1647,7 @@ async fn do_compact(app: &mut App, screen: &mut Screen) -> Option<(String, usize
     app.task_events.push(ev);
 
     if let Err(e) =
-        SessionStore::current().rewrite_session_after_compaction(&summary, messages_dropped)
+        Session::current().rewrite_session_after_compaction(&summary, messages_dropped)
     {
         eprintln!("[compaction] 会话文件覆写失败: {e}");
     }

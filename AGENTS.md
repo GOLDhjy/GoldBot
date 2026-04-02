@@ -111,8 +111,9 @@ const DEFAULT_CMD_TIMEOUT_SECS: u64 = 120;
 
 ## 代码排版规则
 
-- 不要把函数竖着写，比如
+- 不要把函数竖着写，比如。除非名字特别长
   pub fn build_sub_agent_prompt(
     custom_prompt: Option<&str>,
     role: Option<&BuiltinRole>,
-    base_prompt: &str,
+    base_prompt: &str,)
+- 注释要写中文

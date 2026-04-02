@@ -4,9 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const BUILTIN_EXAMPLE_COMMAND_NAME: &str = "commit";
-const BUILTIN_EXAMPLE_COMMAND_MD: &str = include_str!("../../builtin-commands/commit.md");
-
 // ── 数据类型 ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -70,25 +67,6 @@ const BUILTIN_COMMANDS: &[(BuiltinCommand, &str, &str)] = &[
 /// GoldBot 用户命令目录：`~/.goldbot/commands/`
 pub fn goldbot_command_dir() -> PathBuf {
     crate::tools::mcp::goldbot_home_dir().join("commands")
-}
-
-/// 将内置示例命令安装到 `~/.goldbot/commands/commit.md`，已存在则跳过。
-pub fn ensure_builtin_commands() -> Vec<String> {
-    let mut warnings = Vec::new();
-    let dir = goldbot_command_dir();
-    let path = dir.join(format!("{}.md", BUILTIN_EXAMPLE_COMMAND_NAME));
-    if path.exists() {
-        return warnings;
-    }
-    if let Err(e) =
-        fs::create_dir_all(&dir).and_then(|_| fs::write(&path, BUILTIN_EXAMPLE_COMMAND_MD))
-    {
-        warnings.push(format!(
-            "failed to install built-in command `{}`: {e}",
-            BUILTIN_EXAMPLE_COMMAND_NAME
-        ));
-    }
-    warnings
 }
 
 /// 扫描用户命令目录，返回所有有效的用户自定义命令。

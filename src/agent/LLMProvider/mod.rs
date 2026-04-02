@@ -296,11 +296,6 @@ impl LlmBackend {
             Self::MiniMax(_) => "MINIMAX_API_KEY",
         }
     }
-
-    /// 检查所需 API Key 是否缺失。
-    pub(crate) fn api_key_missing(&self) -> bool {
-        std::env::var(self.required_key_name()).is_err()
-    }
 }
 
 fn env_u32(name: &str) -> Option<u32> {

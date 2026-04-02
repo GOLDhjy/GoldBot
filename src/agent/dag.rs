@@ -62,7 +62,6 @@ impl DagConfig {
 /// Result of DAG execution
 pub struct DagResult {
     pub output: String,
-    pub node_results: HashMap<NodeId, SubAgentResult>,
     pub elapsed: Duration,
     pub has_failures: bool,
 }
@@ -709,7 +708,6 @@ pub async fn execute(graph: TaskGraph, config: DagConfig) -> Result<DagResult> {
 
     Ok(DagResult {
         output: merge_outputs(&outputs, graph.output_merge),
-        node_results: results_guard.clone(),
         elapsed: start_time.elapsed(),
         has_failures,
     })

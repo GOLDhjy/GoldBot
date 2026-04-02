@@ -49,22 +49,22 @@ fn switch_active_session(id: &str) {
     *session_id_cell().write().expect("session id lock poisoned") = id.to_string();
 }
 
-// ── SessionStore ──────────────────────────────────────────────────────────────
+// ── Session ─────────────────────────────────────────────────────────────────
 
 /// Manages session file storage for a project.
 ///
 /// Sessions are stored in `<base>/sessions/<id>.md`.
-pub struct SessionStore {
+pub struct Session {
     base: PathBuf,
 }
 
-impl SessionStore {
-    /// Create a SessionStore for the current workspace.
+impl Session {
+    /// Create a Session for the current workspace.
     pub fn current() -> Self {
         Self::new(current_project_base())
     }
 
-    /// Create a SessionStore for the given project base directory.
+    /// Create a Session for the given project base directory.
     pub fn new(base: PathBuf) -> Self {
         Self { base }
     }
@@ -375,8 +375,8 @@ fn ensure_session_header(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     if !path.exists() {
-        let active_session_id = SessionStore::active_id();
-        let ts = SessionStore::format_session_timestamp(&active_session_id);
+        let active_session_id = Session::active_id();
+        let ts = Session::format_session_timestamp(&active_session_id);
         fs::write(path, format!("# Session {ts}\n"))?;
     }
     Ok(())
@@ -522,7 +522,7 @@ mod tests {
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     static SESSION_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn temp_store() -> (SessionStore, PathBuf) {
+    fn temp_store() -> (Session, PathBuf) {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -530,7 +530,7 @@ mod tests {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("goldbot-session-test-{nanos}-{id}"));
         fs::create_dir_all(&base).unwrap();
-        (SessionStore::new(base.clone()), base)
+        (Session::new(base.clone()), base)
     }
 
     #[test]
@@ -547,13 +547,13 @@ mod tests {
 
     #[test]
     fn format_session_timestamp_parses_correctly() {
-        let ts = SessionStore::format_session_timestamp("20260331-142530");
+        let ts = Session::format_session_timestamp("20260331-142530");
         assert_eq!(ts, "2026-03-31  14:25:30");
     }
 
     #[test]
     fn format_session_timestamp_falls_back_for_bad_input() {
-        let ts = SessionStore::format_session_timestamp("bad");
+        let ts = Session::format_session_timestamp("bad");
         assert_eq!(ts, "bad");
     }
 
@@ -563,10 +563,10 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
-        let old_active = SessionStore::active_id();
+        let old_active = Session::active_id();
         let (store, base) = temp_store();
         let old_id = "20260402-101010";
-        SessionStore::switch_active(old_id);
+        Session::switch_active(old_id);
 
         let old_path = base.join("sessions").join(format!("{old_id}.md"));
         ensure_session_header(&old_path).unwrap();
@@ -577,7 +577,7 @@ mod tests {
 
         assert_ne!(new_id, old_id);
         assert!(!old_path.exists());
-        assert_eq!(SessionStore::active_id(), new_id);
+        assert_eq!(Session::active_id(), new_id);
         assert!(new_path.exists());
         assert!(
             fs::read_to_string(&new_path)
@@ -585,7 +585,7 @@ mod tests {
                 .starts_with("# Session ")
         );
 
-        SessionStore::switch_active(&old_active);
+        Session::switch_active(&old_active);
         let _ = fs::remove_dir_all(base);
     }
 
@@ -606,7 +606,7 @@ mod tests {
 你好！我是 GoldBot。
 ```";
 
-        let rendered = SessionStore::parse_restored_session_content(content).join("\n");
+        let rendered = Session::parse_restored_session_content(content).join("\n");
         assert!(rendered.contains("11:15:14"));
         assert!(rendered.contains("你好"));
         assert!(rendered.contains("GoldBot"));
@@ -628,7 +628,7 @@ mod tests {
 +new
 ```";
 
-        let rendered = SessionStore::parse_restored_session_content(content).join("\n");
+        let rendered = Session::parse_restored_session_content(content).join("\n");
         assert!(rendered.contains("11:20:09 [diff]"));
         assert!(rendered.contains("Diff(src/ui/screen.rs)"));
         assert!(rendered.contains("Diff src/ui/screen.rs:"));

@@ -23,7 +23,6 @@ use agent::{
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_system_prompt, build_workspace_context},
-    sub_agent::{SubAgentHandle, SubAgentIdGen},
 };
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyEventKind},
@@ -31,7 +30,7 @@ use crossterm::{
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use memory::SessionStore;
+use memory::Session;
 use memory::project::init_workspace;
 use tokio::sync::mpsc;
 use tools::command::{Command as UserCommand, discover_commands};
@@ -136,11 +135,6 @@ pub(crate) struct App {
     /// Session IDs shown in the /Session picker (None = picker not active).
     pub pending_session_list: Option<Vec<String>>,
 
-    // ── Sub-Agent ────────────────────────────────────────────────────────────
-    /// SubAgent ID 生成器
-    pub sub_agent_id_gen: SubAgentIdGen,
-    /// 当前活跃的 SubAgent 句柄
-    pub sub_agent_handles: Vec<SubAgentHandle>,
     pub total_usage: crate::agent::provider::Usage,
     pub prompt_token_scale: f32,
     pub recent_completion_tokens_ema: u32,
@@ -241,7 +235,7 @@ impl App {
 
         // Initialise process-level workspace state before any stores are used.
         init_workspace(workspace.clone());
-        SessionStore::current().cleanup_old_sessions();
+        Session::current().cleanup_old_sessions();
 
         // messages[0] = system prompt + workspace context（含 AGENTS.md、assist mode 等）。
         // 记忆在每次 start_task 时按任务过滤后拼入 user 消息。
@@ -307,8 +301,6 @@ impl App {
             cmd_picker: CmdPickerState::default(),
             model_picker: ModelPickerState::default(),
             pending_session_list: None,
-            sub_agent_id_gen: SubAgentIdGen::new(),
-            sub_agent_handles: Vec::new(),
             total_usage: Default::default(),
             prompt_token_scale: 1.0,
             recent_completion_tokens_ema: 0,
