@@ -1646,8 +1646,7 @@ async fn do_compact(app: &mut App, screen: &mut Screen) -> Option<(String, usize
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
 
-    if let Err(e) =
-        Session::current().rewrite_session_after_compaction(&summary, messages_dropped)
+    if let Err(e) = Session::current().rewrite_session_after_compaction(&summary, messages_dropped)
     {
         eprintln!("[compaction] 会话文件覆写失败: {e}");
     }
