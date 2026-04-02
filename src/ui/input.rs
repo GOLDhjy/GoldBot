@@ -6,7 +6,7 @@ use crate::agent::executor::{
 use crate::agent::provider::BACKEND_PRESETS;
 use crate::agent::provider::Message;
 use crate::agent::react::build_interjection_user_message;
-use crate::session::SessionStore;
+use crate::memory::SessionStore;
 use crate::tools::command::{BuiltinCommand, CommandAction, all_commands, filter_commands};
 use crate::types::{Event, Mode};
 use crate::ui::format::{emit_live_event, toggle_collapse};

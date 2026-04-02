@@ -2,6 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::PathBuf,
+    sync::mpsc,
+    thread,
     time::Duration,
 };
 
@@ -465,21 +467,41 @@ impl McpRegistry {
     }
 
     fn discover_tools(&mut self, timeout: Duration) -> Vec<String> {
-        let mut warnings = Vec::new();
-        let mut used_names = BTreeSet::new();
         let server_entries: Vec<(String, ServerSpec)> = self
             .servers
             .iter()
             .map(|(name, spec)| (name.clone(), spec.clone()))
             .collect();
 
-        for (server_name, server) in &server_entries {
-            match list_tools_for_server(server, timeout) {
-                Ok(tools) => self.register_discovered_tools(server_name, tools, &mut used_names),
-                Err(e) => self.record_discovery_failure(server_name, e, &mut warnings),
-            }
+        if server_entries.is_empty() {
+            return Vec::new();
         }
 
+        // Launch all server discoveries in parallel so N remote servers each
+        // costing `timeout` ms don't block each other serially.
+        let (tx, rx) = mpsc::channel::<(String, anyhow::Result<Vec<DiscoveredTool>>)>();
+        for (server_name, server) in server_entries {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let result = list_tools_for_server(&server, timeout);
+                let _ = tx.send((server_name, result));
+            });
+        }
+        drop(tx); // close channel once all senders are spawned
+
+        // Collect and sort for deterministic system-prompt ordering.
+        let mut all_results: Vec<(String, anyhow::Result<Vec<DiscoveredTool>>)> =
+            rx.iter().collect();
+        all_results.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut warnings = Vec::new();
+        let mut used_names = BTreeSet::new();
+        for (server_name, result) in all_results {
+            match result {
+                Ok(tools) => self.register_discovered_tools(&server_name, tools, &mut used_names),
+                Err(e) => self.record_discovery_failure(&server_name, e, &mut warnings),
+            }
+        }
         warnings
     }
 }

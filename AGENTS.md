@@ -108,3 +108,11 @@ const DEFAULT_CMD_TIMEOUT_SECS: u64 = 120;
 - 验证结果，例如 `cargo test`、`cargo clippy`。
 - 涉及 TUI 渲染变更时的终端截图或 GIF。
 - 关联的问题或任务，以及必要的环境/配置更新说明，例如 `GOLDBOT_USE_CODEX`、`API_TIMEOUT_MS`。
+
+## 代码排版规则
+
+- 不要把函数竖着写，比如
+  pub fn build_sub_agent_prompt(
+    custom_prompt: Option<&str>,
+    role: Option<&BuiltinRole>,
+    base_prompt: &str,

@@ -142,3 +142,11 @@ Trigger with `GE` prefix in input.
 | `API_TIMEOUT_MS` | No | — | Request timeout |
 
 Config stored at `~/.goldbot/.env` (auto-created from template on first run).
+
+## 代码排版规则
+
+- 不要把函数竖着写，比如
+  pub fn build_sub_agent_prompt(
+    custom_prompt: Option<&str>,
+    role: Option<&BuiltinRole>,
+    base_prompt: &str,

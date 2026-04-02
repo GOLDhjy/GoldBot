@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{Message, Role, Usage};
+use crate::agent::provider::{LlmProvider, Message, Role, Usage};
 
 #[derive(Clone, Copy)]
-pub(crate) struct GlmProvider;
+pub(crate) struct MiniMaxProvider;
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
@@ -15,12 +15,6 @@ struct ApiMessage {
 }
 
 #[derive(Serialize)]
-struct ThinkingParam {
-    #[serde(rename = "type")]
-    kind: &'static str,
-}
-
-#[derive(Serialize)]
 struct ApiRequest {
     model: String,
     messages: Vec<ApiMessage>,
@@ -28,8 +22,11 @@ struct ApiRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// 设为 true 时，思考内容从 reasoning_details 字段单独输出
     #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingParam>,
+    reasoning_split: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +43,13 @@ struct ApiChoice {
 #[derive(Deserialize)]
 struct ApiChoiceMessage {
     content: Option<String>,
+    #[serde(default)]
+    reasoning_details: Vec<ReasoningDetail>,
+}
+
+#[derive(Deserialize)]
+struct ReasoningDetail {
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +57,19 @@ struct StreamEvent {
     #[serde(default)]
     choices: Vec<StreamChoice>,
     usage: Option<UsageParam>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+    /// MiniMax 思考内容（累积字符串，非增量）
+    #[serde(default)]
+    reasoning_details: Vec<ReasoningDetail>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -72,22 +89,10 @@ impl UsageParam {
     }
 }
 
-#[derive(Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-    /// GLM native thinking delta（增量字符串）
-    reasoning_content: Option<String>,
-}
-
 // ── Implementation ────────────────────────────────────────────────────────────
 
-impl GlmProvider {
-    pub(crate) async fn chat_stream_with<F, G>(
+impl LlmProvider for MiniMaxProvider {
+    async fn chat_stream_with<F, G>(
         &self,
         client: &reqwest::Client,
         messages: &[Message],
@@ -129,6 +134,8 @@ impl GlmProvider {
 
         let mut merged = String::new();
         let mut pending = String::new();
+        // reasoning_details 是累积字符串，记录已向上层发送的字节数，避免重复推送
+        let mut reasoning_seen = 0usize;
         let mut final_usage = Usage::default();
 
         while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
@@ -136,6 +143,7 @@ impl GlmProvider {
             drain_sse_frames(
                 &mut pending,
                 &mut merged,
+                &mut reasoning_seen,
                 &mut final_usage,
                 &mut on_delta,
                 &mut on_thinking_delta,
@@ -144,6 +152,7 @@ impl GlmProvider {
         drain_sse_frames(
             &mut pending,
             &mut merged,
+            &mut reasoning_seen,
             &mut final_usage,
             &mut on_delta,
             &mut on_thinking_delta,
@@ -162,10 +171,10 @@ fn build_request(
     stream: bool,
     show_thinking: bool,
 ) -> Result<(String, String, ApiRequest)> {
-    const BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+    const BASE_URL: &str = "https://api.minimaxi.com/v1";
 
-    let base_url = std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
-    let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
+    let base_url = std::env::var("MINIMAX_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
+    let api_key = std::env::var("MINIMAX_API_KEY").context("MINIMAX_API_KEY env var not set")?;
     let model = model.to_string();
 
     let api_messages: Vec<ApiMessage> = messages
@@ -185,9 +194,8 @@ fn build_request(
         messages: api_messages,
         max_tokens: None,
         stream: if stream { Some(true) } else { None },
-        thinking: Some(ThinkingParam {
-            kind: if show_thinking { "enabled" } else { "disabled" },
-        }),
+        reasoning_split: if show_thinking { Some(true) } else { None },
+        temperature: Some(1.0),
     };
 
     Ok((base_url, api_key, body))
@@ -200,22 +208,35 @@ async fn parse_non_stream_response(resp: reqwest::Response) -> Result<(String, U
         return Err(anyhow!("API error {status}: {text}"));
     }
     let parsed: ApiResponse = resp.json().await.context("failed to parse API response")?;
-    let text = parsed
+    let usage = parsed.usage.map(|u| u.to_usage()).unwrap_or_default();
+    let choice = parsed
         .choices
         .into_iter()
         .next()
-        .and_then(|c| c.message.content)
+        .ok_or_else(|| anyhow!("API returned no choices"))?;
+    let text = choice
+        .message
+        .content
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            choice
+                .message
+                .reasoning_details
+                .into_iter()
+                .next()
+                .map(|d| d.text)
+        })
         .unwrap_or_default();
     if text.is_empty() {
         return Err(anyhow!("API returned empty content"));
     }
-    let usage = parsed.usage.map(|u| u.to_usage()).unwrap_or_default();
     Ok((text, usage))
 }
 
 fn drain_sse_frames<F, G>(
     pending: &mut String,
     merged: &mut String,
+    reasoning_seen: &mut usize,
     final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
@@ -227,13 +248,27 @@ fn drain_sse_frames<F, G>(
         if let Some(pos) = pending.find("\n\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 2);
-            handle_sse_frame(&frame, merged, final_usage, on_delta, on_thinking_delta);
+            handle_sse_frame(
+                &frame,
+                merged,
+                reasoning_seen,
+                final_usage,
+                on_delta,
+                on_thinking_delta,
+            );
             continue;
         }
         if let Some(pos) = pending.find("\r\n\r\n") {
             let frame = pending[..pos].to_string();
             pending.drain(..pos + 4);
-            handle_sse_frame(&frame, merged, final_usage, on_delta, on_thinking_delta);
+            handle_sse_frame(
+                &frame,
+                merged,
+                reasoning_seen,
+                final_usage,
+                on_delta,
+                on_thinking_delta,
+            );
             continue;
         }
         break;
@@ -243,6 +278,7 @@ fn drain_sse_frames<F, G>(
 fn handle_sse_frame<F, G>(
     frame: &str,
     merged: &mut String,
+    reasoning_seen: &mut usize,
     final_usage: &mut Usage,
     on_delta: &mut F,
     on_thinking_delta: &mut G,
@@ -271,25 +307,15 @@ fn handle_sse_frame<F, G>(
             merged.push_str(&text);
             on_delta(&text);
         }
-        if let Some(thinking) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
-            on_thinking_delta(&thinking);
+        // reasoning_details 是累积字符串，只向上层推送新增部分
+        if let Some(detail) = choice.delta.reasoning_details.into_iter().next() {
+            let full = &detail.text;
+            if let Some(new_part) = full.get(*reasoning_seen..) {
+                if !new_part.is_empty() {
+                    on_thinking_delta(new_part);
+                }
+                *reasoning_seen = full.len();
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn thinking_param_enabled_serializes_correctly() {
-        let json = serde_json::to_string(&ThinkingParam { kind: "enabled" }).unwrap();
-        assert_eq!(json, r#"{"type":"enabled"}"#);
-    }
-
-    #[test]
-    fn thinking_param_disabled_serializes_correctly() {
-        let json = serde_json::to_string(&ThinkingParam { kind: "disabled" }).unwrap();
-        assert_eq!(json, r#"{"type":"disabled"}"#);
     }
 }

@@ -1,8 +1,10 @@
 use anyhow::Result;
 
-use crate::agent::provider_glm::GlmProvider;
-use crate::agent::provider_kimi::KimiProvider;
-use crate::agent::provider_minimax::MiniMaxProvider;
+mod glm;
+mod kimi;
+mod minimax;
+
+use self::{glm::GlmProvider, kimi::KimiProvider, minimax::MiniMaxProvider};
 
 // ── Conversation message types ────────────────────────────────────────────────
 
@@ -47,6 +49,22 @@ impl Message {
     }
 }
 
+#[allow(async_fn_in_trait)]
+pub(crate) trait LlmProvider {
+    async fn chat_stream_with<F, G>(
+        &self,
+        client: &reqwest::Client,
+        messages: &[Message],
+        model: &str,
+        show_thinking: bool,
+        on_delta: F,
+        on_thinking_delta: G,
+    ) -> Result<(String, Usage)>
+    where
+        F: FnMut(&str),
+        G: FnMut(&str);
+}
+
 // ── HTTP client ───────────────────────────────────────────────────────────────
 
 pub fn build_http_client() -> Result<reqwest::Client> {
@@ -72,17 +90,8 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM", &["GLM-4.7", "GLM-4.7-FlashX", "glm-5", "glm-5.1"]),
-    (
-        "Kimi",
-        &[
-            "kimi-for-coding",
-            "kimi-k2-0905-preview",
-            "kimi-k2-turbo-preview",
-            "kimi-thinking-preview",
-            "kimi-latest",
-        ],
-    ),
+    ("GLM", &["glm-5", "glm-5.1", "glm-5v-turbo"]),
+    ("Kimi", &["kimi-for-coding"]),
     (
         "MiniMax",
         &[
@@ -311,6 +320,7 @@ mod tests {
             .expect("GLM backend preset should exist");
 
         assert!(glm_models.contains(&"glm-5.1"));
+        assert!(glm_models.contains(&"glm-5v-turbo"));
     }
 
     #[test]
@@ -321,11 +331,8 @@ mod tests {
             .map(|(_, models)| *models)
             .expect("Kimi backend preset should exist");
 
+        assert_eq!(kimi_models.len(), 1);
         assert!(kimi_models.contains(&"kimi-for-coding"));
-        assert!(kimi_models.contains(&"kimi-k2-0905-preview"));
-        assert!(kimi_models.contains(&"kimi-k2-turbo-preview"));
-        assert!(kimi_models.contains(&"kimi-thinking-preview"));
-        assert!(kimi_models.contains(&"kimi-latest"));
     }
 
     #[test]

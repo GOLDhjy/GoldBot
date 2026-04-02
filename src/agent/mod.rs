@@ -1,11 +1,8 @@
 pub mod dag;
 pub mod executor;
-pub mod main_agent;
 pub(crate) mod plan;
+#[path = "LLMProvider/mod.rs"]
 pub mod provider;
-pub(crate) mod provider_glm;
-pub(crate) mod provider_kimi;
-pub(crate) mod provider_minimax;
 pub mod react;
 pub mod roles;
 pub mod sub_agent;

@@ -81,22 +81,34 @@ impl BuiltinRole {
 /// ```text
 /// [前缀：system_prompt 或 role_prompt，有则加，无则省略]
 /// ---
+/// [共享 sub-agent 规则：含 skill 使用说明]
+/// ---
 /// [base_prompt：默认执行提示词，始终保留]
 /// ```
-pub fn build_sub_agent_prompt(
-    custom_prompt: Option<&str>,
-    role: Option<&BuiltinRole>,
-    base_prompt: &str,
-) -> String {
-    // 取前缀：custom_prompt 优先，否则用 role 展开
-    let prefix = custom_prompt.or_else(|| role.map(BuiltinRole::system_prompt));
-    match prefix {
-        None => base_prompt.to_string(),
-        Some(p) => format!("{}\n\n---\n\n{}", p, base_prompt),
+pub fn build_sub_agent_prompt(custom_prompt: Option<&str>,role: Option<&BuiltinRole>,base_prompt: &str,) -> String {
+    if let Some(custom_prompt) = custom_prompt {
+        return format!(
+            "{custom_prompt}\n\n---\n\n{SUB_AGENT_SHARED_PROMPT}\n\n---\n\n{base_prompt}"
+        );
     }
+
+    if let Some(role) = role {
+        let role_prompt = role.system_prompt();
+        return format!(
+            "{role_prompt}\n\n---\n\n{SUB_AGENT_SHARED_PROMPT}\n\n---\n\n{base_prompt}"
+        );
+    }
+
+    format!("{SUB_AGENT_SHARED_PROMPT}\n\n---\n\n{base_prompt}")
 }
 
 // ── 角色提示词定义 ────────────────────────────────────────────
+
+const SUB_AGENT_SHARED_PROMPT: &str = "\
+Sub-agent execution rules:
+- You may load a matching skill with `<skill>skill-name</skill>`.
+- If the task clearly matches an available skill listed later in the prompt, load it before taking other actions.
+- After loading a skill, follow its instructions before continuing with other tools.";
 
 const SEARCH_AGENT_PROMPT: &str = "\
 You are an experienced investigative researcher and information specialist with a background in fact-checking and intelligence analysis.
@@ -190,7 +202,7 @@ Do NOT use: shell, web_search, plan, question, todo, sub_agent, mcp_*.";
 
 #[cfg(test)]
 mod tests {
-    use super::BuiltinRole;
+    use super::{BuiltinRole, build_sub_agent_prompt};
 
     #[test]
     fn builtin_role_prompts_do_not_forbid_skill_loading() {
@@ -211,5 +223,13 @@ mod tests {
                 role
             );
         }
+    }
+
+    #[test]
+    fn sub_agent_prompt_includes_shared_skill_guidance() {
+        let prompt = build_sub_agent_prompt(None, Some(&BuiltinRole::Coding), "base prompt");
+        assert!(prompt.contains("You may load a matching skill"));
+        assert!(prompt.contains("<skill>skill-name</skill>"));
+        assert!(prompt.contains("base prompt"));
     }
 }

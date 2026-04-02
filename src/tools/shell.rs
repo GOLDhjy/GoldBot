@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use crate::session::SessionStore;
+use crate::memory::SessionStore;
 use anyhow::Result;
 use similar::{ChangeTag, TextDiff};
 

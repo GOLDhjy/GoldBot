@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{Message, Role, Usage};
+use crate::agent::provider::{LlmProvider, Message, Role, Usage};
 
 #[derive(Clone, Copy)]
 pub(crate) struct KimiProvider;
@@ -98,8 +98,8 @@ impl UsageParam {
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
-impl KimiProvider {
-    pub(crate) async fn chat_stream_with<F, G>(
+impl LlmProvider for KimiProvider {
+    async fn chat_stream_with<F, G>(
         &self,
         client: &reqwest::Client,
         messages: &[Message],

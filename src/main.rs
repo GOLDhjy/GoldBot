@@ -1,7 +1,6 @@
 mod agent;
 mod consensus;
 mod memory;
-mod session;
 mod tools;
 mod types;
 mod ui;
@@ -32,8 +31,8 @@ use crossterm::{
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use memory::SessionStore;
 use memory::project::init_workspace;
-use session::SessionStore;
 use tokio::sync::mpsc;
 use tools::command::{Command as UserCommand, discover_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
