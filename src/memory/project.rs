@@ -4,14 +4,8 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{Duration, Local};
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const MAX_SESSION_FINAL_CHARS: usize = 4000;
 const MAX_MEMORY_NOTE_CHARS: usize = 120;
 const MEMORY_SECTION: &str = "## Memories";
-const SESSION_RETENTION_DAYS: i64 = 15;
 /// Maximum number of notes injected per LLM call.
 const MEMORY_TOP_N: usize = 15;
 
@@ -20,40 +14,17 @@ const MEMORY_TOP_N: usize = 15;
 /// Workspace set once at startup; accessible throughout the process.
 static CURRENT_WORKSPACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// Active session identifier for the current process context (YYYYMMDD-HHMMSS).
-static SESSION_ID: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
-
 /// Call once at startup, before any ProjectStore operations.
 pub fn init_workspace(workspace: PathBuf) {
     let _ = CURRENT_WORKSPACE.set(workspace);
 }
 
-fn default_session_id() -> String {
-    Local::now().format("%Y%m%d-%H%M%S").to_string()
-}
-
-fn session_id_cell() -> &'static std::sync::RwLock<String> {
-    SESSION_ID.get_or_init(|| std::sync::RwLock::new(default_session_id()))
-}
-
-pub fn session_id() -> String {
-    session_id_cell()
-        .read()
-        .expect("session id lock poisoned")
-        .clone()
-}
-
-pub fn switch_session(id: &str) {
-    *session_id_cell().write().expect("session id lock poisoned") = id.to_string();
-}
-
 // ── ProjectStore ──────────────────────────────────────────────────────────────
 
-/// All persistent state for one project:
-///   `<base>/MEMORY.md`            — long-term memory
-///   `<base>/sessions/<id>.md`     — per-session logs
+/// Project-level long-term memory storage.
 ///
-/// where `<base>` = `~/.goldbot/projects/<sanitized_workspace_path>`.
+/// Session logs live in `SessionStore`, but share the same project base path:
+/// `~/.goldbot/projects/<sanitized_workspace_path>`.
 pub struct ProjectStore {
     base: PathBuf,
 }
@@ -64,13 +35,13 @@ impl ProjectStore {
     pub fn current() -> Self {
         let ws = CURRENT_WORKSPACE
             .get()
-            .expect("ProjectStore::init_workspace must be called before ProjectStore::current");
+            .expect("init_workspace must be called before ProjectStore::current");
         Self::new(ws)
     }
 
     pub fn new(workspace: &Path) -> Self {
         Self {
-            base: project_base(workspace),
+            base: project_base_for(workspace),
         }
     }
 
@@ -78,14 +49,6 @@ impl ProjectStore {
 
     fn memory_path(&self) -> PathBuf {
         self.base.join("MEMORY.md")
-    }
-
-    fn sessions_dir(&self) -> PathBuf {
-        self.base.join("sessions")
-    }
-
-    fn current_session_path(&self) -> PathBuf {
-        self.sessions_dir().join(format!("{}.md", session_id()))
     }
 
     /// Path displayed to the LLM in the assistant context message.
@@ -165,141 +128,18 @@ impl ProjectStore {
              ### Project Memory\n{lines}"
         ))
     }
-
-    // ── Session (short-term) ──────────────────────────────────────────────────
-
-    /// Append a completed-task record to the current session file.
-    pub fn append_to_session(&self, task: &str, output: &str) -> Result<()> {
-        let path = self.current_session_path();
-        ensure_session_header(&path)?;
-        let now = Local::now().format("%H:%M:%S");
-        let task = sanitize_fenced(task.trim());
-        let output = truncate_chars(output.trim(), MAX_SESSION_FINAL_CHARS);
-        let output = sanitize_fenced(&output);
-        let block = format!(
-            "\n## {now}\n- **Task**\n\n```text\n{task}\n```\n\
-             - **Final**\n\n```text\n{output}\n```\n"
-        );
-        append_file(path, &block)
-    }
-
-    /// Overwrite the current session file with the compaction summary.
-    ///
-    /// After context compaction the old session history is no longer accurate —
-    /// overwriting ensures that a session restore injects only the compact summary
-    /// rather than the full (now-discarded) history.
-    pub fn rewrite_session_after_compaction(
-        &self,
-        summary: &str,
-        messages_dropped: usize,
-    ) -> Result<()> {
-        let path = self.current_session_path();
-        let active_session_id = session_id();
-        let ts = ProjectStore::format_session_timestamp(&active_session_id);
-        let now = Local::now().format("%H:%M:%S");
-        let content = format!(
-            "# Session {ts}\n\n\
-             ## {now} [context compacted · {messages_dropped} messages dropped]\n\n\
-             {}\n",
-            summary.trim()
-        );
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&path, content)?;
-        Ok(())
-    }
-
-    /// Append file diffs produced by a shell command to the current session file.
-    pub fn append_diff_to_session(&self, cmd: &str, diffs: &[(String, String)]) -> Result<()> {
-        if diffs.is_empty() {
-            return Ok(());
-        }
-        let path = self.current_session_path();
-        ensure_session_header(&path)?;
-        let now = Local::now().format("%H:%M:%S");
-        let cmd = sanitize_fenced(cmd.trim());
-        let mut block = format!("\n## {now} [diff]\n- **Command**: `{cmd}`\n");
-        for (label, diff) in diffs {
-            block.push_str(&format!("\n- **File**: {label}\n\n```diff\n{diff}\n```\n"));
-        }
-        append_file(path, &block)
-    }
-
-    // ── Session listing / restore ─────────────────────────────────────────────
-
-    /// Return session IDs sorted oldest-first (file name without `.md`).
-    pub fn list_sessions(&self) -> Vec<String> {
-        let Ok(entries) = fs::read_dir(self.sessions_dir()) else {
-            return Vec::new();
-        };
-        let mut ids: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.strip_suffix(".md").map(str::to_string)
-            })
-            .collect();
-        ids.sort();
-        ids
-    }
-
-    /// Read the raw markdown content of a past session.
-    pub fn read_session(&self, id: &str) -> Result<String> {
-        let path = self.sessions_dir().join(format!("{id}.md"));
-        fs::read_to_string(&path).map_err(Into::into)
-    }
-
-    /// Format a session ID (YYYYMMDD-HHMMSS) as a human-readable timestamp.
-    pub fn format_session_timestamp(id: &str) -> String {
-        // Expected format: 20260331-142530
-        if id.len() >= 15 {
-            let d = &id[..8];
-            let t = &id[9..15];
-            if d.chars().all(|c| c.is_ascii_digit()) && t.chars().all(|c| c.is_ascii_digit()) {
-                return format!(
-                    "{}-{}-{}  {}:{}:{}",
-                    &d[..4],
-                    &d[4..6],
-                    &d[6..8],
-                    &t[..2],
-                    &t[2..4],
-                    &t[4..6]
-                );
-            }
-        }
-        id.to_string()
-    }
-
-    // ── Maintenance ───────────────────────────────────────────────────────────
-
-    /// Remove session files older than SESSION_RETENTION_DAYS. Safe to call at startup.
-    pub fn cleanup_old_sessions(&self) {
-        let dir = self.sessions_dir();
-        let cutoff = (Local::now() - Duration::days(SESSION_RETENTION_DAYS)).timestamp() as u64;
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_name().to_string_lossy().ends_with(".md") {
-                continue;
-            }
-            if let Ok(meta) = entry.path().metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        if dur.as_secs() < cutoff {
-                            let _ = fs::remove_file(entry.path());
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
-fn project_base(workspace: &Path) -> PathBuf {
+pub(crate) fn current_project_base() -> PathBuf {
+    let ws = CURRENT_WORKSPACE
+        .get()
+        .expect("init_workspace must be called before current_project_base");
+    project_base_for(ws)
+}
+
+pub(crate) fn project_base_for(workspace: &Path) -> PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -330,19 +170,6 @@ fn ensure_memory_file(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-fn ensure_session_header(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if !path.exists() {
-        let active_session_id = session_id();
-        let ts = ProjectStore::format_session_timestamp(&active_session_id);
-        fs::write(path, format!("# Session {ts}\n"))?;
-    }
-    Ok(())
-}
-
 fn append_file(path: PathBuf, content: &str) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
@@ -355,7 +182,6 @@ fn append_file(path: PathBuf, content: &str) -> Result<()> {
     file.write_all(content.as_bytes())?;
     Ok(())
 }
-
 /// Extract bullet-list notes from the `## Memories` section.
 fn notes_from_file(raw: &str) -> Vec<String> {
     let mut in_section = false;
@@ -458,10 +284,6 @@ fn keyword_score(query_tokens: &std::collections::HashSet<String>, note: &str) -
     query_tokens.intersection(&note_tokens).count()
 }
 
-fn sanitize_fenced(text: &str) -> String {
-    text.replace("```", "``\\`")
-}
-
 fn truncate_chars(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -543,29 +365,5 @@ mod tests {
             "unrelated notes should be filtered out"
         );
         let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn list_sessions_sorted_oldest_first() {
-        let (store, base) = temp_store();
-        let sessions_dir = base.join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::write(sessions_dir.join("20260330-100000.md"), "# Session").unwrap();
-        fs::write(sessions_dir.join("20260331-090000.md"), "# Session").unwrap();
-        let list = store.list_sessions();
-        assert_eq!(list, vec!["20260330-100000", "20260331-090000"]);
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn format_session_timestamp_parses_correctly() {
-        let ts = ProjectStore::format_session_timestamp("20260331-142530");
-        assert_eq!(ts, "2026-03-31  14:25:30");
-    }
-
-    #[test]
-    fn format_session_timestamp_falls_back_for_bad_input() {
-        let ts = ProjectStore::format_session_timestamp("bad");
-        assert_eq!(ts, "bad");
     }
 }

@@ -1,13 +1,17 @@
 mod agent;
 mod consensus;
 mod memory;
+mod session;
 mod tools;
 mod types;
 mod ui;
 
 use std::{
     io,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -15,8 +19,8 @@ use agent::{
     dag::DagResult,
     executor::{
         ShellExecResult, handle_llm_stream_delta, handle_llm_thinking_delta,
-        handle_shell_exec_result, maybe_flush_and_compact_before_call, process_llm_result,
-        refresh_llm_status, start_task, sync_context_budget,
+        handle_shell_exec_result, maybe_flush_and_compact_before_call, perform_manual_compact,
+        process_llm_result, refresh_llm_status, start_task, sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_system_prompt, build_workspace_context},
@@ -28,9 +32,10 @@ use crossterm::{
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use memory::project::{ProjectStore, init_workspace};
+use memory::project::init_workspace;
+use session::SessionStore;
 use tokio::sync::mpsc;
-use tools::command::{Command as UserCommand, discover_commands, ensure_builtin_commands};
+use tools::command::{Command as UserCommand, discover_commands};
 use tools::skills::{Skill, discover_skills, skills_system_prompt};
 use types::{AssistMode, Event, InputQueue, Mode};
 use ui::ge::drain_ge_events;
@@ -39,6 +44,8 @@ use ui::screen::{Screen, format_mcp_status_line, format_skills_status_line};
 
 pub(crate) const KEEP_RECENT_MESSAGES_AFTER_COMPACTION: usize = 18;
 pub(crate) const MAX_COMPACTION_SUMMARY_ITEMS: usize = 8;
+const LLM_MAX_RETRIES: usize = 3;
+const LLM_RETRY_BASE_DELAY_MS: u64 = 500;
 
 // ── App ───────────────────────────────────────────────────────────────────────
 pub(crate) struct App {
@@ -140,6 +147,8 @@ pub(crate) struct App {
     pub recent_completion_tokens_ema: u32,
     /// HTTP client shared with SubAgent DAG executor
     pub http_client: Option<reqwest::Client>,
+    /// 用户通过 /compact 命令请求手动压缩
+    pub pending_manual_compact: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -231,10 +240,9 @@ impl App {
         // chdir into workspace so all shell commands run relative to it.
         let _ = std::env::set_current_dir(&workspace);
 
-        // Initialise project store (sets process-level workspace + session ID).
+        // Initialise process-level workspace state before any stores are used.
         init_workspace(workspace.clone());
-        let project = ProjectStore::current();
-        project.cleanup_old_sessions();
+        SessionStore::current().cleanup_old_sessions();
 
         // messages[0] = system prompt + workspace context（含 AGENTS.md、assist mode 等）。
         // 记忆在每次 start_task 时按任务过滤后拼入 user 消息。
@@ -306,6 +314,7 @@ impl App {
             prompt_token_scale: 1.0,
             recent_completion_tokens_ema: 0,
             http_client: None,
+            pending_manual_compact: false,
         }
     }
     /// Rebuild messages[0] (system prompt) with the latest base_prompt + MCP tools + workspace context.
@@ -508,6 +517,11 @@ async fn run_loop(
 
         drain_ge_events(app, screen);
 
+        if should_run_pending_manual_compact(app) {
+            perform_manual_compact(app, screen).await;
+            app.pending_manual_compact = false;
+        }
+
         // Consume queued user messages as interjections before the next LLM call
         if app.running
             && app.pending_confirm.is_none()
@@ -551,20 +565,43 @@ async fn run_loop(
             let show_thinking = app.show_thinking;
             let backend = app.backend.clone();
             llm_task_handle = Some(tokio::spawn(async move {
-                let result = backend
-                    .chat_stream_with(
-                        &client,
-                        &messages,
-                        show_thinking,
-                        |piece| {
-                            let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
-                        },
-                        |chunk| {
-                            let _ =
-                                tx_delta.try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
-                        },
-                    )
-                    .await;
+                let mut retry_index = 0usize;
+                let result = loop {
+                    let streamed_any = Arc::new(AtomicBool::new(false));
+                    let delta_streamed_any = streamed_any.clone();
+                    let thinking_streamed_any = streamed_any.clone();
+                    let result = backend
+                        .chat_stream_with(
+                            &client,
+                            &messages,
+                            show_thinking,
+                            |piece| {
+                                delta_streamed_any.store(true, Ordering::Relaxed);
+                                let _ = tx_delta.try_send(LlmWorkerEvent::Delta(piece.to_string()));
+                            },
+                            |chunk| {
+                                thinking_streamed_any.store(true, Ordering::Relaxed);
+                                let _ = tx_delta
+                                    .try_send(LlmWorkerEvent::ThinkingDelta(chunk.to_string()));
+                            },
+                        )
+                        .await;
+
+                    match result {
+                        Ok(response) => break Ok(response),
+                        Err(err)
+                            if retry_index < LLM_MAX_RETRIES
+                                && should_retry_llm_error(
+                                    &err.to_string(),
+                                    streamed_any.load(Ordering::Relaxed),
+                                ) =>
+                        {
+                            retry_index += 1;
+                            tokio::time::sleep(retry_delay_for_attempt(retry_index)).await;
+                        }
+                        Err(err) => break Err(err),
+                    }
+                };
                 let _ = tx_done.send(LlmWorkerEvent::Done(result)).await;
             }));
         }
@@ -673,6 +710,136 @@ fn poll_dag_result(app: &mut App, screen: &mut Screen) {
             ));
             app.needs_agent_executor = true;
         }
+    }
+}
+
+fn parse_retryable_http_status(message: &str) -> Option<u16> {
+    let marker = "API error ";
+    let start = message.find(marker)? + marker.len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn should_retry_llm_error(message: &str, streamed_any: bool) -> bool {
+    if streamed_any {
+        return false;
+    }
+
+    if matches!(parse_retryable_http_status(message), Some(status) if (500..600).contains(&status))
+    {
+        return true;
+    }
+
+    [
+        "HTTP request failed",
+        "failed reading stream chunk",
+        "error sending request for url",
+        "connection error",
+        "connection reset",
+        "connection closed",
+        "timed out",
+        "dns error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn retry_delay_for_attempt(retry_attempt: usize) -> Duration {
+    let shift = retry_attempt.saturating_sub(1).min(3) as u32;
+    Duration::from_millis(LLM_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << shift))
+}
+
+fn should_run_pending_manual_compact(app: &App) -> bool {
+    app.pending_manual_compact
+        && app.pending_confirm.is_none()
+        && !app.llm_calling
+        && !app.shell_task_running
+        && !app.dag_task_running
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_retryable_http_status, retry_delay_for_attempt, should_retry_llm_error,
+        should_run_pending_manual_compact,
+    };
+    use crate::App;
+    use std::time::Duration;
+
+    #[test]
+    fn retries_server_errors_before_streaming() {
+        assert!(should_retry_llm_error(
+            "API error 500 Internal Server Error: boom",
+            false,
+        ));
+        assert!(should_retry_llm_error(
+            "API error 503 Service Unavailable: boom",
+            false,
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_client_errors() {
+        assert!(!should_retry_llm_error(
+            "API error 400 Bad Request: boom",
+            false,
+        ));
+        assert!(!should_retry_llm_error(
+            "API error 429 Too Many Requests: boom",
+            false,
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_after_streaming_started() {
+        assert!(!should_retry_llm_error("failed reading stream chunk", true,));
+    }
+
+    #[test]
+    fn parses_http_status_from_provider_errors() {
+        assert_eq!(
+            parse_retryable_http_status("API error 502 Bad Gateway: upstream down"),
+            Some(502)
+        );
+        assert_eq!(
+            parse_retryable_http_status("HTTP request failed: timeout"),
+            None
+        );
+    }
+
+    #[test]
+    fn backs_off_between_retries() {
+        assert_eq!(retry_delay_for_attempt(1), Duration::from_millis(500));
+        assert_eq!(retry_delay_for_attempt(2), Duration::from_secs(1));
+        assert_eq!(retry_delay_for_attempt(3), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pending_manual_compact_waits_until_agent_is_idle() {
+        let mut app = App::new();
+        app.pending_manual_compact = true;
+        assert!(should_run_pending_manual_compact(&app));
+
+        app.llm_calling = true;
+        assert!(!should_run_pending_manual_compact(&app));
+        app.llm_calling = false;
+
+        app.shell_task_running = true;
+        assert!(!should_run_pending_manual_compact(&app));
+        app.shell_task_running = false;
+
+        app.dag_task_running = true;
+        assert!(!should_run_pending_manual_compact(&app));
+        app.dag_task_running = false;
+
+        app.pending_confirm = Some("rm -rf target".to_string());
+        assert!(!should_run_pending_manual_compact(&app));
     }
 }
 

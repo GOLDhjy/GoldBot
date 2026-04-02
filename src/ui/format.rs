@@ -71,12 +71,14 @@ pub(crate) fn format_event(event: &Event) -> Vec<String> {
             summary,
             messages_dropped,
         } => {
-            let mut lines = vec![format!(
-                "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
-                sym.bullet, messages_dropped
-            )
-            .dark_grey()
-            .to_string()];
+            let mut lines = vec![
+                format!(
+                    "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
+                    sym.bullet, messages_dropped
+                )
+                .dark_grey()
+                .to_string(),
+            ];
             if !summary.is_empty() {
                 let excerpt: String = summary.lines().take(4).collect::<Vec<_>>().join(" ");
                 lines.push(
@@ -168,14 +170,18 @@ pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
             lines
         }
         Event::Final { .. } | Event::UserTask { .. } => Vec::new(),
-        Event::ConversationCompacted { messages_dropped, .. } => {
+        Event::ConversationCompacted {
+            messages_dropped, ..
+        } => {
             let sym = Symbols::current();
-            vec![format!(
-                "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
-                sym.bullet, messages_dropped
-            )
-            .dark_grey()
-            .to_string()]
+            vec![
+                format!(
+                    "  {} ── 上下文已压缩 · 丢弃 {} 条消息 ──",
+                    sym.bullet, messages_dropped
+                )
+                .dark_grey()
+                .to_string(),
+            ]
         }
     }
 }

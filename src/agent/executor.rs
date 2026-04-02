@@ -8,6 +8,7 @@ use crate::agent::plan::is_plan_echo;
 use crate::agent::provider::Message;
 use crate::agent::react::parse_llm_response;
 use crate::memory::project::ProjectStore;
+use crate::session::SessionStore;
 use crate::tools::safety::{RiskLevel, assess_command};
 use crate::tools::skills::skill_tool_result;
 use crate::types::{AssistMode, Event, LlmAction, Mode};
@@ -806,7 +807,7 @@ pub(crate) fn execute_update_file(
                 &new_content_for_diff,
                 ctx_start,
             );
-            let _ = ProjectStore::current()
+            let _ = SessionStore::current()
                 .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let added = norm_new.lines().count();
             let deleted = line_end - line_start + 1;
@@ -874,7 +875,7 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
     match result {
         Ok((old_content, new_content)) => {
             let diff_text = crate::tools::shell::render_unified_diff(&old_content, &new_content, 0);
-            let _ = ProjectStore::current()
+            let _ = SessionStore::current()
                 .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
             push_tool_result_to_llm(app, "Tool result:", &llm_msg);
@@ -1236,7 +1237,10 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
         ));
     }
 
+    let session_task = session_task_for_round(&app.task, &app.task_events).to_string();
+
     if !app.message_queue.is_empty() {
+        let _ = SessionStore::current().append_to_session(&session_task, &summary);
         let ev = Event::Final {
             summary: summary.clone(),
         };
@@ -1254,7 +1258,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
 
     screen.collapse_to(&collapsed_lines(app));
 
-    let _ = ProjectStore::current().append_to_session(&app.task, &summary);
+    let _ = SessionStore::current().append_to_session(&session_task, &summary);
 
     let total_elapsed = app.task_started_at.map(|t| t.elapsed());
     app.last_task_elapsed = total_elapsed;
@@ -1281,6 +1285,17 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     }
     sync_context_budget(app, screen);
     screen.refresh();
+}
+
+fn session_task_for_round<'a>(root_task: &'a str, events: &'a [Event]) -> &'a str {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::UserTask { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or(root_task)
 }
 
 /// Called with native thinking block deltas from the LLM.
@@ -1572,15 +1587,11 @@ fn format_token_count_short(tokens: u32) -> String {
     tokens.to_string()
 }
 
-pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
-    let budget = current_context_budget(app);
-    if !budget.should_compact {
-        return;
-    }
-
+/// 执行 compact 的核心逻辑，返回 (summary, messages_dropped)
+async fn do_compact(app: &mut App, screen: &mut Screen) -> Option<(String, usize)> {
     let prefix_end = app.messages.len().min(1);
     if app.messages.len() <= prefix_end + 1 {
-        return;
+        return None;
     }
 
     let total = app.messages.len();
@@ -1589,7 +1600,7 @@ pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &
     let min_recent = MIN_RECENT_MESSAGES_AFTER_COMPACTION.min(total.saturating_sub(prefix_end));
     let max_split_at = total.saturating_sub(min_recent.max(1));
     if max_split_at <= prefix_end {
-        return;
+        return None;
     }
 
     let mut chosen_split_at = total.saturating_sub(preferred_recent);
@@ -1608,6 +1619,7 @@ pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &
         None => summarize_for_compaction_fallback(&older),
     };
 
+    let budget = current_context_budget(app);
     let compacted = loop {
         let mut candidate = app.messages[..prefix_end].to_vec();
         candidate.push(Message::user(format!("[Context compacted]\n{summary}")));
@@ -1634,14 +1646,36 @@ pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
 
-    if let Err(e) = crate::memory::project::ProjectStore::current()
-        .rewrite_session_after_compaction(&summary, messages_dropped)
+    if let Err(e) =
+        SessionStore::current().rewrite_session_after_compaction(&summary, messages_dropped)
     {
         eprintln!("[compaction] 会话文件覆写失败: {e}");
     }
 
     screen.status = "🧠 context compacted".grey().to_string();
     screen.refresh();
+
+    Some((summary, messages_dropped))
+}
+
+pub(crate) async fn maybe_flush_and_compact_before_call(app: &mut App, screen: &mut Screen) {
+    let budget = current_context_budget(app);
+    if !budget.should_compact {
+        return;
+    }
+    do_compact(app, screen).await;
+}
+
+/// 用户手动触发 compact（/compact 命令）
+pub(crate) async fn perform_manual_compact(app: &mut App, screen: &mut Screen) -> (String, usize) {
+    match do_compact(app, screen).await {
+        Some((summary, dropped)) => (summary, dropped),
+        None => {
+            let total = app.messages.len();
+            screen.emit(&[format!("  /compact: 只有 {} 条消息，无需压缩。", total)]);
+            (String::new(), 0)
+        }
+    }
 }
 
 const COMPACTION_SYSTEM_PROMPT: &str = "\
@@ -1761,10 +1795,11 @@ fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::{
         COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS, dynamic_compact_reserve_tokens,
-        estimate_prompt_tokens_raw, format_token_count_short, truncate_utf8_prefix,
+        estimate_prompt_tokens_raw, format_token_count_short, session_task_for_round,
+        truncate_utf8_prefix,
     };
     use crate::agent::provider::Message;
-    use crate::types::{TodoItem, TodoStatus};
+    use crate::types::{Event, TodoItem, TodoStatus};
 
     #[test]
     fn parse_todo_json_roundtrip() {
@@ -1832,5 +1867,32 @@ mod tests {
             dynamic_compact_reserve_tokens(10_000, 200_000),
             10_000 * COMPLETION_RESERVE_MULTIPLIER
         );
+    }
+
+    #[test]
+    fn session_task_for_round_prefers_latest_user_turn() {
+        let events = vec![
+            Event::Thinking {
+                text: "outline plan".to_string(),
+            },
+            Event::UserTask {
+                text: "请把风险再拆细一点".to_string(),
+            },
+            Event::Thinking {
+                text: "refined".to_string(),
+            },
+        ];
+        assert_eq!(
+            session_task_for_round("最初任务", &events),
+            "请把风险再拆细一点"
+        );
+    }
+
+    #[test]
+    fn session_task_for_round_falls_back_to_root_task() {
+        let events = vec![Event::Thinking {
+            text: "only assistant output".to_string(),
+        }];
+        assert_eq!(session_task_for_round("最初任务", &events), "最初任务");
     }
 }

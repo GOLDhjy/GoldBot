@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+use crate::session::SessionStore;
 use anyhow::Result;
 use similar::{ChangeTag, TextDiff};
 
@@ -192,7 +193,7 @@ pub fn run_command(cmd: &str) -> Result<CommandResult> {
 
     // 将文件差异写入当前 session 记忆，方便后续查阅或恢复
     if !diffs.is_empty() {
-        let _ = crate::memory::project::ProjectStore::current().append_diff_to_session(cmd, &diffs);
+        let _ = SessionStore::current().append_diff_to_session(cmd, &diffs);
     }
 
     let mut text = String::new();
