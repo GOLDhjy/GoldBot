@@ -135,7 +135,12 @@ pub(crate) fn emit_live_event(screen: &mut super::screen::Screen, event: &Event)
 pub(crate) fn format_event_compact(event: &Event) -> Vec<String> {
     let sym = Symbols::current();
     match event {
-        Event::Thinking { .. } => Vec::new(),
+        Event::Thinking { text } => text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .map(|line| format!("  {}", shorten_text(line, 110)).grey().to_string())
+            .collect(),
         Event::Phase { text } => {
             vec![
                 format!("  {} {}", sym.bullet, shorten_text(text, 110))
@@ -1112,5 +1117,28 @@ mod tests {
         assert!(lines.contains("Update(README.md)"));
         assert!(lines.contains("Added 1 line, removed 4 lines"));
         assert!(!lines.contains("Diff README.md:"));
+    }
+
+    #[test]
+    fn collapsed_keeps_thinking_before_tool_call() {
+        let events = vec![
+            Event::Thinking {
+                text: "先确认 README 的当前结构".to_string(),
+            },
+            Event::ToolCall {
+                label: "Read(README.md)".to_string(),
+                command: "cat README.md".to_string(),
+                multiline: false,
+            },
+            Event::ToolResult {
+                exit_code: 0,
+                output: "Read 8 lines".to_string(),
+            },
+        ];
+
+        let lines = collapsed_task_event_lines(&events).join("\n");
+        let thinking_idx = lines.find("先确认 README 的当前结构").expect("missing thinking");
+        let tool_idx = lines.find("Read(README.md)").expect("missing tool call");
+        assert!(thinking_idx < tool_idx);
     }
 }

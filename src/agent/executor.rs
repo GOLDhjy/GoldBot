@@ -152,9 +152,8 @@ pub(crate) fn process_llm_result(
 
     if !thought.is_empty() {
         let ev = Event::Thinking { text: thought };
-        if app.show_thinking {
-            emit_live_event(screen, &ev);
-        }
+        // <thought> 是结构化输出的一部分，应始终作为独立事件显示在后续工具调用之前。
+        emit_live_event(screen, &ev);
         app.task_events.push(ev);
     }
     app.messages.push(Message::assistant(response));
