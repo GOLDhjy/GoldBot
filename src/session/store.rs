@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -69,6 +70,22 @@ impl SessionStore {
         switch_active_session(id);
     }
 
+    /// Delete the current session file and rotate to a new empty active session.
+    pub fn clear_current_session(&self) -> Result<String> {
+        let old_id = Self::active_id();
+        let old_path = self.sessions_dir().join(format!("{old_id}.md"));
+        match fs::remove_file(&old_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+
+        let new_id = self.fresh_session_id();
+        Self::switch_active(&new_id);
+        ensure_session_header(&self.current_session_path())?;
+        Ok(new_id)
+    }
+
     fn sessions_dir(&self) -> PathBuf {
         self.base.join("sessions")
     }
@@ -76,6 +93,18 @@ impl SessionStore {
     fn current_session_path(&self) -> PathBuf {
         self.sessions_dir()
             .join(format!("{}.md", Self::active_id()))
+    }
+
+    fn fresh_session_id(&self) -> String {
+        let base = default_session_id();
+        let current = Self::active_id();
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        while candidate == current || self.sessions_dir().join(format!("{candidate}.md")).exists() {
+            candidate = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        candidate
     }
 
     /// Append a completed-task record to the current session file.
@@ -252,10 +281,14 @@ fn truncate_chars(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    static SESSION_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn temp_store() -> (SessionStore, PathBuf) {
         let nanos = SystemTime::now()
@@ -290,5 +323,37 @@ mod tests {
     fn format_session_timestamp_falls_back_for_bad_input() {
         let ts = SessionStore::format_session_timestamp("bad");
         assert_eq!(ts, "bad");
+    }
+
+    #[test]
+    fn clear_current_session_removes_old_file_and_rotates_active_id() {
+        let _guard = SESSION_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let old_active = SessionStore::active_id();
+        let (store, base) = temp_store();
+        let old_id = "20260402-101010";
+        SessionStore::switch_active(old_id);
+
+        let old_path = base.join("sessions").join(format!("{old_id}.md"));
+        ensure_session_header(&old_path).unwrap();
+        fs::write(&old_path, "# Session old\n\nstale").unwrap();
+
+        let new_id = store.clear_current_session().unwrap();
+        let new_path = base.join("sessions").join(format!("{new_id}.md"));
+
+        assert_ne!(new_id, old_id);
+        assert!(!old_path.exists());
+        assert_eq!(SessionStore::active_id(), new_id);
+        assert!(new_path.exists());
+        assert!(
+            fs::read_to_string(&new_path)
+                .unwrap()
+                .starts_with("# Session ")
+        );
+
+        SessionStore::switch_active(&old_active);
+        let _ = fs::remove_dir_all(base);
     }
 }

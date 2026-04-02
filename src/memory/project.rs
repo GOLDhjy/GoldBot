@@ -7,7 +7,7 @@ use anyhow::Result;
 const MAX_MEMORY_NOTE_CHARS: usize = 120;
 const MEMORY_SECTION: &str = "## Memories";
 /// Maximum number of notes injected per LLM call.
-const MEMORY_TOP_N: usize = 15;
+const MEMORY_TOP_N: usize = 5;
 
 // ── Process-level statics ─────────────────────────────────────────────────────
 

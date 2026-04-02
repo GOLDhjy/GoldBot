@@ -35,10 +35,15 @@ Task complete (required):
 - If files were changed, include the file paths.
 - No Emoji
 
-Save to project memory (optional; use alongside <final> or standalone):
+Project memory check (required every response; emit tags only when something should be saved):
 <memory>concise note (under 80 chars)</memory>
 Memory guidelines:
+- Before every response, decide whether the conversation introduced something that should be remembered for future tasks.
+- If there is a durable preference, standing rule, stable environment fact, workflow fact, or user-specific convention, emit one or more <memory> tags in the same response.
+- If the user explicitly asks you to remember, record, save, or keep something for next time, you must emit a <memory> tag.
+- If nothing is worth saving, emit no <memory> tag.
 - Only save preferences, rules, or facts that affect future behavior. Skip one-off results.
+- Good candidates include preferred language, work directories, repo locations, tooling preferences, recurring workflow rules, and long-lived constraints.
 - Do not save what can be read from the codebase or git history.
 - One note per tag; emit multiple tags for multiple notes.
 
@@ -187,7 +192,10 @@ pub fn build_workspace_context(workspace: &std::path::Path, assist_mode: AssistM
          All shell commands run in this directory, and file paths are resolved relative to it.\n\
          \n\
          I maintain a project memory at `{memory_path}`.\n\
-         Use the <memory> tag to save notes that affect future behavior.\n\
+         On every response, evaluate whether new information should be saved with the <memory> \
+         tag for future tasks.\n\
+         If the user asks you to remember, record, save, or keep something for next time, you \
+         must emit a <memory> tag.\n\
          \n\
          Every file change I make is automatically recorded as a diff in today's short-term \
          memory. If a file must be restored, I can read that diff and reverse it: lines \
@@ -791,6 +799,14 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_strengthens_memory_judgment_rules() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Before every response, decide whether the conversation introduced something that should be remembered for future tasks."));
+        assert!(prompt.contains("If the user explicitly asks you to remember, record, save, or keep something for next time, you must emit a <memory> tag."));
+        assert!(prompt.contains("Good candidates include preferred language, work directories, repo locations, tooling preferences, recurring workflow rules, and long-lived constraints."));
+    }
+
+    #[test]
     fn build_workspace_context_includes_full_agents_runtime_prompt_ascii() {
         let root = unique_temp_dir("agents-full-ascii");
         fs::create_dir_all(&root).expect("should create workspace dir");
@@ -805,6 +821,8 @@ mod tests {
         assert!(ctx.contains("## Read local knowledge base first"));
         assert!(ctx.contains("Read ./.AIDB/README.md before searching the whole repo."));
         assert!(ctx.contains("```md"));
+        assert!(ctx.contains("On every response, evaluate whether new information should be saved with the <memory> tag for future tasks."));
+        assert!(ctx.contains("If the user asks you to remember, record, save, or keep something for next time, you must emit a <memory> tag."));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -1457,19 +1457,32 @@ fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: BuiltinComm
         }
 
         BuiltinCommand::Clear => {
+            let clear_session_error = SessionStore::current().clear_current_session().err();
             // 保留 messages[0]（system），清空其余
             app.messages.truncate(1);
             app.task_events.clear();
+            app.task.clear();
             app.final_summary = None;
             app.running = false;
+            app.needs_agent_executor = false;
             app.current_phase = None;
             app.task_started_at = None;
             app.last_task_elapsed = None;
+            app.pending_confirm = None;
+            app.pending_confirm_note = false;
+            app.pending_question = None;
+            app.answering_question = false;
+            app.pending_manual_compact = false;
+            app.pending_session_list = None;
+            app.clear_message_queue(screen);
             app.llm_stream_preview.clear();
             app.llm_preview_shown.clear();
             sync_context_budget(app, screen);
             screen.status.clear();
             screen.clear_screen();
+            if let Some(err) = clear_session_error {
+                screen.emit(&[format!("  /clear: 清理当前 session 失败：{err}")]);
+            }
         }
 
         BuiltinCommand::Compact => {
