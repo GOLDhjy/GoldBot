@@ -5,7 +5,12 @@ mod kimi;
 mod mimo;
 mod minimax;
 
-use self::{glm::GlmProvider, kimi::KimiProvider, mimo::MimoProvider, minimax::MiniMaxProvider};
+use self::{
+    glm::{GlmProvider, base_url_from_env},
+    kimi::KimiProvider,
+    mimo::MimoProvider,
+    minimax::MiniMaxProvider,
+};
 
 // ── Conversation message types ────────────────────────────────────────────────
 
@@ -90,8 +95,10 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
+const GLM_MODEL_PRESETS: &[&str] = &["glm-5", "glm-5.1", "glm-5v-turbo"];
+
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
-    ("GLM", &["glm-5", "glm-5.1", "glm-5v-turbo"]),
+    ("GLM", GLM_MODEL_PRESETS),
     ("Kimi", &["kimi-for-coding"]),
     ("Mimo", &["mimo-v2-pro", "mimo-v2-flash", "mimo-v2-omni"]),
     (
@@ -122,6 +129,23 @@ fn default_kimi_model() -> String {
     "kimi-k2.5".to_string()
 }
 
+fn default_glm_model() -> String {
+    std::env::var("BIGMODEL_MODEL")
+        .or_else(|_| std::env::var("BIGMODEL_CODING_MODEL"))
+        .ok()
+        .and_then(|model| normalize_glm_model_name(&model))
+        .unwrap_or_else(|| "glm-5".to_string())
+}
+
+fn normalize_glm_model_name(model: &str) -> Option<String> {
+    match model.trim().to_ascii_lowercase().as_str() {
+        "glm-5" => Some("glm-5".to_string()),
+        "glm-5.1" => Some("glm-5.1".to_string()),
+        "glm-5v-turbo" => Some("glm-5v-turbo".to_string()),
+        _ => None,
+    }
+}
+
 // ── Backend selector ──────────────────────────────────────────────────────────
 
 /// 当前使用的 LLM 后端，内部持有已选定的模型名称。
@@ -146,6 +170,10 @@ impl LlmBackend {
             .to_lowercase();
 
         match provider.as_str() {
+            "glm-coding" | "glm_coding" | "glmcoding" => {
+                let model = default_glm_model();
+                LlmBackend::Glm(model)
+            }
             "kimi" => {
                 let model = std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
                 LlmBackend::Kimi(model)
@@ -161,7 +189,7 @@ impl LlmBackend {
                 LlmBackend::MiniMax(model)
             }
             "glm" => {
-                let model = std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
+                let model = default_glm_model();
                 LlmBackend::Glm(model)
             }
             _ => {
@@ -183,8 +211,7 @@ impl LlmBackend {
                         std::env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo-v2-pro".to_string());
                     LlmBackend::Mimo(model)
                 } else {
-                    let model =
-                        std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
+                    let model = default_glm_model();
                     LlmBackend::Glm(model)
                 }
             }
@@ -211,7 +238,8 @@ impl LlmBackend {
     pub(crate) fn context_window_tokens(&self) -> u32 {
         env_u32("GOLDBOT_CONTEXT_WINDOW_TOKENS")
             .or_else(|| match self {
-                Self::Glm(_) => env_u32("BIGMODEL_CONTEXT_WINDOW_TOKENS"),
+                Self::Glm(_) => env_u32("BIGMODEL_CONTEXT_WINDOW_TOKENS")
+                    .or_else(|| env_u32("BIGMODEL_CODING_CONTEXT_WINDOW_TOKENS")),
                 Self::Kimi(_) => env_u32("KIMI_CONTEXT_WINDOW_TOKENS"),
                 Self::Mimo(_) => env_u32("MIMO_CONTEXT_WINDOW_TOKENS"),
                 Self::MiniMax(_) => env_u32("MINIMAX_CONTEXT_WINDOW_TOKENS"),
@@ -292,11 +320,7 @@ impl LlmBackend {
     /// 返回 (model名, provider主机) 供 UI 启动信息展示。
     pub(crate) fn display_info(&self) -> (String, String) {
         match self {
-            Self::Glm(model) => (
-                model.clone(),
-                std::env::var("BIGMODEL_BASE_URL")
-                    .unwrap_or_else(|_| "https://open.bigmodel.cn/api/coding/paas/v4".to_string()),
-            ),
+            Self::Glm(model) => (model.clone(), base_url_from_env()),
             Self::Kimi(model) => {
                 let default_base = if std::env::var("KIMI_API_KEY")
                     .unwrap_or_default()
@@ -351,6 +375,7 @@ mod tests {
             .map(|(_, models)| *models)
             .expect("GLM backend preset should exist");
 
+        assert!(glm_models.contains(&"glm-5"));
         assert!(glm_models.contains(&"glm-5.1"));
         assert!(glm_models.contains(&"glm-5v-turbo"));
     }

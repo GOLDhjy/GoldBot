@@ -6,6 +6,8 @@ use crate::agent::provider::{LlmProvider, Message, Role, Usage};
 #[derive(Clone, Copy)]
 pub(crate) struct GlmProvider;
 
+const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -93,54 +95,84 @@ impl LlmProvider for GlmProvider {
         messages: &[Message],
         model: &str,
         show_thinking: bool,
-        mut on_delta: F,
-        mut on_thinking_delta: G,
+        on_delta: F,
+        on_thinking_delta: G,
     ) -> Result<(String, Usage)>
     where
         F: FnMut(&str),
         G: FnMut(&str),
     {
-        let (base_url, api_key, body) = build_request(messages, model, true, show_thinking)?;
+        chat_stream_with_impl(
+            client,
+            messages,
+            model,
+            show_thinking,
+            on_delta,
+            on_thinking_delta,
+        )
+        .await
+    }
+}
 
-        let mut resp = client
-            .post(format!("{base_url}/chat/completions"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .json(&body)
-            .send()
-            .await
-            .context("HTTP request failed")?;
+pub(crate) fn base_url_from_env() -> String {
+    if let Ok(value) = std::env::var("BIGMODEL_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    if let Ok(value) = std::env::var("BIGMODEL_CODING_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    DEFAULT_BASE_URL.to_string()
+}
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("API error {status}: {text}"));
-        }
+async fn chat_stream_with_impl<F, G>(
+    client: &reqwest::Client,
+    messages: &[Message],
+    model: &str,
+    show_thinking: bool,
+    mut on_delta: F,
+    mut on_thinking_delta: G,
+) -> Result<(String, Usage)>
+where
+    F: FnMut(&str),
+    G: FnMut(&str),
+{
+    let (base_url, api_key, body) = build_request(messages, model, true, show_thinking)?;
 
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+    let mut resp = client
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .context("HTTP request failed")?;
 
-        if !content_type.contains("text/event-stream") {
-            return parse_non_stream_response(resp).await;
-        }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("API error {status}: {text}"));
+    }
 
-        let mut merged = String::new();
-        let mut pending = String::new();
-        let mut final_usage = Usage::default();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
 
-        while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            drain_sse_frames(
-                &mut pending,
-                &mut merged,
-                &mut final_usage,
-                &mut on_delta,
-                &mut on_thinking_delta,
-            );
-        }
+    if !content_type.contains("text/event-stream") {
+        return parse_non_stream_response(resp).await;
+    }
+
+    let mut merged = String::new();
+    let mut pending = String::new();
+    let mut final_usage = Usage::default();
+
+    while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
+        pending.push_str(&String::from_utf8_lossy(&chunk));
         drain_sse_frames(
             &mut pending,
             &mut merged,
@@ -148,12 +180,19 @@ impl LlmProvider for GlmProvider {
             &mut on_delta,
             &mut on_thinking_delta,
         );
-
-        if merged.is_empty() {
-            return Err(anyhow!("API returned empty content"));
-        }
-        Ok((merged, final_usage))
     }
+    drain_sse_frames(
+        &mut pending,
+        &mut merged,
+        &mut final_usage,
+        &mut on_delta,
+        &mut on_thinking_delta,
+    );
+
+    if merged.is_empty() {
+        return Err(anyhow!("API returned empty content"));
+    }
+    Ok((merged, final_usage))
 }
 
 fn build_request(
@@ -162,11 +201,8 @@ fn build_request(
     stream: bool,
     show_thinking: bool,
 ) -> Result<(String, String, ApiRequest)> {
-    const BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
-
-    let base_url = std::env::var("BIGMODEL_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
     let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
-    let model = model.to_string();
+    let model = normalize_glm_model(model);
 
     let api_messages: Vec<ApiMessage> = messages
         .iter()
@@ -190,7 +226,17 @@ fn build_request(
         }),
     };
 
-    Ok((base_url, api_key, body))
+    Ok((base_url_from_env(), api_key, body))
+}
+
+fn normalize_glm_model(model: &str) -> String {
+    match model {
+        "glm-5.1" | "GLM-5.1" => "GLM-5.1".to_string(),
+        "glm-5" | "GLM-5" => "GLM-5".to_string(),
+        "glm-5v-turbo" | "GLM-5V-TURBO" | "GLM-5v-Turbo" => "glm-5v-turbo".to_string(),
+        // 仅保留当前 UI 预设的三个模型，其他值统一回落到默认模型。
+        _ => "GLM-5".to_string(),
+    }
 }
 
 async fn parse_non_stream_response(resp: reqwest::Response) -> Result<(String, Usage)> {
@@ -291,5 +337,22 @@ mod tests {
     fn thinking_param_disabled_serializes_correctly() {
         let json = serde_json::to_string(&ThinkingParam { kind: "disabled" }).unwrap();
         assert_eq!(json, r#"{"type":"disabled"}"#);
+    }
+
+    #[test]
+    fn glm_defaults_to_coding_endpoint() {
+        assert_eq!(
+            DEFAULT_BASE_URL,
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        );
+    }
+
+    #[test]
+    fn glm_model_aliases_normalize_to_official_names() {
+        assert_eq!(normalize_glm_model("glm-5.1"), "GLM-5.1");
+        assert_eq!(normalize_glm_model("glm-5"), "GLM-5");
+        assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5v-turbo");
+        assert_eq!(normalize_glm_model("GLM-5.1"), "GLM-5.1");
+        assert_eq!(normalize_glm_model("glm-4.7"), "GLM-5");
     }
 }

@@ -169,7 +169,7 @@ pub(crate) struct AtFileChunk {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) enum ModelPickerStage {
-    /// 第一级：选择后端（GLM / MiniMax）
+    /// 第一级：选择后端（GLM / Kimi / Mimo / MiniMax）
     #[default]
     Backend,
     /// 第二级：选择具体模型（已知选定的后端 label）

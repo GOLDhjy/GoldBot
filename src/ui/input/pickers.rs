@@ -502,6 +502,11 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
 
     let content = lines.join("\n") + "\n";
     let _ = std::fs::write(&env_path, content);
+    // 同步当前进程环境，确保切换后无需重启即可让 from_env() 读到新值。
+    unsafe {
+        std::env::set_var("LLM_PROVIDER", provider_value);
+        std::env::set_var(model_key, model);
+    }
 }
 
 fn persist_api_key_to_env(key_name: &str, key_value: &str) {
@@ -614,6 +619,19 @@ pub(super) fn select_model_item(app: &mut App, screen: &mut Screen) {
             app.prompt_token_scale = 1.0;
             app.recent_completion_tokens_ema = 0;
             persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());
+            // 切换 provider 后，刷新内置 MCP 和 system prompt，
+            // 避免“启动时 provider”与“当前 provider”能力集合不一致。
+            app.mcp_registry
+                .inject_builtin_for_backend(app.backend.backend_label());
+            app.rebuild_system_message();
+            if app.mcp_discovery_rx.is_none() && app.mcp_registry.has_servers() {
+                let registry = app.mcp_registry.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(registry.run_discovery());
+                });
+                app.mcp_discovery_rx = Some(rx);
+            }
             sync_context_budget(app, screen);
             cancel_model_picker(app, screen);
             clear_input_buffer(app, screen);
@@ -622,6 +640,7 @@ pub(super) fn select_model_item(app: &mut App, screen: &mut Screen) {
                 app.backend.backend_label(),
                 app.backend.model_name()
             )];
+            lines.push("  已刷新当前 provider 的 MCP / system prompt。".to_string());
             app.pending_api_key_name = None;
             screen.status.clear();
             let key_name = app.backend.required_key_name().to_string();
