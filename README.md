@@ -243,9 +243,20 @@ description: 整理和处理 PDF 文件
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `BIGMODEL_API_KEY` | ✅ | — | BigModel API 密钥 |
+| `BIGMODEL_API_KEY` | 否 | — | BigModel API 密钥 |
+| `KIMI_API_KEY` | 否 | — | Kimi API 密钥 |
+| `MIMO_API_KEY` | 否 | — | Xiaomi MiMo API 密钥 |
+| `MINIMAX_API_KEY` | 否 | — | MiniMax API 密钥 |
+| `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`minimax` |
 | `BIGMODEL_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | API 基础 URL |
 | `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，支持 `GLM-4.7`、`glm-5`、`glm-5.1` |
+| `KIMI_BASE_URL` | 否 | `https://api.kimi.com/coding/v1` 或 `https://api.moonshot.cn/v1` | Kimi API 基础 URL |
+| `KIMI_MODEL` | 否 | `kimi-for-coding` 或 `kimi-k2.5` | Kimi 模型名称 |
+| `MIMO_BASE_URL` | 否 | `https://api.xiaomimimo.com/v1` | Xiaomi MiMo 普通 chat API 基础 URL |
+| `MIMO_MODEL` | 否 | `mimo-v2-pro` | Xiaomi MiMo 模型名称，支持 `mimo-v2-pro`、`mimo-v2-flash`、`mimo-v2-omni` |
+| `MIMO_CONTEXT_WINDOW_TOKENS` | 否 | `256000` | MiMo 上下文预算估算值 |
+| `MINIMAX_BASE_URL` | 否 | `https://api.minimaxi.com/v1` | MiniMax API 基础 URL |
+| `MINIMAX_MODEL` | 否 | `MiniMax-M2.5` | MiniMax 模型名称 |
 | `BOCHA_API_KEY` | 否 | — | Bocha AI 搜索密钥 |
 | `GOLDBOT_TASK` | 否 | — | 启动时直接执行的任务 |
 | `GOLDBOT_MCP_SERVERS` | 否 | — | MCP 配置 JSON（覆盖文件） |

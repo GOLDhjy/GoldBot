@@ -2,9 +2,10 @@ use anyhow::Result;
 
 mod glm;
 mod kimi;
+mod mimo;
 mod minimax;
 
-use self::{glm::GlmProvider, kimi::KimiProvider, minimax::MiniMaxProvider};
+use self::{glm::GlmProvider, kimi::KimiProvider, mimo::MimoProvider, minimax::MiniMaxProvider};
 
 // ── Conversation message types ────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ("GLM", &["glm-5", "glm-5.1", "glm-5v-turbo"]),
     ("Kimi", &["kimi-for-coding"]),
+    ("Mimo", &["mimo-v2-pro", "mimo-v2-flash", "mimo-v2-omni"]),
     (
         "MiniMax",
         &[
@@ -105,6 +107,7 @@ pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
 
 const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
+const DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 const DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS: u32 = 204_800;
 
 fn default_kimi_model() -> String {
@@ -122,14 +125,16 @@ fn default_kimi_model() -> String {
 // ── Backend selector ──────────────────────────────────────────────────────────
 
 /// 当前使用的 LLM 后端，内部持有已选定的模型名称。
-/// 通过 `LLM_PROVIDER=minimax/glm/kimi` 显式指定，
-/// 或自动检测：优先顺序为 Kimi > MiniMax > GLM。
+/// 通过 `LLM_PROVIDER=minimax/glm/kimi/mimo` 显式指定，
+/// 或自动检测：优先顺序为 Kimi > MiniMax > Mimo > GLM。
 #[derive(Clone)]
 pub(crate) enum LlmBackend {
     /// GLM 后端，持有当前选定的模型名。
     Glm(String),
     /// Kimi (Moonshot) 后端，持有当前选定的模型名。
     Kimi(String),
+    /// Xiaomi MiMo 普通 Chat 后端，持有当前选定的模型名。
+    Mimo(String),
     /// MiniMax 后端，持有当前选定的模型名。
     MiniMax(String),
 }
@@ -145,6 +150,11 @@ impl LlmBackend {
                 let model = std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
                 LlmBackend::Kimi(model)
             }
+            "mimo" => {
+                let model =
+                    std::env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo-v2-pro".to_string());
+                LlmBackend::Mimo(model)
+            }
             "minimax" => {
                 let model =
                     std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| "MiniMax-M2.5".to_string());
@@ -155,7 +165,7 @@ impl LlmBackend {
                 LlmBackend::Glm(model)
             }
             _ => {
-                // 自动检测优先级：Kimi > MiniMax > GLM
+                // 自动检测优先级：Kimi > MiniMax > Mimo > GLM
                 if std::env::var("KIMI_API_KEY").is_ok() {
                     let model =
                         std::env::var("KIMI_MODEL").unwrap_or_else(|_| default_kimi_model());
@@ -166,6 +176,12 @@ impl LlmBackend {
                     let model = std::env::var("MINIMAX_MODEL")
                         .unwrap_or_else(|_| "MiniMax-M2.5".to_string());
                     LlmBackend::MiniMax(model)
+                } else if std::env::var("MIMO_API_KEY").is_ok()
+                    && std::env::var("BIGMODEL_API_KEY").is_err()
+                {
+                    let model =
+                        std::env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo-v2-pro".to_string());
+                    LlmBackend::Mimo(model)
                 } else {
                     let model =
                         std::env::var("BIGMODEL_MODEL").unwrap_or_else(|_| "glm-5".to_string());
@@ -180,6 +196,7 @@ impl LlmBackend {
         match self {
             Self::Glm(_) => "GLM",
             Self::Kimi(_) => "Kimi",
+            Self::Mimo(_) => "Mimo",
             Self::MiniMax(_) => "MiniMax",
         }
     }
@@ -187,7 +204,7 @@ impl LlmBackend {
     /// 当前选定的模型名。
     pub(crate) fn model_name(&self) -> &str {
         match self {
-            Self::Glm(m) | Self::Kimi(m) | Self::MiniMax(m) => m,
+            Self::Glm(m) | Self::Kimi(m) | Self::Mimo(m) | Self::MiniMax(m) => m,
         }
     }
 
@@ -196,11 +213,13 @@ impl LlmBackend {
             .or_else(|| match self {
                 Self::Glm(_) => env_u32("BIGMODEL_CONTEXT_WINDOW_TOKENS"),
                 Self::Kimi(_) => env_u32("KIMI_CONTEXT_WINDOW_TOKENS"),
+                Self::Mimo(_) => env_u32("MIMO_CONTEXT_WINDOW_TOKENS"),
                 Self::MiniMax(_) => env_u32("MINIMAX_CONTEXT_WINDOW_TOKENS"),
             })
             .unwrap_or_else(|| match self {
                 Self::Glm(_) => DEFAULT_GLM_CONTEXT_WINDOW_TOKENS,
                 Self::Kimi(_) => DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS,
+                Self::Mimo(_) => DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS,
                 Self::MiniMax(_) => DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS,
             })
     }
@@ -233,6 +252,18 @@ impl LlmBackend {
             }
             Self::Kimi(model) => {
                 KimiProvider
+                    .chat_stream_with(
+                        client,
+                        messages,
+                        model,
+                        show_thinking,
+                        on_delta,
+                        on_thinking_delta,
+                    )
+                    .await
+            }
+            Self::Mimo(model) => {
+                MimoProvider
                     .chat_stream_with(
                         client,
                         messages,
@@ -285,6 +316,11 @@ impl LlmBackend {
                 std::env::var("MINIMAX_BASE_URL")
                     .unwrap_or_else(|_| "https://api.minimaxi.com/v1".to_string()),
             ),
+            Self::Mimo(model) => (
+                model.clone(),
+                std::env::var("MIMO_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".to_string()),
+            ),
         }
     }
 
@@ -293,6 +329,7 @@ impl LlmBackend {
         match self {
             Self::Glm(_) => "BIGMODEL_API_KEY",
             Self::Kimi(_) => "KIMI_API_KEY",
+            Self::Mimo(_) => "MIMO_API_KEY",
             Self::MiniMax(_) => "MINIMAX_API_KEY",
         }
     }
@@ -345,5 +382,18 @@ mod tests {
         assert!(!minimax_models.contains(&"MiniMax-M2.1"));
         assert!(!minimax_models.contains(&"MiniMax-M2.1-highspeed"));
         assert!(!minimax_models.contains(&"MiniMax-M2"));
+    }
+
+    #[test]
+    fn mimo_backend_presets_include_current_models() {
+        let mimo_models = BACKEND_PRESETS
+            .iter()
+            .find(|(label, _)| *label == "Mimo")
+            .map(|(_, models)| *models)
+            .expect("Mimo backend preset should exist");
+
+        assert!(mimo_models.contains(&"mimo-v2-pro"));
+        assert!(mimo_models.contains(&"mimo-v2-flash"));
+        assert!(mimo_models.contains(&"mimo-v2-omni"));
     }
 }

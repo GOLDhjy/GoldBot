@@ -86,6 +86,7 @@ fn is_placeholder_api_key(key_name: &str, value: &str) -> bool {
     let known_placeholder = match key_name {
         "BIGMODEL_API_KEY" => "your_bigmodel_api_key_here",
         "KIMI_API_KEY" => "your_kimi_api_key_here",
+        "MIMO_API_KEY" => "your_mimo_api_key_here",
         "MINIMAX_API_KEY" => "your_minimax_api_key_here",
         _ => "",
     };
@@ -465,11 +466,13 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
 
     let provider_value = match backend_label {
         "Kimi" => "kimi",
+        "Mimo" => "mimo",
         "MiniMax" => "minimax",
         _ => "glm",
     };
     let model_key = match backend_label {
         "Kimi" => "KIMI_MODEL",
+        "Mimo" => "MIMO_MODEL",
         "MiniMax" => "MINIMAX_MODEL",
         _ => "BIGMODEL_MODEL",
     };
@@ -604,6 +607,7 @@ pub(super) fn select_model_item(app: &mut App, screen: &mut Screen) {
             let model = value;
             app.backend = match backend.as_str() {
                 "Kimi" => crate::agent::provider::LlmBackend::Kimi(model.clone()),
+                "Mimo" => crate::agent::provider::LlmBackend::Mimo(model.clone()),
                 "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
                 _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
             };
