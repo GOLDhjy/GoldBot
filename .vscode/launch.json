@@ -1,0 +1,63 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // 普通交互模式（TUI）
+            "type": "lldb",
+            "request": "launch",
+            "name": "GoldBot (TUI)",
+            "cargo": {
+                "args": ["build", "--bin=GoldBot"],
+                "filter": { "name": "GoldBot", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "terminal": "integrated",
+            "initCommands": [
+                "settings set target.max-string-summary-length 10000"
+            ]
+        },
+        {
+            // Headless 模式：传入 -p 任务，不占用 TUI，方便断点调试逻辑
+            "type": "lldb",
+            "request": "launch",
+            "name": "GoldBot (headless -p)",
+            "cargo": {
+                "args": ["build", "--bin=GoldBot"],
+                "filter": { "name": "GoldBot", "kind": "bin" }
+            },
+            "args": ["-p", "列出当前目录下的 Rust 文件"],
+            "cwd": "${workspaceFolder}",
+            "terminal": "console"
+        },
+        {
+            // 用环境变量预填任务，启动即运行
+            "type": "lldb",
+            "request": "launch",
+            "name": "GoldBot (GOLDBOT_TASK)",
+            "cargo": {
+                "args": ["build", "--bin=GoldBot"],
+                "filter": { "name": "GoldBot", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "GOLDBOT_TASK": "列出当前目录的大文件"
+            },
+            "terminal": "console"
+        },
+        {
+            // 运行单元测试（cargo test）
+            "type": "lldb",
+            "request": "launch",
+            "name": "GoldBot (cargo test)",
+            "cargo": {
+                "args": ["test", "--no-run", "--bin=GoldBot"],
+                "filter": { "name": "GoldBot", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "terminal": "console"
+        }
+    ]
+}
