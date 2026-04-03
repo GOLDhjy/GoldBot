@@ -51,6 +51,8 @@ pub(crate) const MAX_COMPACTION_SUMMARY_ITEMS: usize = 8;
 
 // ── App ───────────────────────────────────────────────────────────────────────
 pub(crate) struct App {
+    /// 发给 LLM 的协议级对话轨迹。
+    /// 这里保存用户/assistant 原始消息，以及 synthetic 的 tool result 回灌消息。
     pub messages: Vec<Message>,
     pub task: String,
     pub steps_taken: usize,
@@ -70,7 +72,7 @@ pub(crate) struct App {
     pub dag_result_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<DagResult>>>,
     pub dag_progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<agent::dag::NodeProgress>>,
     pub dag_cancel_flag: Arc<AtomicBool>,
-    /// Index of the DAG tree ToolCall event in task_events, for in-place updates
+    /// `task_events` 中 DAG 树 ToolCall 事件的索引，用于原地刷新展示。
     pub dag_tree_event_idx: Option<usize>,
     /// node_id -> (success, elapsed_secs)
     pub dag_node_done: std::collections::HashMap<String, (bool, f64)>,
@@ -86,8 +88,11 @@ pub(crate) struct App {
     pub quit: bool,
     pub pending_confirm: Option<String>,
     pub pending_confirm_note: bool,
-    /// Current user-visible phase summary set by the LLM via the phase tool.
-    pub current_phase: Option<String>,
+    /// 当前阶段摘要。
+    /// 可由 LLM 的 `phase` 工具显式设置，也可由运行时自动生成用于中间进度展示。
+    pub current_phase_summary: Option<String>,
+    /// 当前任务的展示事件日志，仅供 TUI 渲染。
+    /// 这里允许折叠、美化、压缩，绝不能作为 LLM 上下文来源。
     pub task_events: Vec<Event>,
     pub final_summary: Option<String>,
     pub task_collapsed: bool,
@@ -275,7 +280,7 @@ impl App {
             pending_confirm: None,
 
             pending_confirm_note: false,
-            current_phase: None,
+            current_phase_summary: None,
             task_events: Vec::new(),
             final_summary: None,
             task_collapsed: false,
@@ -643,4 +648,3 @@ mod tests {
         assert!(!should_run_pending_manual_compact(&app));
     }
 }
-

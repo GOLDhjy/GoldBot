@@ -16,11 +16,14 @@ You are GoldBot, a terminal automation agent. Complete tasks step by step using 
 ## Rules
 - 复杂或者消耗大量token任务优先使用Sub Agent DAG来拆分任务,避免一次性执行过多操作。
 - When asked to plan implementation, use <tool>set_mode</tool> with <mode>plan</mode>, then follow the 'plan mode' flow.
-- One blocking tool call per response. &lt;tool&gt;phase&lt;/tool&gt; are non-blocking and may be included too.
-- Use <tool>phase</tool> to write what to do next (one short sentence). Update it when the stage changes; omit it if unchanged.
+- One blocking tool call per response. &lt;tool&gt;phase&lt;/tool&gt; is non-blocking and optional.
+- Keep <thought> concise. It is for structured execution, not repetitive user-facing progress narration.
+- Do not use <thought> just to restate every upcoming tool call. Prefer tool labels and results to show progress.
+- If reasoning is obvious, keep <thought> minimal.
+- Use <tool>phase</tool> when you decide the user would benefit from a short stage summary between tool batches. It is optional; do not emit it for every tool call.
 - <final> is rendered in the terminal: headings (#/##), lists (-/*), inline **bold**/`code`, and diffs are all supported. Use them for clarity,Start with the conclusion.不要有 Emoji
 - Use <final> as soon as done; avoid extra commands.
-- The current phase is shown in the running UI and fed back with later tool results, so you must maintain it yourself when the task enters a new stage.
+- If you do use <tool>phase</tool>, the current phase is shown in the running UI and fed back with later tool results, so you must maintain it yourself when the task enters a new stage.
 - On failure, diagnose from output and try a different approach.
 - Shell: {SHELL_HINT}.
 
@@ -54,12 +57,13 @@ Memory guidelines:
 <mode>agent</mode>
 `<mode>` 可选值：`agent` / `plan`
 
-Phase update (non-blocking; write what to do next):
+Phase update (non-blocking; optional, only for explicit stage changes):
 <thought>reasoning</thought>
 <tool>phase</tool>
 <phase>what to do next (one short sentence)</phase>
+Use this only when you want to publish a short stage summary chosen by the LLM itself.
 
-Update file (replace lines by line number; always use <tool>read</tool> first to get line numbers):
+Update file (replace lines by line number; immediately before every <tool>update</tool>, you must re-run <tool>read</tool> on the same file to refresh line numbers; never reuse line numbers from an earlier read):
 <thought>reasoning</thought>
 <tool>update</tool>
 <path>relative/or/absolute/path</path>
@@ -73,7 +77,7 @@ Write file (create a new file; also overwrites existing):
 <path>relative/or/absolute/path</path>
 <content>full file content here</content>
 
-Read file (each line prefixed with its line number `N: content`; use these numbers directly with <tool>update</tool>):
+Read file (each line prefixed with its line number `N: content`; always re-read the same file immediately before <tool>update</tool>, then use only those fresh line numbers):
 <thought>reasoning</thought>
 <tool>read</tool>
 <path>relative/or/absolute/path</path>
@@ -804,6 +808,23 @@ mod tests {
         assert!(prompt.contains("Before every response, decide whether the conversation introduced something that should be remembered for future tasks."));
         assert!(prompt.contains("If the user explicitly asks you to remember, record, save, or keep something for next time, you must emit a <memory> tag."));
         assert!(prompt.contains("Good candidates include preferred language, work directories, repo locations, tooling preferences, recurring workflow rules, and long-lived constraints."));
+    }
+
+    #[test]
+    fn build_system_prompt_requires_reread_before_update() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("immediately before every <tool>update</tool>, you must re-run <tool>read</tool> on the same file"));
+        assert!(prompt.contains("always re-read the same file immediately before <tool>update</tool>"));
+        assert!(prompt.contains("never reuse line numbers from an earlier read"));
+    }
+
+    #[test]
+    fn build_system_prompt_keeps_thought_out_of_routine_progress() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Keep <thought> concise. It is for structured execution"));
+        assert!(prompt.contains("Do not use <thought> just to restate every upcoming tool call."));
+        assert!(prompt.contains("If reasoning is obvious, keep <thought> minimal."));
+        assert!(prompt.contains("Use <tool>phase</tool> when you decide the user would benefit from a short stage summary"));
     }
 
     #[test]

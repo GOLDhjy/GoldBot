@@ -202,7 +202,7 @@ pub enum Event {
     Thinking {
         text: String,
     },
-    Phase {
+    PhaseSummary {
         text: String,
     },
     ToolCall {

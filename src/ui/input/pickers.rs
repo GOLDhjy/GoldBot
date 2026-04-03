@@ -330,7 +330,7 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
             app.final_summary = None;
             app.running = false;
             app.needs_agent_executor = false;
-            app.current_phase = None;
+            app.current_phase_summary = None;
             app.task_started_at = None;
             app.last_task_elapsed = None;
             app.pending_confirm = None;

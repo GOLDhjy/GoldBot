@@ -280,7 +280,7 @@ impl Session {
         app.interjection_mode = false;
         app.pending_confirm = None;
         app.pending_confirm_note = false;
-        app.current_phase = None;
+        app.current_phase_summary = None;
         app.task_events.clear();
         app.final_summary = None;
         app.task_collapsed = false;

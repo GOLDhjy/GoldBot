@@ -74,7 +74,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
-    app.current_phase = None;
+    app.current_phase_summary = None;
     screen.confirm_selected = None;
     screen.input_focused = true;
     app.task_events.clear();
@@ -137,7 +137,7 @@ pub(crate) fn process_llm_result(
     app.total_usage.completion_tokens += usage.completion_tokens;
     app.total_usage.total_tokens += usage.total_tokens;
 
-    let (thought, actions) = match parse_llm_response(&response) {
+    let (_thought, actions) = match parse_llm_response(&response) {
         Ok(parsed) => parsed,
         Err(e) => {
             app.messages.push(Message::assistant(response));
@@ -158,12 +158,8 @@ pub(crate) fn process_llm_result(
         }
     };
 
-    if !thought.is_empty() {
-        let ev = Event::Thinking { text: thought };
-        // <thought> 是结构化输出的一部分，应始终作为独立事件显示在后续工具调用之前。
-        emit_live_event(screen, &ev);
-        app.task_events.push(ev);
-    }
+    // 结构化 <thought> 不再写入持久事件，避免在工具调用前刷屏；
+    // 但仍保留在 assistant 原始响应里回灌到下一轮上下文，维持轨迹完整性。
     app.messages.push(Message::assistant(response));
     sync_context_budget(app, screen);
 
@@ -198,7 +194,7 @@ pub(crate) fn process_llm_result(
             LlmAction::Phase { text } => {
                 let text = text.trim();
                 if !text.is_empty() {
-                    emit_phase_event(app, screen, text);
+                    emit_phase_summary_event(app, screen, text);
                 }
                 had_non_blocking_only = true;
             }
@@ -255,13 +251,7 @@ pub(crate) fn process_llm_result(
                         app.task_events.push(call_ev);
 
                         let msg = "Command blocked by safety policy";
-                        push_tool_result_to_llm(app, "Tool result:", msg);
-                        let ev = Event::ToolResult {
-                            exit_code: -1,
-                            output: msg.to_string(),
-                        };
-                        emit_live_event(screen, &ev);
-                        app.task_events.push(ev);
+                        record_tool_result(app, screen, "Tool result:", -1, msg);
                         app.needs_agent_executor = true;
                     }
                 }
@@ -414,9 +404,13 @@ pub(crate) fn process_llm_result(
 
                 // 获取 http_client
                 let Some(http_client) = app.http_client.clone() else {
-                    app.messages.push(Message::user(
-                        "[SubAgent error: HTTP client not initialized]".to_string(),
-                    ));
+                    record_tool_result(
+                        app,
+                        screen,
+                        "Tool result (exit=-1):",
+                        -1,
+                        "[SubAgent error: HTTP client not initialized]",
+                    );
                     app.needs_agent_executor = true;
                     break 'actions;
                 };
@@ -558,46 +552,80 @@ fn render_plan(screen: &mut Screen, content: &str) {
     screen.emit(&lines);
 }
 
-pub(crate) fn emit_phase_event(app: &mut App, screen: &mut Screen, text: &str) {
+pub(crate) fn emit_phase_summary_event(app: &mut App, screen: &mut Screen, text: &str) {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let normalized = shorten_text(&normalized, 180);
     if normalized.is_empty() {
         return;
     }
-    if app.current_phase.as_deref() == Some(normalized.as_str()) {
+    if app.current_phase_summary.as_deref() == Some(normalized.as_str()) {
         return;
     }
-    app.current_phase = Some(normalized.clone());
-    let ev = Event::Phase { text: normalized };
+    app.current_phase_summary = Some(normalized.clone());
+    let ev = Event::PhaseSummary { text: normalized };
     emit_live_event(screen, &ev);
     app.task_events.push(ev);
 }
 
 pub(crate) fn push_tool_result_to_llm(app: &mut App, header: &str, body: &str) {
-    let mut msg = String::new();
-    msg.push_str(header);
-    msg.push('\n');
-    if let Some(phase) = app.current_phase.as_deref().map(str::trim) {
+    // 这里只维护 LLM 上下文里的协议消息，绝不复用 TUI 展示层的折叠/美化结果。
+    let mut context_message = String::new();
+    context_message.push_str(header);
+    context_message.push('\n');
+    if let Some(phase) = app.current_phase_summary.as_deref().map(str::trim) {
         if !phase.is_empty() {
-            msg.push_str("Current phase: ");
-            msg.push_str(phase);
-            msg.push_str("\nResult:\n");
+            context_message.push_str("Current phase: ");
+            context_message.push_str(phase);
+            context_message.push_str("\nResult:\n");
         }
     }
-    msg.push_str(body);
-    app.messages.push(Message::user(msg));
+    context_message.push_str(body);
+    app.messages.push(Message::user(context_message));
+}
+
+fn emit_tool_result_event(
+    app: &mut App,
+    screen: &mut Screen,
+    exit_code: i32,
+    display_output: impl Into<String>,
+) {
+    let ev = Event::ToolResult {
+        exit_code,
+        output: display_output.into(),
+    };
+    emit_live_event(screen, &ev);
+    app.task_events.push(ev);
+}
+
+fn record_tool_result(
+    app: &mut App,
+    screen: &mut Screen,
+    header: &str,
+    exit_code: i32,
+    output: impl Into<String>,
+) {
+    let output = output.into();
+    push_tool_result_to_llm(app, header, &output);
+    emit_tool_result_event(app, screen, exit_code, output);
+}
+
+fn record_tool_result_with_display<C: Into<String>, D: Into<String>>(
+    app: &mut App,
+    screen: &mut Screen,
+    header: &str,
+    exit_code: i32,
+    context_body: C,
+    display_output: D,
+) {
+    let context_body = context_body.into();
+    push_tool_result_to_llm(app, header, &context_body);
+    emit_tool_result_event(app, screen, exit_code, display_output);
 }
 
 pub(crate) fn execute_command(app: &mut App, screen: &mut Screen, cmd: &str) {
     if app.shell_task_running {
         let msg = "Another shell task is still running. Please wait.";
-        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
-        let ev = Event::ToolResult {
-            exit_code: -1,
-            output: msg.to_string(),
-        };
-        emit_live_event(screen, &ev);
-        app.task_events.push(ev);
+        record_tool_result(app, screen, "Tool result (exit=-1):", -1, msg);
         app.needs_agent_executor = true;
         return;
     }
@@ -642,23 +670,11 @@ pub(crate) fn execute_mcp_tool(app: &mut App, screen: &mut Screen, tool: &str, a
     match run_blocking_compat(|| app.mcp_registry.execute_tool(tool, arguments)) {
         Ok(out) => {
             let header = format!("Tool result (exit={}):", out.exit_code);
-            push_tool_result_to_llm(app, &header, &out.output);
-            let ev = Event::ToolResult {
-                exit_code: out.exit_code,
-                output: out.output,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, &header, out.exit_code, out.output);
         }
         Err(e) => {
             let err = format!("MCP execution failed: {e}");
-            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-            let ev = Event::ToolResult {
-                exit_code: -1,
-                output: err,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
         }
     }
 }
@@ -672,22 +688,10 @@ pub(crate) fn handle_shell_exec_result(
         ShellExecResult::Command { result } => match result {
             Ok(out) => {
                 let header = format!("Tool result (exit={}):", out.exit_code);
-                push_tool_result_to_llm(app, &header, &out.output);
-                let ev = Event::ToolResult {
-                    exit_code: out.exit_code,
-                    output: out.output,
-                };
-                emit_live_event(screen, &ev);
-                app.task_events.push(ev);
+                record_tool_result(app, screen, &header, out.exit_code, out.output);
             }
             Err(err) => {
-                push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-                let ev = Event::ToolResult {
-                    exit_code: -1,
-                    output: err,
-                };
-                emit_live_event(screen, &ev);
-                app.task_events.push(ev);
+                record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
             }
         },
         ShellExecResult::Search { result } => match result {
@@ -700,22 +704,10 @@ pub(crate) fn handle_shell_exec_result(
                     if r.file_count == 1 { "" } else { "s" },
                 );
                 let llm_msg = format!("{}\n{}", summary, r.output);
-                push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
-                let ev = Event::ToolResult {
-                    exit_code: 0,
-                    output: llm_msg,
-                };
-                emit_live_event(screen, &ev);
-                app.task_events.push(ev);
+                record_tool_result(app, screen, "Tool result (exit=0):", 0, llm_msg);
             }
             Err(err) => {
-                push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-                let ev = Event::ToolResult {
-                    exit_code: -1,
-                    output: err,
-                };
-                emit_live_event(screen, &ev);
-                app.task_events.push(ev);
+                record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
             }
         },
     }
@@ -821,7 +813,6 @@ pub(crate) fn execute_update_file(
             let llm_msg = format!(
                 "File updated: lines {line_start}-{line_end} replaced (+{added} -{deleted})\n{diff_text}"
             );
-            push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             // 格式化为 "Diff path:" 块，复用现有的背景色渲染逻辑
             let mut tool_output = format!(
                 "Added {added} {}, removed {deleted} {}\nDiff {path}:\n",
@@ -831,22 +822,11 @@ pub(crate) fn execute_update_file(
             for line in diff_text.lines() {
                 tool_output.push_str(&format!("  {line}\n"));
             }
-            let result_ev = Event::ToolResult {
-                exit_code: 0,
-                output: tool_output,
-            };
-            emit_live_event(screen, &result_ev);
-            app.task_events.push(result_ev);
+            record_tool_result_with_display(app, screen, "Tool result:", 0, llm_msg, tool_output);
         }
         Err(e) => {
             let output = format!("更新失败: {e}");
-            push_tool_result_to_llm(app, "Tool result:", &output);
-            let result_ev = Event::ToolResult {
-                exit_code: 1,
-                output,
-            };
-            emit_live_event(screen, &result_ev);
-            app.task_events.push(result_ev);
+            record_tool_result(app, screen, "Tool result:", 1, output);
         }
     }
 }
@@ -885,27 +865,15 @@ pub(crate) fn execute_write_file(app: &mut App, screen: &mut Screen, path: &str,
             let _ = Session::current()
                 .append_diff_to_session(path, &[(path.to_string(), diff_text.clone())]);
             let llm_msg = format!("File written: {path}\n{diff_text}");
-            push_tool_result_to_llm(app, "Tool result:", &llm_msg);
             let mut tool_output = format!("Write {path}:\n");
             for line in diff_text.lines() {
                 tool_output.push_str(&format!("  {line}\n"));
             }
-            let result_ev = Event::ToolResult {
-                exit_code: 0,
-                output: tool_output,
-            };
-            emit_live_event(screen, &result_ev);
-            app.task_events.push(result_ev);
+            record_tool_result_with_display(app, screen, "Tool result:", 0, llm_msg, tool_output);
         }
         Err(e) => {
             let output = format!("写入失败: {e}");
-            push_tool_result_to_llm(app, "Tool result:", &output);
-            let result_ev = Event::ToolResult {
-                exit_code: 1,
-                output,
-            };
-            emit_live_event(screen, &result_ev);
-            app.task_events.push(result_ev);
+            record_tool_result(app, screen, "Tool result:", 1, output);
         }
     }
 }
@@ -972,23 +940,11 @@ pub(crate) fn execute_read_file(
 
     match result {
         Ok(output) => {
-            push_tool_result_to_llm(app, "Tool result:", &output);
-            let ev = Event::ToolResult {
-                exit_code: 0,
-                output,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result:", 0, output);
         }
         Err(e) => {
             let output = format!("读取失败: {e}");
-            push_tool_result_to_llm(app, "Tool result:", &output);
-            let ev = Event::ToolResult {
-                exit_code: 1,
-                output,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result:", 1, output);
         }
     }
 }
@@ -996,13 +952,7 @@ pub(crate) fn execute_read_file(
 pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: &str, path: &str) {
     if app.shell_task_running {
         let msg = "Another task is still running. Please wait.";
-        push_tool_result_to_llm(app, "Tool result (exit=-1):", msg);
-        let ev = Event::ToolResult {
-            exit_code: -1,
-            output: msg.to_string(),
-        };
-        emit_live_event(screen, &ev);
-        app.task_events.push(ev);
+        record_tool_result(app, screen, "Tool result (exit=-1):", -1, msg);
         app.needs_agent_executor = true;
         return;
     }
@@ -1048,23 +998,11 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
 
     match run_blocking_compat(|| crate::tools::web_search::search(query)) {
         Ok(result) => {
-            push_tool_result_to_llm(app, "Tool result (exit=0):", &result.output);
-            let ev = Event::ToolResult {
-                exit_code: 0,
-                output: result.output,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result (exit=0):", 0, result.output);
         }
         Err(e) => {
             let err = format!("web search failed: {e}");
-            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-            let ev = Event::ToolResult {
-                exit_code: -1,
-                output: err,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
         }
     }
 }
@@ -1087,23 +1025,11 @@ pub(crate) fn execute_glob_files(app: &mut App, screen: &mut Screen, pattern: &s
                 if result.match_count == 1 { "" } else { "s" }
             );
             let llm_msg = format!("{}\n{}", summary, result.output);
-            push_tool_result_to_llm(app, "Tool result (exit=0):", &llm_msg);
-            let ev = Event::ToolResult {
-                exit_code: 0,
-                output: llm_msg,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result (exit=0):", 0, llm_msg);
         }
         Err(e) => {
             let err = format!("glob failed: {e}");
-            push_tool_result_to_llm(app, "Tool result (exit=-1):", &err);
-            let ev = Event::ToolResult {
-                exit_code: -1,
-                output: err,
-            };
-            emit_live_event(screen, &ev);
-            app.task_events.push(ev);
+            record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
         }
     }
 }
@@ -1156,9 +1082,13 @@ pub(crate) fn execute_task(
     screen.refresh();
 
     let Some(http_client) = app.http_client.clone() else {
-        app.messages.push(Message::user(
-            "[Task error: HTTP client not initialized]".to_string(),
-        ));
+        record_tool_result(
+            app,
+            screen,
+            "Tool result (exit=-1):",
+            -1,
+            "[Task error: HTTP client not initialized]",
+        );
         app.needs_agent_executor = true;
         return;
     };
@@ -1192,8 +1122,29 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    let msg = skill_tool_result(&app.skills, name);
-    app.messages.push(Message::user(msg));
+    let found = app.skills.iter().any(|skill| skill.name == name);
+    let context_msg = skill_tool_result(&app.skills, name);
+    let display_msg = if found {
+        format!("Loaded skill `{name}`")
+    } else {
+        format!("Skill `{name}` not found")
+    };
+    let header = if found {
+        "Tool result (exit=0):"
+    } else {
+        "Tool result (exit=-1):"
+    };
+    let exit_code = if found { 0 } else { -1 };
+    // 上下文里需要注入完整 skill 内容，供下一轮继续执行；
+    // TUI 只显示一条短结果，避免把整份 skill 文本刷到事件流里。
+    record_tool_result_with_display(
+        app,
+        screen,
+        header,
+        exit_code,
+        context_msg,
+        display_msg,
+    );
     sync_context_budget(app, screen);
 }
 
@@ -1224,13 +1175,7 @@ pub(crate) fn create_mcp(app: &mut App, screen: &mut Screen, config: &serde_json
         Err(e) => (1, format!("Failed to create MCP server: {e}")),
     };
 
-    let ev = Event::ToolResult {
-        exit_code,
-        output: result_msg.clone(),
-    };
-    emit_live_event(screen, &ev);
-    app.task_events.push(ev);
-    push_tool_result_to_llm(app, "Tool result:", &result_msg);
+    record_tool_result(app, screen, "Tool result:", exit_code, result_msg);
 }
 
 pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
@@ -1277,7 +1222,7 @@ pub(crate) fn finish(app: &mut App, screen: &mut Screen, summary: String) {
     app.pending_confirm = None;
 
     app.pending_confirm_note = false;
-    app.current_phase = None;
+    app.current_phase_summary = None;
     screen.confirm_selected = None;
     screen.input_focused = true;
     screen.status = match total_elapsed {
@@ -1977,14 +1922,21 @@ pub(crate) fn poll_dag_result(app: &mut App, screen: &mut Screen) {
                     };
                     emit_live_event(screen, &tree_ev);
                     app.task_events.push(tree_ev);
-                    app.messages.push(Message::user(format!(
-                        "[SubAgent DAG result]:\n{}",
-                        dag_result.output
-                    )));
+                    let header = if dag_result.has_failures {
+                        "Tool result (exit=-1):"
+                    } else {
+                        "Tool result (exit=0):"
+                    };
+                    // DAG 结果完整写回 messages，供主代理消费；
+                    // 展示层继续用树形 ToolCall 事件，避免重复输出大段 result。
+                    push_tool_result_to_llm(app, header, &dag_result.output);
                 }
                 Err(e) => {
-                    app.messages
-                        .push(Message::user(format!("[SubAgent DAG failed: {e}]")));
+                    push_tool_result_to_llm(
+                        app,
+                        "Tool result (exit=-1):",
+                        &format!("[SubAgent DAG failed: {e}]"),
+                    );
                 }
             }
             app.needs_agent_executor = true;
@@ -1993,9 +1945,11 @@ pub(crate) fn poll_dag_result(app: &mut App, screen: &mut Screen) {
         Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
             app.dag_result_rx = None;
             app.dag_task_running = false;
-            app.messages.push(Message::user(
-                "[SubAgent DAG: worker disconnected]".to_string(),
-            ));
+            push_tool_result_to_llm(
+                app,
+                "Tool result (exit=-1):",
+                "[SubAgent DAG: worker disconnected]",
+            );
             app.needs_agent_executor = true;
         }
     }
@@ -2092,9 +2046,9 @@ pub(crate) async fn shutdown_background_work(
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS, dynamic_compact_reserve_tokens,
-        estimate_prompt_tokens_raw, format_token_count_short, session_task_for_round,
-        truncate_utf8_prefix,
+        COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS,
+        dynamic_compact_reserve_tokens, estimate_prompt_tokens_raw, format_token_count_short,
+        session_task_for_round, truncate_utf8_prefix,
     };
     use crate::agent::provider::Message;
     use crate::types::{Event, TodoItem, TodoStatus};
