@@ -132,7 +132,7 @@ Trigger with `GE` prefix in input.
 | Variable | Required | Default | Purpose |
 |---|---|---|
 | `BIGMODEL_API_KEY` | Yes | — | GLM API key |
-| `BIGMODEL_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | API endpoint |
+| `BIGMODEL_CODING_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM coding endpoint |
 | `BIGMODEL_MODEL` | No | `GLM-4.7` | Model name |
 | `BOCHA_API_KEY` | No | — | Bocha AI search key |
 | `GOLDBOT_TASK` | No | — | Predefined task on startup |

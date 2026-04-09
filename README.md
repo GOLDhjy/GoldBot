@@ -248,7 +248,7 @@ description: 整理和处理 PDF 文件
 | `MIMO_API_KEY` | 否 | — | Xiaomi MiMo API 密钥 |
 | `MINIMAX_API_KEY` | 否 | — | MiniMax API 密钥 |
 | `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`minimax` |
-| `BIGMODEL_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM API 基础 URL，默认走 coding 端点 |
+| `BIGMODEL_CODING_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API 基础 URL，未设置时默认走 coding 端点 |
 | `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，默认预设为 `glm-5`、`glm-5.1`、`glm-5v-turbo` |
 | `KIMI_BASE_URL` | 否 | `https://api.kimi.com/coding/v1` 或 `https://api.moonshot.cn/v1` | Kimi API 基础 URL |
 | `KIMI_MODEL` | 否 | `kimi-for-coding` 或 `kimi-k2.5` | Kimi 模型名称 |

@@ -115,11 +115,6 @@ impl LlmProvider for GlmProvider {
 }
 
 pub(crate) fn base_url_from_env() -> String {
-    if let Ok(value) = std::env::var("BIGMODEL_BASE_URL")
-        && !value.trim().is_empty()
-    {
-        return value;
-    }
     if let Ok(value) = std::env::var("BIGMODEL_CODING_BASE_URL")
         && !value.trim().is_empty()
     {
@@ -345,6 +340,36 @@ mod tests {
             DEFAULT_BASE_URL,
             "https://open.bigmodel.cn/api/coding/paas/v4"
         );
+    }
+
+    #[test]
+    fn glm_ignores_legacy_base_url_override() {
+        unsafe {
+            std::env::set_var("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4");
+            std::env::remove_var("BIGMODEL_CODING_BASE_URL");
+        }
+
+        assert_eq!(base_url_from_env(), DEFAULT_BASE_URL);
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn glm_uses_coding_base_url_override_when_present() {
+        let custom = "https://example.com/custom/coding";
+        unsafe {
+            std::env::set_var("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4");
+            std::env::set_var("BIGMODEL_CODING_BASE_URL", custom);
+        }
+
+        assert_eq!(base_url_from_env(), custom);
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_BASE_URL");
+            std::env::remove_var("BIGMODEL_CODING_BASE_URL");
+        }
     }
 
     #[test]

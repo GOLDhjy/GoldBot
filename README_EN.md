@@ -239,7 +239,7 @@ Config is stored at `~/.goldbot/.env` — auto-created from template on first ru
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `BIGMODEL_API_KEY` | ✅ | — | BigModel API key |
-| `BIGMODEL_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | API base URL |
+| `BIGMODEL_CODING_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API base URL |
 | `BIGMODEL_MODEL` | No | `glm-5` | Model name. Supports `GLM-4.7`, `glm-5`, and `glm-5.1` |
 | `BOCHA_API_KEY` | No | — | Bocha AI search key |
 | `GOLDBOT_TASK` | No | — | Task to run immediately on startup |

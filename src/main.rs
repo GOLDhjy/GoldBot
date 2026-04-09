@@ -369,12 +369,13 @@ async fn main() -> anyhow::Result<()> {
     let (cli_prompt, cli_yes) = cli::parse_cli_args();
     let headless = cli_prompt.is_some();
 
-    // Create ~/.goldbot/.env from template if it doesn't exist yet.
+    // 先确保 ~/.goldbot/.env 存在，再在启动早期加载，
+    // 避免 App::new() 和 HTTP client 初始化读到的是未加载配置的默认环境。
     cli::ensure_dot_env();
+    let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
     let http_client = build_http_client()?;
     let mut app = App::new();
     app.http_client = Some(http_client.clone());
-    let _ = dotenvy::from_path(crate::tools::mcp::goldbot_home_dir().join(".env"));
 
     if !headless {
         enable_raw_mode()?;
