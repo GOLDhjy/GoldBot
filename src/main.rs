@@ -151,6 +151,10 @@ pub(crate) struct App {
     pub http_client: Option<reqwest::Client>,
     /// 用户通过 /compact 命令请求手动压缩
     pub pending_manual_compact: bool,
+    /// 当前任务内已加载的 skill 完整内容列表。
+    /// 在 start_task 时清空，每次 load_skill 时追加，
+    /// 派发 Sub-Agent 时注入到子代理初始上下文，确保 skill 上下文不丢失。
+    pub active_skill_contents: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +319,7 @@ impl App {
             recent_completion_tokens_ema: 0,
             http_client: None,
             pending_manual_compact: false,
+            active_skill_contents: Vec::new(),
         }
     }
     /// Rebuild messages[0] (system prompt) with the latest base_prompt + MCP tools + workspace context.
@@ -560,6 +565,11 @@ async fn run_loop(
 
         if app.quit {
             shutdown_background_work(app, screen, &mut llm_task_handle).await;
+            // 退出时删除 debug 日志（仅在开启了 GOLDBOT_DEBUG_LOG 时才有该文件）。
+            if !std::env::var("GOLDBOT_DEBUG_LOG").unwrap_or_default().is_empty() {
+                let log_path = crate::tools::mcp::goldbot_home_dir().join("llm_context.log");
+                let _ = std::fs::remove_file(&log_path);
+            }
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

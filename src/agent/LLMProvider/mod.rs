@@ -5,6 +5,37 @@ mod kimi;
 mod mimo;
 mod minimax;
 
+// ── Debug context logger ──────────────────────────────────────────────────────
+/// 若 `GOLDBOT_DEBUG_LOG` 非空，则将每次 LLM 调用前的完整消息列表追加写入
+/// `~/.goldbot/llm_context.log`，方便排查 Sub-Agent / skill 上下文传递问题。
+fn maybe_write_debug_log(messages: &[Message]) {
+    if std::env::var("GOLDBOT_DEBUG_LOG").unwrap_or_default().is_empty() {
+        return;
+    }
+    let log_path = crate::tools::mcp::goldbot_home_dir().join("llm_context.log");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut out = format!("\n\n=== LLM CALL @ {timestamp} ===\n");
+    for (i, msg) in messages.iter().enumerate() {
+        let role = match msg.role {
+            Role::System => "SYSTEM",
+            Role::User => "USER",
+            Role::Assistant => "ASSISTANT",
+        };
+        out.push_str(&format!("--- [{i}] {role} ---\n{}\n", msg.content));
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(out.as_bytes())
+        });
+}
+
 use self::{
     glm::{GlmProvider, base_url_from_env},
     kimi::KimiProvider,
@@ -265,6 +296,7 @@ impl LlmBackend {
         F: FnMut(&str),
         G: FnMut(&str),
     {
+        maybe_write_debug_log(messages);
         match self {
             Self::Glm(model) => {
                 GlmProvider

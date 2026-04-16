@@ -85,6 +85,8 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.shell_exec_rx = None;
     app.total_usage = Default::default();
     screen.todo_items.clear();
+    // 新任务开始时清空已加载的 skill，避免将前一个任务的 skill 注入到新任务的 Sub-Agent。
+    app.active_skill_contents.clear();
     // 按当前任务关键词过滤记忆，拼到 user 消息头部；assistant context 保持干净。
     let user_content = {
         let store = ProjectStore::current();
@@ -423,6 +425,7 @@ pub(crate) fn process_llm_result(
                     app.base_prompt.clone(),
                     Arc::new(app.skills.clone()),
                 );
+                dag_config.preloaded_skill_contexts = app.active_skill_contents.clone();
                 dag_config.cancel_flag = Some(Arc::clone(&app.dag_cancel_flag));
                 dag_config.progress_tx = Some(progress_tx);
                 app.dag_progress_rx = Some(progress_rx);
@@ -1100,6 +1103,7 @@ pub(crate) fn execute_task(
         app.base_prompt.clone(),
         Arc::new(app.skills.clone()),
     );
+    dag_config.preloaded_skill_contexts = app.active_skill_contents.clone();
     dag_config.cancel_flag = Some(Arc::clone(&app.dag_cancel_flag));
     dag_config.progress_tx = Some(progress_tx);
     app.dag_progress_rx = Some(progress_rx);
@@ -1135,6 +1139,10 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
         "Tool result (exit=-1):"
     };
     let exit_code = if found { 0 } else { -1 };
+    // 成功加载时登记到 active_skill_contents，俩就后续 Sub-Agent。
+    if found {
+        app.active_skill_contents.push(context_msg.clone());
+    }
     // 上下文里需要注入完整 skill 内容，供下一轮继续执行；
     // TUI 只显示一条短结果，避免把整份 skill 文本刷到事件流里。
     record_tool_result_with_display(

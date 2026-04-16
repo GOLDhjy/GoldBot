@@ -33,6 +33,10 @@ pub struct DagConfig {
     pub backend: LlmBackend,
     pub base_system_prompt: String,
     pub skills: Arc<Vec<Skill>>,
+    /// 父 Agent 当前任务内已加载的 skill 完整内容。
+    /// 每个元素是一个 skill 的全文（就是 skill_tool_result 的输出）。
+    /// Sub-Agent 启动时会将它们插入到初始上下文中，避免重新手动加载。
+    pub preloaded_skill_contexts: Vec<String>,
     pub max_steps: usize,
     pub timeout: Duration,
     pub cancel_flag: Option<Arc<AtomicBool>>,
@@ -51,6 +55,7 @@ impl DagConfig {
             backend,
             base_system_prompt,
             skills,
+            preloaded_skill_contexts: Vec::new(),
             max_steps: DEFAULT_SUBAGENT_MAX_STEPS,
             timeout: Duration::from_secs(DEFAULT_SUBAGENT_TIMEOUT_SECS),
             cancel_flag: None,
@@ -226,6 +231,12 @@ async fn run_subagent_worker(
         &config.base_system_prompt,
     );
     let mut messages: Vec<Message> = vec![Message::system(&system_prompt)];
+    // 将父 Agent 已加载的 skill 内容注入到子代理的初始上下文。
+    // 每个 skill 以独立的 assistant/user 对展现，模拟「主动加载完成」的历史轨迹。
+    for skill_ctx in &config.preloaded_skill_contexts {
+        messages.push(Message::assistant("<skill>loaded</skill>"));
+        messages.push(Message::user(skill_ctx));
+    }
     let user_content = match merged_input {
         Some(input) => format!("Task: {}\n\n---\n\nUpstream Inputs:\n{}", node.task, input),
         None => node.task.clone(),
