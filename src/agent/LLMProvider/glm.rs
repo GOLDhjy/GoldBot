@@ -226,11 +226,11 @@ fn build_request(
 
 fn normalize_glm_model(model: &str) -> String {
     match model {
-        "glm-5.1" | "GLM-5.1" => "GLM-5.1".to_string(),
-        "glm-5" | "GLM-5" => "GLM-5".to_string(),
+        "glm-5.1" | "GLM-5.1" => "glm-5.1".to_string(),
+        "glm-5" | "GLM-5" => "glm-5".to_string(),
         "glm-5v-turbo" | "GLM-5V-TURBO" | "GLM-5v-Turbo" => "glm-5v-turbo".to_string(),
         // 仅保留当前 UI 预设的三个模型，其他值统一回落到默认模型。
-        _ => "GLM-5".to_string(),
+        _ => "glm-5".to_string(),
     }
 }
 
