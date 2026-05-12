@@ -1,11 +1,13 @@
-/// 解析 CLI 参数，返回 (prompt, auto_accept)。
+/// 解析 CLI 参数，返回 (prompt, auto_accept, no_memory)。
 /// 支持的标志：
 ///   -p / --prompt <text>   启动时发送的初始任务消息。
 ///   -y / --yes             自动接受所有 Confirm 级别的命令（非 Block）。
-pub(crate) fn parse_cli_args() -> (Option<String>, bool) {
+///   -M / --no-memory       禁用记忆注入（不向 LLM 上下文注入历史记忆）。
+pub(crate) fn parse_cli_args() -> (Option<String>, bool, bool) {
     let args: Vec<String> = std::env::args().collect();
     let mut prompt = None;
     let mut yes = false;
+    let mut no_memory = false;
     let mut i = 1;
     while i < args.len() {
         if (args[i] == "-p" || args[i] == "--prompt") && i + 1 < args.len() {
@@ -14,11 +16,14 @@ pub(crate) fn parse_cli_args() -> (Option<String>, bool) {
         } else if args[i] == "-y" || args[i] == "--yes" {
             yes = true;
             i += 1;
+        } else if args[i] == "-M" || args[i] == "--no-memory" {
+            no_memory = true;
+            i += 1;
         } else {
             i += 1;
         }
     }
-    (prompt, yes)
+    (prompt, yes, no_memory)
 }
 
 /// 若 `~/.goldbot/.env` 不存在，则从内置模板创建。

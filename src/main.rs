@@ -121,6 +121,8 @@ pub(crate) struct App {
     pub todo_items: Vec<crate::types::TodoItem>,
     /// True when launched with -p: auto-quit after task finishes, print final_summary to stdout.
     pub headless: bool,
+    /// True when memory injection is disabled (--no-memory flag or /nomemory command).
+    pub no_memory: bool,
 
     /// 覆盖 UserTask 事件的 TUI 显示文本（命令展开时显示占位符而非完整内容）。
     pub task_display_override: Option<String>,
@@ -306,6 +308,7 @@ impl App {
             todo_items: Vec::new(),
             backend,
             headless: false,
+            no_memory: false,
             task_display_override: None,
             at_file: AtFilePickerState::default(),
             at_file_index: Vec::new(),
@@ -371,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let (cli_prompt, cli_yes) = cli::parse_cli_args();
+    let (cli_prompt, cli_yes, cli_no_memory) = cli::parse_cli_args();
     let headless = cli_prompt.is_some();
 
     // 先确保 ~/.goldbot/.env 存在，再在启动早期加载，
@@ -414,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
         app.mcp_discovery_rx = Some(rx);
     }
 
+    app.no_memory = cli_no_memory;
     let run_result = run_loop(&mut app, &mut screen, http_client, cli_prompt, cli_yes).await;
 
     if !headless {

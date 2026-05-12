@@ -36,7 +36,8 @@
       "Bash(where cargo:*)",
       "Bash(openspec new:*)",
       "Bash(openspec status:*)",
-      "Bash(openspec instructions:*)"
+      "Bash(openspec instructions:*)",
+      "PowerShell(cargo check *)"
     ]
   }
 }
