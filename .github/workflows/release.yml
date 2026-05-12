@@ -12,6 +12,7 @@ permissions:
 env:
   BIN_NAME: goldbot
   BIN_BUILD_NAME: GoldBot
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
