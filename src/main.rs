@@ -439,12 +439,12 @@ async fn run_loop(
     screen: &mut Screen,
     http_client: reqwest::Client,
     initial_task: Option<String>,
-    auto_accept: bool,
+    yolo_mode: bool,
 ) -> anyhow::Result<()> {
     let startup_task = initial_task.or_else(|| std::env::var("GOLDBOT_TASK").ok());
-    // -y / --yes 开启自动接受非 Block 命令
-    if auto_accept {
-        app.assist_mode = AssistMode::AcceptEdits;
+    // -y / --yes 直接进入 Yolo 模式，自动执行非 Block 命令。
+    if yolo_mode {
+        app.assist_mode = AssistMode::Yolo;
         app.rebuild_system_message();
         screen.assist_mode = app.assist_mode;
     }

@@ -311,7 +311,7 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
                 "    Ctrl+C         退出".to_string(),
                 "    Ctrl+D         展开/折叠任务详情".to_string(),
                 "    Tab            切换原生 Thinking ON/OFF".to_string(),
-                "    Shift+Tab      循环切换协助模式 (agent / accept edits / plan)".to_string(),
+                "    Shift+Tab      循环切换协助模式 (agent / Yolo / plan)".to_string(),
                 "    ↑ / ↓          导航菜单选项".to_string(),
                 "    Enter          确认选择 / 提交输入".to_string(),
                 "    Esc            中断 LLM / 取消输入焦点".to_string(),
@@ -446,7 +446,7 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
         }
         BuiltinCommand::Status => {
             let ws = app.workspace.to_string_lossy().replace('\\', "/");
-            let mode_str = format!("{:?}", app.assist_mode);
+            let mode_str = app.assist_mode.display_name();
             let thinking = if app.show_thinking { "ON" } else { "OFF" };
             let no_memory = if app.no_memory { "ON" } else { "OFF" };
             screen.emit(&[

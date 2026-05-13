@@ -1,7 +1,7 @@
-/// 解析 CLI 参数，返回 (prompt, auto_accept, no_memory)。
+/// 解析 CLI 参数，返回 (prompt, yolo_mode, no_memory)。
 /// 支持的标志：
 ///   -p / --prompt <text>   启动时发送的初始任务消息。
-///   -y / --yes             自动接受所有 Confirm 级别的命令（非 Block）。
+///   -y / --yes             进入 Yolo 模式，自动执行所有 Confirm 级别的命令（非 Block）。
 ///   -M / --no-memory       禁用记忆注入（不向 LLM 上下文注入历史记忆）。
 pub(crate) fn parse_cli_args() -> (Option<String>, bool, bool) {
     let args: Vec<String> = std::env::args().collect();

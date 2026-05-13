@@ -55,7 +55,7 @@ Memory guidelines:
 <thought>reasoning</thought>
 <tool>set_mode</tool>
 <mode>agent</mode>
-`<mode>` 可选值：`agent` / `plan`
+`<mode>` 可选值：`agent` / `yolo` / `plan`
 
 Phase update (non-blocking; optional, only for explicit stage changes):
 <thought>reasoning</thought>
@@ -716,6 +716,25 @@ mod tests {
             LlmAction::SetMode { mode } => assert_eq!(*mode, AssistMode::Off),
             _ => panic!("expected SetMode action"),
         }
+    }
+
+    #[test]
+    fn parse_set_mode_yolo_tool_call() {
+        let raw =
+            "<thought>switch to yolo mode</thought><tool>set_mode</tool><mode>yolo</mode>";
+        let (_, actions) = parse_llm_response(raw).expect("should parse set_mode");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LlmAction::SetMode { mode } => assert_eq!(*mode, AssistMode::Yolo),
+            _ => panic!("expected SetMode action"),
+        }
+    }
+
+    #[test]
+    fn parse_set_mode_rejects_unknown_mode() {
+        let raw = "<tool>set_mode</tool><mode>unknown</mode>";
+        let err = parse_llm_response(raw).expect_err("should reject unknown mode name");
+        assert!(err.to_string().contains("unsupported <mode>"));
     }
 
     #[test]

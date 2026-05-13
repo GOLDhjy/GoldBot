@@ -63,16 +63,16 @@ goldbot
 | Flag | Description |
 |---|---|
 | `-p <message>` / `--prompt <message>` | Send an initial chat message on startup without manual input |
-| `-y` / `--yes` | Auto-accept all Confirm-level commands without prompting (Block-level commands are still rejected) |
+| `-y` / `--yes` | Start in Yolo mode and auto-run all Confirm-level commands (Block-level commands are still rejected) |
 
 ```bash
 # Send a message on startup (Confirm commands still require approval)
 goldbot -p "clean up large files in the current directory"
 
-# Interactive mode, but auto-accept all Confirm commands
+# Interactive mode with Yolo mode for Confirm commands
 goldbot -y
 
-# Fully automated: auto-send message + auto-accept commands
+# Fully automated: auto-send message + Yolo mode command execution
 goldbot -p "clean up large files in the current directory" -y
 ```
 
@@ -83,7 +83,7 @@ goldbot -p "clean up large files in the current directory" -y
 | `Ctrl+C` | Anywhere | Exit |
 | `Ctrl+D` | After task completes | Collapse/expand details |
 | `Tab` | Outside menu | Toggle deep thinking ON/OFF |
-| `Shift+Tab` | Outside menu | Cycle assist mode (agent / accept edits / plan) |
+| `Shift+Tab` | Outside menu | Cycle assist mode (agent / Yolo / plan) |
 | `@` | Empty input box | Open file attachment picker |
 | `/` | Empty input box | Open slash command picker |
 | `↑/↓` | Menu / picker mode | Move selection |

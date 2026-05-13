@@ -216,11 +216,11 @@ pub(crate) fn process_llm_result(
                     }
                     RiskLevel::Confirm => {
                         if matches!(app.mode, Mode::GeInterview | Mode::GeRun | Mode::GeIdle)
-                            || app.assist_mode == AssistMode::AcceptEdits
+                            || app.assist_mode == AssistMode::Yolo
                         {
                             let ev = Event::Thinking {
-                                text: if app.assist_mode == AssistMode::AcceptEdits {
-                                    format!("auto-accepted: {command}")
+                                text: if app.assist_mode == AssistMode::Yolo {
+                                    format!("Yolo approved: {command}")
                                 } else {
                                     format!("GE auto-approved confirm command: {command}")
                                 },
@@ -351,7 +351,7 @@ pub(crate) fn process_llm_result(
                 apply_assist_mode_change(app, screen, mode);
                 app.messages.push(Message::user(format!(
                     "[assist mode set: {}]",
-                    mode.as_llm_name()
+                    mode.display_name()
                 )));
                 // Non-blocking local state update; continue to the next action.
                 had_non_blocking_only = true;
@@ -468,7 +468,7 @@ fn apply_assist_mode_change(app: &mut App, screen: &mut Screen, mode: AssistMode
     screen.assist_mode = mode;
     app.rebuild_system_message();
     let ev = Event::Thinking {
-        text: format!("assist mode -> {}", mode.as_llm_name()),
+        text: format!("assist mode -> {}", mode.display_name()),
     };
     emit_live_event(screen, &ev);
     app.task_events.push(ev);

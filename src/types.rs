@@ -64,23 +64,23 @@ pub enum Mode {
 pub enum AssistMode {
     #[default]
     Off,
-    AcceptEdits,
+    Yolo,
     Plan,
 }
 
 impl AssistMode {
     pub fn cycle(self) -> Self {
         match self {
-            Self::Off => Self::AcceptEdits,
-            Self::AcceptEdits => Self::Plan,
+            Self::Off => Self::Yolo,
+            Self::Yolo => Self::Plan,
             Self::Plan => Self::Off,
         }
     }
 
-    pub fn as_llm_name(self) -> &'static str {
+    pub fn display_name(self) -> &'static str {
         match self {
             Self::Off => "agent",
-            Self::AcceptEdits => "accept_edits",
+            Self::Yolo => "Yolo",
             Self::Plan => "plan",
         }
     }
@@ -89,7 +89,7 @@ impl AssistMode {
         let normalized = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
         match normalized.as_str() {
             "agent" | "off" | "normal" => Some(Self::Off),
-            "accept" | "accept_edits" | "acceptedits" => Some(Self::AcceptEdits),
+            "yolo" => Some(Self::Yolo),
             "plan" => Some(Self::Plan),
             _ => None,
         }
@@ -311,13 +311,13 @@ mod tests {
     use super::{AssistMode, InputQueue};
 
     #[test]
-    fn assist_mode_cycle_off_to_accept_edits() {
-        assert_eq!(AssistMode::Off.cycle(), AssistMode::AcceptEdits);
+    fn assist_mode_cycle_off_to_yolo() {
+        assert_eq!(AssistMode::Off.cycle(), AssistMode::Yolo);
     }
 
     #[test]
-    fn assist_mode_cycle_accept_edits_to_plan() {
-        assert_eq!(AssistMode::AcceptEdits.cycle(), AssistMode::Plan);
+    fn assist_mode_cycle_yolo_to_plan() {
+        assert_eq!(AssistMode::Yolo.cycle(), AssistMode::Plan);
     }
 
     #[test]
@@ -329,11 +329,9 @@ mod tests {
     fn assist_mode_parse_llm_aliases() {
         assert_eq!(AssistMode::parse_llm_name("agent"), Some(AssistMode::Off));
         assert_eq!(AssistMode::parse_llm_name("normal"), Some(AssistMode::Off));
-        assert_eq!(
-            AssistMode::parse_llm_name("accept_edits"),
-            Some(AssistMode::AcceptEdits)
-        );
+        assert_eq!(AssistMode::parse_llm_name("yolo"), Some(AssistMode::Yolo));
         assert_eq!(AssistMode::parse_llm_name("plan"), Some(AssistMode::Plan));
+        assert_eq!(AssistMode::parse_llm_name("unknown"), None);
     }
 
     #[test]

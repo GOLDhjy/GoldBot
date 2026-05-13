@@ -437,20 +437,20 @@ impl Screen {
                 let _ = execute!(self.stdout, Print(format!("{}\r\n", rendered)));
             }
 
-            let accept_hint = match self.assist_mode {
+            let mode_hint = match self.assist_mode {
                 AssistMode::Off => format!(
                     "  {} {}{}",
                     sym.arrow_right.dark_grey(),
                     "mode: agent".grey(),
                     " (shift+tab to cycle)".grey(),
                 ),
-                AssistMode::AcceptEdits => format!(
+                AssistMode::Yolo => format!(
                     "  {} {} {}{}",
                     format!("{}{}", sym.arrow_right, sym.arrow_right)
                         .green()
                         .bold(),
                     "mode:".grey(),
-                    "accept edits".green().bold(),
+                    self.assist_mode.display_name().green().bold(),
                     " (shift+tab to cycle)".grey(),
                 ),
                 AssistMode::Plan => format!(
@@ -463,7 +463,7 @@ impl Screen {
                     " (shift+tab to cycle)".grey(),
                 ),
             };
-            let _ = execute!(self.stdout, Print(accept_hint));
+            let _ = execute!(self.stdout, Print(mode_hint));
             self.managed_lines = todo_rows
                 + queue_rows
                 + at_file_rows
