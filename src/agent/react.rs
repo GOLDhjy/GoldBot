@@ -155,7 +155,8 @@ Node fields:
 - system_prompt (optional): fully custom system prompt (overrides role)
 - depends_on (optional): list of node ids this node waits for; empty = run immediately
 - input_merge (optional): how to merge upstream outputs — concat (default) / structured
-output_merge: all (default, returns each node result) / concat / first
+- output_merge: all (default, returns each node result) / concat / first
+- 重要信息:sub Agent对你知道的一无所知,你必须在task字段里提供完整的上下文和指令,sub Agent不能访问之前的对话记录,例如需要查询关键信息的所有字段和行动目的。
 ";
 
 /// Build the base system prompt with the actual MCP config file path substituted in.
