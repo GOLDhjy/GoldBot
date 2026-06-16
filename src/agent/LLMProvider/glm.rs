@@ -227,9 +227,10 @@ fn build_request(
 fn normalize_glm_model(model: &str) -> String {
     match model {
         "glm-5.1" | "GLM-5.1" => "glm-5.1".to_string(),
+        "glm-5.2" | "GLM-5.2" => "glm-5.2".to_string(),
         "glm-5" | "GLM-5" => "glm-5".to_string(),
         "glm-5v-turbo" | "GLM-5V-TURBO" | "GLM-5v-Turbo" => "glm-5v-turbo".to_string(),
-        // 仅保留当前 UI 预设的三个模型，其他值统一回落到默认模型。
+        // 仅保留当前 UI 预设模型，其他值统一回落到默认模型。
         _ => "glm-5".to_string(),
     }
 }
@@ -320,7 +321,11 @@ fn handle_sse_frame<F, G>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn thinking_param_enabled_serializes_correctly() {
@@ -344,6 +349,8 @@ mod tests {
 
     #[test]
     fn glm_ignores_legacy_base_url_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         unsafe {
             std::env::set_var("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4");
             std::env::remove_var("BIGMODEL_CODING_BASE_URL");
@@ -358,6 +365,8 @@ mod tests {
 
     #[test]
     fn glm_uses_coding_base_url_override_when_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let custom = "https://example.com/custom/coding";
         unsafe {
             std::env::set_var("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/paas/v4");
@@ -374,10 +383,12 @@ mod tests {
 
     #[test]
     fn glm_model_aliases_normalize_to_official_names() {
-        assert_eq!(normalize_glm_model("glm-5.1"), "GLM-5.1");
-        assert_eq!(normalize_glm_model("glm-5"), "GLM-5");
+        assert_eq!(normalize_glm_model("glm-5.1"), "glm-5.1");
+        assert_eq!(normalize_glm_model("glm-5.2"), "glm-5.2");
+        assert_eq!(normalize_glm_model("glm-5"), "glm-5");
         assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5v-turbo");
-        assert_eq!(normalize_glm_model("GLM-5.1"), "GLM-5.1");
-        assert_eq!(normalize_glm_model("glm-4.7"), "GLM-5");
+        assert_eq!(normalize_glm_model("GLM-5.1"), "glm-5.1");
+        assert_eq!(normalize_glm_model("GLM-5.2"), "glm-5.2");
+        assert_eq!(normalize_glm_model("glm-4.7"), "glm-5");
     }
 }

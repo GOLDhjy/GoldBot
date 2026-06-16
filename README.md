@@ -250,12 +250,12 @@ description: 整理和处理 PDF 文件
 | `MINIMAX_API_KEY` | 否 | — | MiniMax API 密钥 |
 | `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`minimax` |
 | `BIGMODEL_CODING_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API 基础 URL，未设置时默认走 coding 端点 |
-| `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，默认预设为 `glm-5`、`glm-5.1`、`glm-5v-turbo` |
+| `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，默认预设为 `glm-5`、`glm-5.1`、`glm-5.2`、`glm-5v-turbo` |
 | `KIMI_BASE_URL` | 否 | `https://api.kimi.com/coding/v1` 或 `https://api.moonshot.cn/v1` | Kimi API 基础 URL |
 | `KIMI_MODEL` | 否 | `kimi-for-coding` 或 `kimi-k2.5` | Kimi 模型名称 |
 | `MIMO_BASE_URL` | 否 | `https://api.xiaomimimo.com/v1` | Xiaomi MiMo 普通 chat API 基础 URL |
-| `MIMO_MODEL` | 否 | `mimo-v2-pro` | Xiaomi MiMo 模型名称，支持 `mimo-v2-pro`、`mimo-v2-flash`、`mimo-v2-omni` |
-| `MIMO_CONTEXT_WINDOW_TOKENS` | 否 | `256000` | MiMo 上下文预算估算值 |
+| `MIMO_MODEL` | 否 | `mimo-v2.5-pro` | Xiaomi MiMo 模型名称，支持 `mimo-v2.5-pro`、`mimo-v2-pro`、`mimo-v2-flash`、`mimo-v2-omni` |
+| `MIMO_CONTEXT_WINDOW_TOKENS` | 否 | 按模型估算 | MiMo 上下文预算估算值，`mimo-v2.5-pro` 默认为 `1000000`，其他预设默认为 `256000` |
 | `MINIMAX_BASE_URL` | 否 | `https://api.minimaxi.com/v1` | MiniMax API 基础 URL |
 | `MINIMAX_MODEL` | 否 | `MiniMax-M2.5` | MiniMax 模型名称 |
 | `BOCHA_API_KEY` | 否 | — | Bocha AI 搜索密钥 |

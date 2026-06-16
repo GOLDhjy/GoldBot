@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{LlmProvider, Message, Role, Usage};
+use crate::agent::provider::{LlmProvider, Message, Role, Usage, normalize_mimo_model_name};
 
 #[derive(Clone, Copy)]
 pub(crate) struct MimoProvider;
@@ -176,7 +176,7 @@ fn build_request(
 
     let base_url = std::env::var("MIMO_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string());
     let api_key = std::env::var("MIMO_API_KEY").context("MIMO_API_KEY env var not set")?;
-    let model = model.to_string();
+    let model = normalize_mimo_model_name(model);
 
     let api_messages: Vec<ApiMessage> = messages
         .iter()

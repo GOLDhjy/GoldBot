@@ -9,7 +9,10 @@ mod minimax;
 /// 若 `GOLDBOT_DEBUG_LOG` 非空，则将每次 LLM 调用前的完整消息列表追加写入
 /// `~/.goldbot/llm_context.log`，方便排查 Sub-Agent / skill 上下文传递问题。
 fn maybe_write_debug_log(messages: &[Message]) {
-    if std::env::var("GOLDBOT_DEBUG_LOG").unwrap_or_default().is_empty() {
+    if std::env::var("GOLDBOT_DEBUG_LOG")
+        .unwrap_or_default()
+        .is_empty()
+    {
         return;
     }
     let log_path = crate::tools::mcp::goldbot_home_dir().join("llm_context.log");
@@ -126,12 +129,19 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
-const GLM_MODEL_PRESETS: &[&str] = &["glm-5", "glm-5.1", "glm-5v-turbo"];
+const GLM_MODEL_PRESETS: &[&str] = &["glm-5", "glm-5.1", "glm-5.2", "glm-5v-turbo"];
+const DEFAULT_MIMO_MODEL: &str = "mimo-v2.5-pro";
+const MIMO_MODEL_PRESETS: &[&str] = &[
+    DEFAULT_MIMO_MODEL,
+    "mimo-v2-pro",
+    "mimo-v2-flash",
+    "mimo-v2-omni",
+];
 
 pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ("GLM", GLM_MODEL_PRESETS),
     ("Kimi", &["kimi-for-coding"]),
-    ("Mimo", &["mimo-v2-pro", "mimo-v2-flash", "mimo-v2-omni"]),
+    ("Mimo", MIMO_MODEL_PRESETS),
     (
         "MiniMax",
         &[
@@ -146,6 +156,7 @@ pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
 const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 const DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
+const MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 const DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS: u32 = 204_800;
 
 fn default_kimi_model() -> String {
@@ -172,8 +183,34 @@ fn normalize_glm_model_name(model: &str) -> Option<String> {
     match model.trim().to_ascii_lowercase().as_str() {
         "glm-5" => Some("glm-5".to_string()),
         "glm-5.1" => Some("glm-5.1".to_string()),
+        "glm-5.2" => Some("glm-5.2".to_string()),
         "glm-5v-turbo" => Some("glm-5v-turbo".to_string()),
         _ => None,
+    }
+}
+
+fn default_mimo_model() -> String {
+    std::env::var("MIMO_MODEL")
+        .ok()
+        .map(|model| normalize_mimo_model_name(&model))
+        .unwrap_or_else(|| DEFAULT_MIMO_MODEL.to_string())
+}
+
+fn normalize_mimo_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "mimo-v2.5-pro" | "mimo-v2-5-pro" => DEFAULT_MIMO_MODEL.to_string(),
+        "mimo-v2-pro" => "mimo-v2-pro".to_string(),
+        "mimo-v2-flash" => "mimo-v2-flash".to_string(),
+        "mimo-v2-omni" => "mimo-v2-omni".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn default_mimo_context_window_tokens(model: &str) -> u32 {
+    match normalize_mimo_model_name(model).as_str() {
+        DEFAULT_MIMO_MODEL => MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS,
+        _ => DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS,
     }
 }
 
@@ -210,8 +247,7 @@ impl LlmBackend {
                 LlmBackend::Kimi(model)
             }
             "mimo" => {
-                let model =
-                    std::env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo-v2-pro".to_string());
+                let model = default_mimo_model();
                 LlmBackend::Mimo(model)
             }
             "minimax" => {
@@ -238,8 +274,7 @@ impl LlmBackend {
                 } else if std::env::var("MIMO_API_KEY").is_ok()
                     && std::env::var("BIGMODEL_API_KEY").is_err()
                 {
-                    let model =
-                        std::env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo-v2-pro".to_string());
+                    let model = default_mimo_model();
                     LlmBackend::Mimo(model)
                 } else {
                     let model = default_glm_model();
@@ -278,7 +313,7 @@ impl LlmBackend {
             .unwrap_or_else(|| match self {
                 Self::Glm(_) => DEFAULT_GLM_CONTEXT_WINDOW_TOKENS,
                 Self::Kimi(_) => DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS,
-                Self::Mimo(_) => DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS,
+                Self::Mimo(model) => default_mimo_context_window_tokens(model),
                 Self::MiniMax(_) => DEFAULT_MINIMAX_CONTEXT_WINDOW_TOKENS,
             })
     }
@@ -397,7 +432,11 @@ fn env_u32(name: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::BACKEND_PRESETS;
+    use super::{
+        BACKEND_PRESETS, DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS, DEFAULT_MIMO_MODEL,
+        MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS, default_mimo_context_window_tokens,
+        normalize_mimo_model_name,
+    };
 
     #[test]
     fn glm_backend_presets_include_glm_5_1() {
@@ -409,6 +448,7 @@ mod tests {
 
         assert!(glm_models.contains(&"glm-5"));
         assert!(glm_models.contains(&"glm-5.1"));
+        assert!(glm_models.contains(&"glm-5.2"));
         assert!(glm_models.contains(&"glm-5v-turbo"));
     }
 
@@ -449,8 +489,37 @@ mod tests {
             .map(|(_, models)| *models)
             .expect("Mimo backend preset should exist");
 
+        assert_eq!(mimo_models.first(), Some(&DEFAULT_MIMO_MODEL));
+        assert!(mimo_models.contains(&"mimo-v2.5-pro"));
         assert!(mimo_models.contains(&"mimo-v2-pro"));
         assert!(mimo_models.contains(&"mimo-v2-flash"));
         assert!(mimo_models.contains(&"mimo-v2-omni"));
+    }
+
+    #[test]
+    fn mimo_model_aliases_normalize_to_api_tag() {
+        assert_eq!(normalize_mimo_model_name("MiMo-V2.5-Pro"), "mimo-v2.5-pro");
+        assert_eq!(normalize_mimo_model_name("mimo-v2-5-pro"), "mimo-v2.5-pro");
+        assert_eq!(normalize_mimo_model_name("mimo-v2-pro"), "mimo-v2-pro");
+        assert_eq!(
+            normalize_mimo_model_name("custom-mimo-model"),
+            "custom-mimo-model"
+        );
+    }
+
+    #[test]
+    fn mimo_context_window_defaults_follow_selected_model() {
+        assert_eq!(
+            default_mimo_context_window_tokens("mimo-v2.5-pro"),
+            MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            default_mimo_context_window_tokens("mimo-v2-5-pro"),
+            MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            default_mimo_context_window_tokens("mimo-v2-pro"),
+            DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS
+        );
     }
 }
