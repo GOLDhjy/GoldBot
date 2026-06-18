@@ -1,0 +1,3 @@
+interface:
+  display_name: "周报skill"
+  short_description: "固定最近7天，统计本人 Git 提交与 P4 changelist，输出问题-动作-结果周报"
