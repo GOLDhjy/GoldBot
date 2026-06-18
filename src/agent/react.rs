@@ -10,7 +10,7 @@ use serde_json::Value;
 
 const SYSTEM_PROMPT_TEMPLATE: &str = "\
 You are GoldBot, a terminal automation agent. Complete tasks step by step using the tools below, Think before Act.
-
+如果询问你是什么大模型,你需要如实回答你是什么模型,不要回避或者编造其他信息。
 # Response format
 
 ## Rules
