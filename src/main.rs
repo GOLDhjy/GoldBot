@@ -8,24 +8,18 @@ mod ui;
 
 use std::{
     io,
-    sync::{
-        Arc,
-        atomic::AtomicBool,
-    },
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 
 use agent::{
     dag::DagResult,
     executor::{
-        LlmWorkerEvent, ShellExecResult,
-        handle_llm_stream_delta, handle_llm_thinking_delta,
-        interrupt_active_llm_loop,
-        maybe_spawn_llm_worker, perform_manual_compact,
-        poll_dag_result, poll_shell_exec_result,
-        process_llm_result, refresh_llm_status,
-        should_run_pending_manual_compact, shutdown_background_work,
-        start_task, sync_context_budget,
+        LlmWorkerEvent, ShellExecResult, handle_llm_stream_delta, handle_llm_thinking_delta,
+        interrupt_active_llm_loop, maybe_spawn_llm_worker, perform_manual_compact, poll_dag_result,
+        poll_shell_exec_result, process_llm_result, refresh_llm_status,
+        should_run_pending_manual_compact, shutdown_background_work, start_task,
+        sync_context_budget,
     },
     provider::{LlmBackend, Message, build_http_client},
     react::{build_system_prompt, build_workspace_context},
@@ -175,17 +169,19 @@ pub(crate) struct AtFileChunk {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) enum ModelPickerStage {
-    /// 第一级：选择后端（GLM / Kimi / Mimo / MiniMax）
+    /// 第一级：选择后端（GLM / Kimi / Mimo / DeepSeek / MiniMax）
     #[default]
     Backend,
     /// 第二级：选择具体模型（已知选定的后端 label）
     Model,
+    /// 第三级：选择思考等级（仅 GLM 后端）
+    Effort,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ModelPickerState {
     pub stage: ModelPickerStage,
-    /// 当前页显示的标签列表（第一级=后端名，第二级=模型名）
+    /// 当前页显示的标签列表（第一级=后端名，第二级=模型名，第三级=思考等级）
     pub labels: Vec<String>,
     /// 与 labels 一一对应的原始值（用于逻辑判断）
     pub values: Vec<String>,
@@ -193,6 +189,8 @@ pub(crate) struct ModelPickerState {
     pub sel: usize,
     /// 第一级选定的后端 label（进入第二级后使用）
     pub pending_backend: Option<String>,
+    /// 第二级选定的模型名（进入第三级后使用）
+    pub pending_model: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -547,9 +545,7 @@ async fn run_loop(
             screen.refresh();
         }
 
-        if let Some(handle) =
-            maybe_spawn_llm_worker(app, screen, &tx, &http_client).await
-        {
+        if let Some(handle) = maybe_spawn_llm_worker(app, screen, &tx, &http_client).await {
             llm_task_handle = Some(handle);
         }
 
@@ -570,7 +566,10 @@ async fn run_loop(
         if app.quit {
             shutdown_background_work(app, screen, &mut llm_task_handle).await;
             // 退出时删除 debug 日志（仅在开启了 GOLDBOT_DEBUG_LOG 时才有该文件）。
-            if !std::env::var("GOLDBOT_DEBUG_LOG").unwrap_or_default().is_empty() {
+            if !std::env::var("GOLDBOT_DEBUG_LOG")
+                .unwrap_or_default()
+                .is_empty()
+            {
                 let log_path = crate::tools::mcp::goldbot_home_dir().join("llm_context.log");
                 let _ = std::fs::remove_file(&log_path);
             }
@@ -586,11 +585,11 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::executor::{
-        parse_retryable_http_status, retry_delay_for_attempt,
-        should_retry_llm_error, should_run_pending_manual_compact,
-    };
     use crate::App;
+    use crate::agent::executor::{
+        parse_retryable_http_status, retry_delay_for_attempt, should_retry_llm_error,
+        should_run_pending_manual_compact,
+    };
     use std::time::Duration;
 
     #[test]

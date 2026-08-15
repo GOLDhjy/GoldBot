@@ -250,6 +250,7 @@ async fn run_subagent_worker(
             LlmBackend::Glm(_) => LlmBackend::Glm(m.clone()),
             LlmBackend::Kimi(_) => LlmBackend::Kimi(m.clone()),
             LlmBackend::Mimo(_) => LlmBackend::Mimo(m.clone()),
+            LlmBackend::DeepSeek(_) => LlmBackend::DeepSeek(m.clone()),
             LlmBackend::MiniMax(_) => LlmBackend::MiniMax(m.clone()),
         })
         .unwrap_or_else(|| config.backend.clone());

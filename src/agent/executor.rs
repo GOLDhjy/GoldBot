@@ -14,7 +14,9 @@ use crate::agent::react::parse_llm_response;
 use crate::memory::Session;
 use crate::memory::project::ProjectStore;
 use crate::tools::safety::{RiskLevel, assess_command};
-use crate::tools::shell::{clear_running_shell_cancel_request, request_cancel_running_shell_commands};
+use crate::tools::shell::{
+    clear_running_shell_cancel_request, request_cancel_running_shell_commands,
+};
 use crate::tools::skills::skill_tool_result;
 use crate::types::{AssistMode, Event, LlmAction, Mode};
 use crate::ui::format::{
@@ -1147,14 +1149,7 @@ pub(crate) fn load_skill(app: &mut App, screen: &mut Screen, name: &str) {
     }
     // 上下文里需要注入完整 skill 内容，供下一轮继续执行；
     // TUI 只显示一条短结果，避免把整份 skill 文本刷到事件流里。
-    record_tool_result_with_display(
-        app,
-        screen,
-        header,
-        exit_code,
-        context_msg,
-        display_msg,
-    );
+    record_tool_result_with_display(app, screen, header, exit_code, context_msg, display_msg);
     sync_context_budget(app, screen);
 }
 
@@ -2056,9 +2051,9 @@ pub(crate) async fn shutdown_background_work(
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS,
-        dynamic_compact_reserve_tokens, estimate_prompt_tokens_raw, format_token_count_short,
-        session_task_for_round, truncate_utf8_prefix,
+        COMPLETION_RESERVE_MULTIPLIER, MIN_COMPACT_RESERVE_TOKENS, dynamic_compact_reserve_tokens,
+        estimate_prompt_tokens_raw, format_token_count_short, session_task_for_round,
+        truncate_utf8_prefix,
     };
     use crate::agent::provider::Message;
     use crate::types::{Event, TodoItem, TodoStatus};

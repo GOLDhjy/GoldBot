@@ -1137,7 +1137,9 @@ mod tests {
         ];
 
         let lines = collapsed_task_event_lines(&events).join("\n");
-        let thinking_idx = lines.find("先确认 README 的当前结构").expect("missing thinking");
+        let thinking_idx = lines
+            .find("先确认 README 的当前结构")
+            .expect("missing thinking");
         let tool_idx = lines.find("Read(README.md)").expect("missing tool call");
         assert!(thinking_idx < tool_idx);
     }

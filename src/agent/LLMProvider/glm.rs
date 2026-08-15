@@ -32,6 +32,9 @@ struct ApiRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingParam>,
+    /// 思考等级（low/high/max），仅 GLM-5.2 及以上支持。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,7 +97,7 @@ impl LlmProvider for GlmProvider {
         client: &reqwest::Client,
         messages: &[Message],
         model: &str,
-        show_thinking: bool,
+        _show_thinking: bool,
         on_delta: F,
         on_thinking_delta: G,
     ) -> Result<(String, Usage)>
@@ -102,15 +105,7 @@ impl LlmProvider for GlmProvider {
         F: FnMut(&str),
         G: FnMut(&str),
     {
-        chat_stream_with_impl(
-            client,
-            messages,
-            model,
-            show_thinking,
-            on_delta,
-            on_thinking_delta,
-        )
-        .await
+        chat_stream_with_impl(client, messages, model, on_delta, on_thinking_delta).await
     }
 }
 
@@ -127,7 +122,6 @@ async fn chat_stream_with_impl<F, G>(
     client: &reqwest::Client,
     messages: &[Message],
     model: &str,
-    show_thinking: bool,
     mut on_delta: F,
     mut on_thinking_delta: G,
 ) -> Result<(String, Usage)>
@@ -135,7 +129,7 @@ where
     F: FnMut(&str),
     G: FnMut(&str),
 {
-    let (base_url, api_key, body) = build_request(messages, model, true, show_thinking)?;
+    let (base_url, api_key, body) = build_request(messages, model, true)?;
 
     let mut resp = client
         .post(format!("{base_url}/chat/completions"))
@@ -194,7 +188,6 @@ fn build_request(
     messages: &[Message],
     model: &str,
     stream: bool,
-    show_thinking: bool,
 ) -> Result<(String, String, ApiRequest)> {
     let api_key = std::env::var("BIGMODEL_API_KEY").context("BIGMODEL_API_KEY env var not set")?;
     let model = normalize_glm_model(model);
@@ -216,9 +209,9 @@ fn build_request(
         messages: api_messages,
         max_tokens: None,
         stream: if stream { Some(true) } else { None },
-        thinking: Some(ThinkingParam {
-            kind: if show_thinking { "enabled" } else { "disabled" },
-        }),
+        // GLM-5.3 禁止关闭思考，show_thinking 仅控制本地显示，API 侧恒为 enabled。
+        thinking: Some(ThinkingParam { kind: "enabled" }),
+        reasoning_effort: crate::agent::provider::glm_effort_from_env(),
     };
 
     Ok((base_url_from_env(), api_key, body))
@@ -226,12 +219,9 @@ fn build_request(
 
 fn normalize_glm_model(model: &str) -> String {
     match model {
-        "glm-5.1" | "GLM-5.1" => "glm-5.1".to_string(),
-        "glm-5.2" | "GLM-5.2" => "glm-5.2".to_string(),
-        "glm-5" | "GLM-5" => "glm-5".to_string(),
-        "glm-5v-turbo" | "GLM-5V-TURBO" | "GLM-5v-Turbo" => "glm-5v-turbo".to_string(),
-        // 仅保留当前 UI 预设模型，其他值统一回落到默认模型。
-        _ => "glm-5".to_string(),
+        "glm-5.3" | "GLM-5.3" => "glm-5.3".to_string(),
+        // 仅支持 GLM-5.3，其他值统一回落到默认模型。
+        _ => "glm-5.3".to_string(),
     }
 }
 
@@ -321,11 +311,8 @@ fn handle_sse_frame<F, G>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::agent::provider::ENV_LOCK;
 
     #[test]
     fn thinking_param_enabled_serializes_correctly() {
@@ -383,12 +370,70 @@ mod tests {
 
     #[test]
     fn glm_model_aliases_normalize_to_official_names() {
-        assert_eq!(normalize_glm_model("glm-5.1"), "glm-5.1");
-        assert_eq!(normalize_glm_model("glm-5.2"), "glm-5.2");
-        assert_eq!(normalize_glm_model("glm-5"), "glm-5");
-        assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5v-turbo");
-        assert_eq!(normalize_glm_model("GLM-5.1"), "glm-5.1");
-        assert_eq!(normalize_glm_model("GLM-5.2"), "glm-5.2");
-        assert_eq!(normalize_glm_model("glm-4.7"), "glm-5");
+        assert_eq!(normalize_glm_model("glm-5.3"), "glm-5.3");
+        assert_eq!(normalize_glm_model("GLM-5.3"), "glm-5.3");
+        assert_eq!(normalize_glm_model("glm-5.1"), "glm-5.3");
+        assert_eq!(normalize_glm_model("glm-5"), "glm-5.3");
+        assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5.3");
+        assert_eq!(normalize_glm_model("glm-4.7"), "glm-5.3");
+    }
+
+    #[test]
+    fn effort_from_env_accepts_valid_levels() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::set_var("BIGMODEL_EFFORT", "high");
+        }
+        assert_eq!(
+            crate::agent::provider::glm_effort_from_env(),
+            Some("high".to_string())
+        );
+
+        unsafe {
+            std::env::set_var("BIGMODEL_EFFORT", " LOW ");
+        }
+        assert_eq!(
+            crate::agent::provider::glm_effort_from_env(),
+            Some("low".to_string())
+        );
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_EFFORT");
+        }
+    }
+
+    #[test]
+    fn effort_from_env_ignores_invalid_levels() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::set_var("BIGMODEL_EFFORT", "ultra");
+        }
+        assert_eq!(crate::agent::provider::glm_effort_from_env(), None);
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_EFFORT");
+        }
+    }
+
+    #[test]
+    fn build_request_includes_reasoning_effort_and_enabled_thinking() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::set_var("BIGMODEL_API_KEY", "test-key");
+            std::env::set_var("BIGMODEL_EFFORT", "max");
+        }
+
+        let messages = vec![crate::agent::provider::Message::user("hi")];
+        let (_, _, body) = build_request(&messages, "glm-5.3", true).unwrap();
+        assert_eq!(body.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(body.thinking.as_ref().unwrap().kind, "enabled");
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_API_KEY");
+            std::env::remove_var("BIGMODEL_EFFORT");
+        }
     }
 }

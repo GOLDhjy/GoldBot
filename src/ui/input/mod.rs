@@ -1,4 +1,7 @@
-use crossterm::{event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers}, style::Stylize};
+use crossterm::{
+    event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers},
+    style::Stylize,
+};
 use std::time::Duration;
 
 use crate::App;
@@ -147,7 +150,10 @@ pub(super) fn insert_char_with_trigger(app: &mut App, screen: &mut Screen, c: ch
     }
 }
 
-pub(crate) async fn handle_terminal_events(app: &mut App, screen: &mut Screen) -> anyhow::Result<()> {
+pub(crate) async fn handle_terminal_events(
+    app: &mut App,
+    screen: &mut Screen,
+) -> anyhow::Result<()> {
     if !event::poll(Duration::from_millis(50))? {
         return Ok(());
     }

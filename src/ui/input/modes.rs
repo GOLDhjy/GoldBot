@@ -13,8 +13,9 @@ use crate::ui::screen::Screen;
 use super::insert_char_with_trigger;
 use super::pickers::{
     attach_files_to_task, cancel_at_file_mode, cancel_command_mode, cancel_model_picker,
-    enter_model_picker_backend_stage, select_at_file, select_command, select_model_item,
-    submit_api_key_input, update_at_file_candidates, update_command_candidates,
+    enter_model_picker_backend_stage, enter_model_picker_model_stage, select_at_file,
+    select_command, select_model_item, submit_api_key_input, update_at_file_candidates,
+    update_command_candidates,
 };
 use super::submit::{
     clear_input_buffer, expand_input_text, pop_input_at_cursor, submit_question_answer,
@@ -360,6 +361,11 @@ pub(super) fn handle_idle_mode(
                     KeyCode::Esc if modifiers.is_empty() => {
                         if app.model_picker.stage == crate::ModelPickerStage::Model {
                             enter_model_picker_backend_stage(app, screen);
+                        } else if app.model_picker.stage == crate::ModelPickerStage::Effort {
+                            app.model_picker.stage = crate::ModelPickerStage::Model;
+                            let backend =
+                                app.model_picker.pending_backend.clone().unwrap_or_default();
+                            enter_model_picker_model_stage(app, screen, &backend);
                         } else {
                             cancel_model_picker(app, screen);
                             clear_input_buffer(app, screen);

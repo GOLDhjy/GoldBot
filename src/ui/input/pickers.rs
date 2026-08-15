@@ -87,6 +87,7 @@ fn is_placeholder_api_key(key_name: &str, value: &str) -> bool {
         "BIGMODEL_API_KEY" => "your_bigmodel_api_key_here",
         "KIMI_API_KEY" => "your_kimi_api_key_here",
         "MIMO_API_KEY" => "your_mimo_api_key_here",
+        "DEEPSEEK_API_KEY" => "your_deepseek_api_key_here",
         "MINIMAX_API_KEY" => "your_minimax_api_key_here",
         _ => "",
     };
@@ -418,7 +419,11 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
         }
         BuiltinCommand::NoMemory => {
             app.no_memory = !app.no_memory;
-            let state = if app.no_memory { "ON（记忆注入已禁用）" } else { "OFF（记忆注入已启用）" };
+            let state = if app.no_memory {
+                "ON（记忆注入已禁用）"
+            } else {
+                "OFF（记忆注入已启用）"
+            };
             screen.emit(&[format!("  NoMemory: {}", state)]);
         }
         BuiltinCommand::Skills => {
@@ -475,12 +480,14 @@ fn persist_backend_to_env(backend_label: &str, model: &str) {
         "Kimi" => "kimi",
         "Mimo" => "mimo",
         "MiniMax" => "minimax",
+        "DeepSeek" => "deepseek",
         _ => "glm",
     };
     let model_key = match backend_label {
         "Kimi" => "KIMI_MODEL",
         "Mimo" => "MIMO_MODEL",
         "MiniMax" => "MINIMAX_MODEL",
+        "DeepSeek" => "DEEPSEEK_MODEL",
         _ => "BIGMODEL_MODEL",
     };
 
@@ -572,6 +579,7 @@ pub(super) fn enter_model_picker_model_stage(app: &mut App, screen: &mut Screen,
     };
     app.model_picker.stage = crate::ModelPickerStage::Model;
     app.model_picker.pending_backend = Some(backend.to_string());
+    app.model_picker.pending_model = None;
     app.model_picker.labels = preset
         .1
         .iter()
@@ -600,8 +608,51 @@ pub(super) fn cancel_model_picker(app: &mut App, screen: &mut Screen) {
     app.model_picker.values.clear();
     app.model_picker.sel = 0;
     app.model_picker.pending_backend = None;
+    app.model_picker.pending_model = None;
     screen.model_picker_labels.clear();
     screen.model_picker_sel = 0;
+}
+
+/// GLM / DeepSeek 后端支持的思考等级（low/high/max）。
+const EFFORT_LEVELS: &[&str] = &["low", "high", "max"];
+
+/// 读取指定后端当前的思考等级环境变量值，非法值时返回 None。
+fn current_effort_from_env(backend: &str) -> Option<String> {
+    match backend {
+        "DeepSeek" => crate::agent::provider::deepseek_effort_from_env(),
+        _ => crate::agent::provider::glm_effort_from_env(),
+    }
+}
+
+/// 思考等级对应的环境变量名。
+fn effort_env_name(backend: &str) -> &'static str {
+    match backend {
+        "DeepSeek" => "DEEPSEEK_EFFORT",
+        _ => "BIGMODEL_EFFORT",
+    }
+}
+
+pub(super) fn enter_model_picker_effort_stage(app: &mut App, screen: &mut Screen, backend: &str) {
+    if backend != "GLM" && backend != "DeepSeek" {
+        return;
+    }
+    let current = current_effort_from_env(backend);
+    app.model_picker.stage = crate::ModelPickerStage::Effort;
+    app.model_picker.labels = EFFORT_LEVELS
+        .iter()
+        .map(|level| {
+            if Some(level.to_string()) == current {
+                format!("{level}  ✓")
+            } else {
+                level.to_string()
+            }
+        })
+        .collect();
+    app.model_picker.values = EFFORT_LEVELS.iter().map(|l| l.to_string()).collect();
+    app.model_picker.sel = 0;
+    screen.model_picker_labels = app.model_picker.labels.clone();
+    screen.model_picker_sel = 0;
+    screen.refresh();
 }
 
 pub(super) fn select_model_item(app: &mut App, screen: &mut Screen) {
@@ -616,69 +667,119 @@ pub(super) fn select_model_item(app: &mut App, screen: &mut Screen) {
         }
         crate::ModelPickerStage::Model => {
             let backend = app.model_picker.pending_backend.clone().unwrap_or_default();
-            let model = value;
-            app.backend = match backend.as_str() {
-                "Kimi" => crate::agent::provider::LlmBackend::Kimi(model.clone()),
-                "Mimo" => crate::agent::provider::LlmBackend::Mimo(model.clone()),
-                "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
-                _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
-            };
-            app.prompt_token_scale = 1.0;
-            app.recent_completion_tokens_ema = 0;
-            persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());
-            // 切换 provider 后，刷新内置 MCP 和 system prompt，
-            // 避免“启动时 provider”与“当前 provider”能力集合不一致。
-            app.mcp_registry
-                .inject_builtin_for_backend(app.backend.backend_label());
-            app.rebuild_system_message();
-            if app.mcp_discovery_rx.is_none() && app.mcp_registry.has_servers() {
-                let registry = app.mcp_registry.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let _ = tx.send(registry.run_discovery());
-                });
-                app.mcp_discovery_rx = Some(rx);
-            }
-            sync_context_budget(app, screen);
-            cancel_model_picker(app, screen);
-            clear_input_buffer(app, screen);
-            let mut lines = vec![format!(
-                "  已切换至 {} / {}",
-                app.backend.backend_label(),
-                app.backend.model_name()
-            )];
-            lines.push("  已刷新当前 provider 的 MCP / system prompt。".to_string());
-            app.pending_api_key_name = None;
-            screen.status.clear();
-            let key_name = app.backend.required_key_name().to_string();
-            if let Some(key_value) = resolve_valid_api_key(&key_name) {
-                unsafe {
-                    std::env::set_var(&key_name, &key_value);
-                }
+            app.model_picker.pending_model = Some(value.clone());
+            if backend == "GLM" || backend == "DeepSeek" {
+                enter_model_picker_effort_stage(app, screen, &backend);
             } else {
-                let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
-                app.pending_api_key_name = Some(key_name.clone());
-                app.running = false;
-                app.needs_agent_executor = false;
-                screen.input_focused = true;
-                lines.push(format!(
-                    "  {} {} 未配置，请编辑: {}",
-                    crossterm::style::Stylize::yellow(
-                        crate::ui::symbols::Symbols::current().warning
-                    ),
-                    key_name,
-                    env_path.display()
-                ));
-                lines.push(format!(
-                    "  Paste {key_name} now and press Enter to continue this session."
-                ));
-                screen.status = format!("Waiting for {} input...", key_name)
-                    .dark_yellow()
-                    .to_string();
+                apply_model_selection(app, screen, backend, value);
             }
-            screen.emit(&lines);
+        }
+        crate::ModelPickerStage::Effort => {
+            let backend = app.model_picker.pending_backend.clone().unwrap_or_default();
+            let model = app.model_picker.pending_model.clone().unwrap_or_default();
+            persist_effort_to_env(&backend, &value);
+            apply_model_selection(app, screen, backend, model);
         }
     }
+}
+
+/// 将思考等级写入 `~/.goldbot/.env` 的对应环境变量（BIGMODEL_EFFORT / DEEPSEEK_EFFORT），
+/// 并同步到当前进程环境变量。
+fn persist_effort_to_env(backend: &str, effort: &str) {
+    let env_name = effort_env_name(backend);
+    let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+    let raw = std::fs::read_to_string(&env_path).unwrap_or_default();
+
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+    let mut found = false;
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{env_name}="))
+            || trimmed.starts_with(&format!("{env_name} ="))
+        {
+            *line = format!("{env_name}={effort}");
+            found = true;
+        }
+    }
+    if !found {
+        if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("{env_name}={effort}"));
+    }
+
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let _ = std::fs::write(&env_path, content);
+    unsafe {
+        std::env::set_var(env_name, effort);
+    }
+}
+
+/// 应用选定的后端与模型：切换 backend、持久化、刷新 MCP / system prompt。
+fn apply_model_selection(app: &mut App, screen: &mut Screen, backend: String, model: String) {
+    app.backend = match backend.as_str() {
+        "Kimi" => crate::agent::provider::LlmBackend::Kimi(model.clone()),
+        "Mimo" => crate::agent::provider::LlmBackend::Mimo(model.clone()),
+        "DeepSeek" => crate::agent::provider::LlmBackend::DeepSeek(model.clone()),
+        "MiniMax" => crate::agent::provider::LlmBackend::MiniMax(model.clone()),
+        _ => crate::agent::provider::LlmBackend::Glm(model.clone()),
+    };
+    app.prompt_token_scale = 1.0;
+    app.recent_completion_tokens_ema = 0;
+    persist_backend_to_env(app.backend.backend_label(), app.backend.model_name());
+    // 切换 provider 后，刷新内置 MCP 和 system prompt，
+    // 避免“启动时 provider”与“当前 provider”能力集合不一致。
+    app.mcp_registry
+        .inject_builtin_for_backend(app.backend.backend_label());
+    app.rebuild_system_message();
+    if app.mcp_discovery_rx.is_none() && app.mcp_registry.has_servers() {
+        let registry = app.mcp_registry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(registry.run_discovery());
+        });
+        app.mcp_discovery_rx = Some(rx);
+    }
+    sync_context_budget(app, screen);
+    cancel_model_picker(app, screen);
+    clear_input_buffer(app, screen);
+    let mut lines = vec![format!(
+        "  已切换至 {} / {}",
+        app.backend.backend_label(),
+        app.backend.model_name()
+    )];
+    if let Some(effort) = current_effort_from_env(app.backend.backend_label()) {
+        lines.push(format!("  思考等级: {effort}"));
+    }
+    lines.push("  已刷新当前 provider 的 MCP / system prompt。".to_string());
+    app.pending_api_key_name = None;
+    screen.status.clear();
+    let key_name = app.backend.required_key_name().to_string();
+    if let Some(key_value) = resolve_valid_api_key(&key_name) {
+        unsafe {
+            std::env::set_var(&key_name, &key_value);
+        }
+    } else {
+        let env_path = crate::tools::mcp::goldbot_home_dir().join(".env");
+        app.pending_api_key_name = Some(key_name.clone());
+        app.running = false;
+        app.needs_agent_executor = false;
+        screen.input_focused = true;
+        lines.push(format!(
+            "  {} {} 未配置，请编辑: {}",
+            crossterm::style::Stylize::yellow(crate::ui::symbols::Symbols::current().warning),
+            key_name,
+            env_path.display()
+        ));
+        lines.push(format!(
+            "  Paste {key_name} now and press Enter to continue this session."
+        ));
+        screen.status = format!("Waiting for {} input...", key_name)
+            .dark_yellow()
+            .to_string();
+    }
+    screen.emit(&lines);
 }
 
 #[cfg(test)]

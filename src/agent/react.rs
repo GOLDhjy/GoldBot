@@ -721,8 +721,7 @@ mod tests {
 
     #[test]
     fn parse_set_mode_yolo_tool_call() {
-        let raw =
-            "<thought>switch to yolo mode</thought><tool>set_mode</tool><mode>yolo</mode>";
+        let raw = "<thought>switch to yolo mode</thought><tool>set_mode</tool><mode>yolo</mode>";
         let (_, actions) = parse_llm_response(raw).expect("should parse set_mode");
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -834,7 +833,9 @@ mod tests {
     fn build_system_prompt_requires_reread_before_update() {
         let prompt = build_system_prompt();
         assert!(prompt.contains("immediately before every <tool>update</tool>, you must re-run <tool>read</tool> on the same file"));
-        assert!(prompt.contains("always re-read the same file immediately before <tool>update</tool>"));
+        assert!(
+            prompt.contains("always re-read the same file immediately before <tool>update</tool>")
+        );
         assert!(prompt.contains("never reuse line numbers from an earlier read"));
     }
 
