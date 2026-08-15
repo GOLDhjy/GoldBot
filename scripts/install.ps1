@@ -169,7 +169,16 @@ function Install-GoldBot {
             throw "goldbot.exe not found in archive."
         }
 
-        Copy-Item -Path $binary.FullName -Destination (Join-Path $InstallDir "goldbot.exe") -Force
+        $dest = Join-Path $InstallDir "goldbot.exe"
+        # 直接覆盖正在运行的 exe 会失败（文件被占用），而重命名运行中的 exe 是允许的，
+        # 因此先把旧文件改名为 .old 备份再复制新文件。
+        if (Test-Path $dest) {
+            Remove-Item -Path "$dest.old" -Force -ErrorAction SilentlyContinue
+            Move-Item -Path $dest -Destination "$dest.old" -Force
+        }
+        Copy-Item -Path $binary.FullName -Destination $dest -Force
+        # 若旧 goldbot 进程仍在运行，删除备份会失败，留待下次 goldbot 启动时清理。
+        Remove-Item -Path "$dest.old" -Force -ErrorAction SilentlyContinue
         $env:PATH = "$InstallDir;$env:PATH"
         Ensure-UserPathContains -InstallDir $InstallDir
         Ensure-SystemPathContains -InstallDir $InstallDir

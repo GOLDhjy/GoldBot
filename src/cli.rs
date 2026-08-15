@@ -26,6 +26,11 @@ pub(crate) fn parse_cli_args() -> (Option<String>, bool, bool) {
     (prompt, yes, no_memory)
 }
 
+/// 是否传入了 `update` 子命令（即 `goldbot update`，按平台自更新后退出）。
+pub(crate) fn is_update_subcommand() -> bool {
+    std::env::args().nth(1).is_some_and(|arg| arg == "update")
+}
+
 /// 若 `~/.goldbot/.env` 不存在，则从内置模板创建。
 pub(crate) fn ensure_dot_env() {
     let home = crate::tools::mcp::goldbot_home_dir();

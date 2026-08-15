@@ -100,6 +100,22 @@ download_file() {
   curl -fL --retry 3 --retry-delay 1 -o "$out" "$url"
 }
 
+# 把新二进制复制到目标路径。
+# Linux 上直接覆盖正在运行的二进制会报 "Text file busy"，改用先备份再替换；
+# 备份文件随后删除，若旧进程仍在运行导致删除失败，留待下次 goldbot 启动时清理。
+install_binary() {
+  local src="$1"
+  local dest="$BIN_DIR/$BIN_NAME"
+  mkdir -p "$BIN_DIR"
+  if [[ -e "$dest" ]]; then
+    rm -f "$dest.old"
+    mv -f "$dest" "$dest.old"
+  fi
+  cp "$src" "$dest"
+  chmod +x "$dest"
+  rm -f "$dest.old"
+}
+
 print_success() {
   echo
   echo "Installed to: $BIN_DIR/$BIN_NAME"
@@ -138,7 +154,6 @@ install_from_binary() {
   echo "Downloading release ${tag} (${suffix})..."
   download_file "$base_url/$asset" "$asset_file"
 
-  mkdir -p "$BIN_DIR"
   tar -xzf "$asset_file" -C "$tmp_dir"
   found_bin="$(find "$tmp_dir" -type f -name "$BIN_NAME" | head -n1 || true)"
   if [[ -z "$found_bin" ]]; then
@@ -146,8 +161,7 @@ install_from_binary() {
     return 1
   fi
 
-  cp "$found_bin" "$BIN_DIR/$BIN_NAME"
-  chmod +x "$BIN_DIR/$BIN_NAME"
+  install_binary "$found_bin"
   print_success
 }
 
@@ -180,9 +194,7 @@ install_from_source() {
     return 1
   fi
 
-  mkdir -p "$BIN_DIR"
-  cp "$built_bin" "$BIN_DIR/$BIN_NAME"
-  chmod +x "$BIN_DIR/$BIN_NAME"
+  install_binary "$built_bin"
   print_success
 }
 

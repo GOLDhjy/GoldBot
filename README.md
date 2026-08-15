@@ -55,6 +55,16 @@ irm "https://raw.githubusercontent.com/GOLDhjy/GoldBot/master/scripts/install.ps
 cargo install --git https://github.com/GOLDhjy/GoldBot.git
 ```
 
+## 更新
+
+```bash
+goldbot update
+```
+
+自动检查并下载最新版本：已是最新则跳过，否则按平台执行官方安装脚本（覆盖安装到默认目录）。
+
+也可以手动重跑安装命令（macOS/Linux 用 `curl ... | bash`，Windows 用 `irm ... | iex`，见上文"安装"），或通过 Homebrew 更新：`brew upgrade goldbot`。
+
 ## 使用方法
 
 ```bash
@@ -65,6 +75,7 @@ goldbot
 
 | 参数 | 说明 |
 |---|---|
+| `update` | 自更新子命令：检查最新版本并按平台执行官方安装脚本，完成后退出 |
 | `-p <消息>` / `--prompt <消息>` | 启动时直接发送一条聊天消息，无需手动输入 |
 | `-y` / `--yes` | 启动时进入 Yolo 模式，自动执行所有 Confirm 级命令（Block 级命令仍会被拦截） |
 | `-M` / `--no-memory` | 进入无记忆模式 |

@@ -5,6 +5,7 @@ mod memory;
 mod tools;
 mod types;
 mod ui;
+mod update;
 
 use std::{
     io,
@@ -371,6 +372,14 @@ async fn main() -> anyhow::Result<()> {
             SetConsoleCP(65001);
         }
     }
+
+    // `goldbot update` 子命令：按平台执行官方安装脚本自更新，完成后直接退出。
+    if cli::is_update_subcommand() {
+        update::run()?;
+        return Ok(());
+    }
+    // 清理上次自更新遗留的备份文件（Windows 上运行中的 exe 无法立即删除）。
+    update::cleanup_stale_backup();
 
     let (cli_prompt, cli_yes, cli_no_memory) = cli::parse_cli_args();
     let headless = cli_prompt.is_some();
