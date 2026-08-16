@@ -45,6 +45,8 @@ const UNICODE_SYMBOLS: Symbols = Symbols {
     warning: "⚠",
 };
 
+// 仅在 Windows 旧终端下使用的 ASCII 回退符号集
+#[cfg(windows)]
 const ASCII_SYMBOLS: Symbols = Symbols {
     spinner_frames: &["|", "/", "-", "\\"],
     prompt: ">",
