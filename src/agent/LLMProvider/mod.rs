@@ -156,7 +156,8 @@ pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
+// GLM-5.3 官方上下文窗口为 1M（实测 coding 端点可接受 ~990K prompt tokens，无需 [1m] 后缀）。
+const DEFAULT_GLM_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 const DEFAULT_KIMI_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 const DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 const MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
@@ -558,6 +559,19 @@ mod tests {
 
         assert_eq!(glm_models.len(), 1);
         assert!(glm_models.contains(&"glm-5.3"));
+    }
+
+    #[test]
+    fn glm_context_window_defaults_to_1m_tokens() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::remove_var("GOLDBOT_CONTEXT_WINDOW_TOKENS");
+            std::env::remove_var("BIGMODEL_CONTEXT_WINDOW_TOKENS");
+            std::env::remove_var("BIGMODEL_CODING_CONTEXT_WINDOW_TOKENS");
+        }
+        let backend = LlmBackend::Glm("glm-5.3".to_string());
+        assert_eq!(backend.context_window_tokens(), 1_000_000);
     }
 
     #[test]
