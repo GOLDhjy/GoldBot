@@ -132,6 +132,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
 const GLM_MODEL_PRESETS: &[&str] = &["glm-5.3"];
+const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 const DEFAULT_MIMO_MODEL: &str = "mimo-v2.5-pro";
 const MIMO_MODEL_PRESETS: &[&str] = &[
     DEFAULT_MIMO_MODEL,
@@ -144,7 +145,7 @@ pub const BACKEND_PRESETS: &[(&str, &[&str])] = &[
     ("GLM", GLM_MODEL_PRESETS),
     ("Kimi", &["kimi-for-coding"]),
     ("Mimo", MIMO_MODEL_PRESETS),
-    ("DeepSeek", &["deepseek-v4-pro", "deepseek-v4-flash"]),
+    ("DeepSeek", &[DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"]),
     (
         "MiniMax",
         &[
@@ -198,13 +199,20 @@ fn default_mimo_model() -> String {
         .unwrap_or_else(|| DEFAULT_MIMO_MODEL.to_string())
 }
 
-/// DeepSeek 默认模型：`DEEPSEEK_MODEL` 或 `deepseek-v4-pro`。
+/// DeepSeek 默认模型：`DEEPSEEK_MODEL` 或最新版 Flash（当前为 V4.1-Flash-1017）。
 pub(crate) fn default_deepseek_model() -> String {
     std::env::var("DEEPSEEK_MODEL")
         .ok()
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| "deepseek-v4-pro".to_string())
+        .and_then(|model| normalize_deepseek_model_name(&model))
+        .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string())
+}
+
+fn normalize_deepseek_model_name(model: &str) -> Option<String> {
+    match model.trim().to_ascii_lowercase().as_str() {
+        DEFAULT_DEEPSEEK_MODEL | "deepseek-v4-flash" => Some(DEFAULT_DEEPSEEK_MODEL.to_string()),
+        "deepseek-v4-pro" => Some("deepseek-v4-pro".to_string()),
+        _ => None,
+    }
 }
 
 fn normalize_mimo_model_name(model: &str) -> String {
@@ -460,7 +468,7 @@ impl LlmBackend {
                     .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".to_string()),
             ),
             Self::DeepSeek(model) => {
-                // 标题栏展示当前思考等级，例如 `deepseek-v4-pro · high`。
+                // 标题栏展示当前思考等级，例如 `deepseek-flash · high`。
                 let effort = deepseek_effort_from_env();
                 let label = match effort {
                     Some(e) => format!("{model} · {e}"),
@@ -584,6 +592,60 @@ mod tests {
 
         assert_eq!(kimi_models.len(), 1);
         assert!(kimi_models.contains(&"kimi-for-coding"));
+    }
+
+    #[test]
+    fn deepseek_backend_presets_only_include_latest_flash_and_pro() {
+        let models = BACKEND_PRESETS
+            .iter()
+            .find(|(label, _)| *label == "DeepSeek")
+            .map(|(_, models)| *models)
+            .expect("DeepSeek backend preset should exist");
+
+        assert_eq!(models, &["deepseek-flash", "deepseek-v4-pro"]);
+    }
+
+    #[test]
+    fn deepseek_backend_from_env_uses_valid_model_or_latest_flash() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_provider = std::env::var_os("LLM_PROVIDER");
+        let previous_model = std::env::var_os("DEEPSEEK_MODEL");
+
+        unsafe {
+            std::env::set_var("LLM_PROVIDER", "deepseek");
+        }
+        for (configured, expected) in [
+            (None, "deepseek-flash"),
+            (Some(""), "deepseek-flash"),
+            (Some("   "), "deepseek-flash"),
+            (Some(" DeepSeek-Flash "), "deepseek-flash"),
+            (Some("DeepSeek-V4-Pro"), "deepseek-v4-pro"),
+            (Some("deepseek-v4-flash"), "deepseek-flash"),
+            (Some("unknown-model"), "deepseek-flash"),
+        ] {
+            unsafe {
+                match configured {
+                    Some(model) => std::env::set_var("DEEPSEEK_MODEL", model),
+                    None => std::env::remove_var("DEEPSEEK_MODEL"),
+                }
+            }
+            let backend = LlmBackend::from_env();
+            assert_eq!(backend.backend_label(), "DeepSeek");
+            assert_eq!(backend.model_name(), expected);
+            assert_eq!(backend.required_key_name(), "DEEPSEEK_API_KEY");
+        }
+
+        for (name, previous) in [
+            ("LLM_PROVIDER", previous_provider),
+            ("DEEPSEEK_MODEL", previous_model),
+        ] {
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     #[test]

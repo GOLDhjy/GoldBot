@@ -144,6 +144,7 @@ LLM 使用 `question` 工具时弹出，选项由 LLM 决定。最后一项通�
 | `/compact` | 立即截断上下文，保留最近 18 条消息 |
 | `/memory` | 查看当前长期和短期记忆内容 |
 | `/thinking` | 切换原生 Thinking 模式（同 Tab 键） |
+| `/model` | 选择 LLM 后端、模型及支持的思考强度 |
 | `/skills` | 列出所有已发现的 Skill |
 | `/mcp` | 列出所有已注册的 MCP 工具及状态 |
 | `/status` | 显示 workspace、模型、Thinking 状态等配置摘要 |
@@ -257,13 +258,18 @@ description: 整理和处理 PDF 文件
 |---|---|---|---|
 | `BIGMODEL_API_KEY` | 否 | — | BigModel API 密钥 |
 | `KIMI_API_KEY` | 否 | — | Kimi API 密钥 |
+| `DEEPSEEK_API_KEY` | 否 | — | DeepSeek API 密钥 |
 | `MIMO_API_KEY` | 否 | — | Xiaomi MiMo API 密钥 |
 | `MINIMAX_API_KEY` | 否 | — | MiniMax API 密钥 |
-| `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`minimax` |
+| `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`deepseek`、`minimax` |
 | `BIGMODEL_CODING_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API 基础 URL，未设置时默认走 coding 端点 |
 | `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，默认预设为 `glm-5`、`glm-5.1`、`glm-5.2`、`glm-5v-turbo` |
 | `KIMI_BASE_URL` | 否 | `https://api.kimi.com/coding/v1` 或 `https://api.moonshot.cn/v1` | Kimi API 基础 URL |
 | `KIMI_MODEL` | 否 | `kimi-for-coding` 或 `kimi-k2.5` | Kimi 模型名称 |
+| `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | DeepSeek API 基础 URL |
+| `DEEPSEEK_MODEL` | 否 | `deepseek-flash` | DeepSeek API 模型名称：`deepseek-flash`、`deepseek-v4-pro`；旧配置 `deepseek-v4-flash` 自动映射为 `deepseek-flash` |
+| `DEEPSEEK_EFFORT` | 否 | 官方默认 `high` | 思考强度：`low`、`high`、`max`；Tab 可切换思考模式 |
+| `DEEPSEEK_CONTEXT_WINDOW_TOKENS` | 否 | `1000000` | DeepSeek 上下文预算估算值 |
 | `MIMO_BASE_URL` | 否 | `https://api.xiaomimimo.com/v1` | Xiaomi MiMo 普通 chat API 基础 URL |
 | `MIMO_MODEL` | 否 | `mimo-v2.5-pro` | Xiaomi MiMo 模型名称，支持 `mimo-v2.5-pro`、`mimo-v2-pro`、`mimo-v2-flash`、`mimo-v2-omni` |
 | `MIMO_CONTEXT_WINDOW_TOKENS` | 否 | 按模型估算 | MiMo 上下文预算估算值，`mimo-v2.5-pro` 默认为 `1000000`，其他预设默认为 `256000` |
@@ -275,6 +281,21 @@ description: 整理和处理 PDF 文件
 | `GOLDBOT_MCP_SERVERS_FILE` | 否 | `~/.goldbot/mcp_servers.json` | MCP 配置文件路径 |
 | `HTTP_PROXY` | 否 | — | HTTP 代理 |
 | `API_TIMEOUT_MS` | 否 | — | 请求超时（毫秒） |
+
+### 使用 DeepSeek V4.1 Flash
+
+2026 年 10 月 17 日更新的 **DeepSeek-V4.1-Flash-1017** 使用官方 API 名称 `deepseek-flash`，该名称会跟随官方最新 Flash 版本更新，详见 [DeepSeek 更新记录](https://api-docs.deepseek.com/updates/)。在 `~/.goldbot/.env` 中设置：
+
+```dotenv
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_EFFORT=high
+```
+
+启动后也可以打开 `/model` → `DeepSeek`，菜单仅显示 `DeepSeek-V4.1-Flash` 和 `DeepSeek-V4-Pro`，分别使用 API 名称 `deepseek-flash` 和 `deepseek-v4-pro`。选择模型后再选择思考强度；Tab 切换思考模式。旧配置 `deepseek-v4-flash` 自动映射为 `deepseek-flash`，不再作为独立菜单项显示。
+
+未指定 `LLM_PROVIDER` 时优先检测 Kimi；没有 Kimi key 时，若设置了 `BIGMODEL_API_KEY` 则使用 GLM，否则依次检测 DeepSeek、MiniMax、Mimo。配置多个 key 时，建议显式设置 `LLM_PROVIDER=deepseek`。
 
 ## 技术细节
 

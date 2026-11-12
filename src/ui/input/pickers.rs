@@ -584,10 +584,15 @@ pub(super) fn enter_model_picker_model_stage(app: &mut App, screen: &mut Screen,
         .1
         .iter()
         .map(|m| {
+            let label = match (backend, *m) {
+                ("DeepSeek", "deepseek-flash") => "DeepSeek-V4.1-Flash",
+                ("DeepSeek", "deepseek-v4-pro") => "DeepSeek-V4-Pro",
+                _ => *m,
+            };
             if *m == current_model {
-                format!("{m}  ✓")
+                format!("{label}  ✓")
             } else {
-                m.to_string()
+                label.to_string()
             }
         })
         .collect();

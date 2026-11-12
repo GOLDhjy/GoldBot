@@ -129,6 +129,7 @@ Type `/` in an empty input box to open the command picker. Type to filter, `↑/
 | `/compact` | Immediately truncate context, keeping the last 18 messages |
 | `/memory` | View current long-term and short-term memory |
 | `/thinking` | Toggle native Thinking mode (same as Tab) |
+| `/model` | Select the LLM backend, model, and supported thinking effort |
 | `/skills` | List all discovered Skills |
 | `/mcp` | List all registered MCP tools and their status |
 | `/status` | Show workspace, model, Thinking state, and other config |
@@ -238,7 +239,13 @@ Config is stored at `~/.goldbot/.env` — auto-created from template on first ru
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `BIGMODEL_API_KEY` | ✅ | — | BigModel API key |
+| `BIGMODEL_API_KEY` | No | — | BigModel API key; configure at least one provider key |
+| `DEEPSEEK_API_KEY` | No | — | DeepSeek API key |
+| `LLM_PROVIDER` | No | Auto-detected | Explicit provider: `glm`, `kimi`, `mimo`, `deepseek`, or `minimax` |
+| `DEEPSEEK_BASE_URL` | No | `https://api.deepseek.com` | DeepSeek API base URL |
+| `DEEPSEEK_MODEL` | No | `deepseek-flash` | API model name: `deepseek-flash` or `deepseek-v4-pro`; legacy `deepseek-v4-flash` configurations automatically map to `deepseek-flash` |
+| `DEEPSEEK_EFFORT` | No | API default `high` | Thinking effort: `low`, `high`, or `max`; Tab toggles thinking mode |
+| `DEEPSEEK_CONTEXT_WINDOW_TOKENS` | No | `1000000` | Estimated DeepSeek context budget |
 | `BIGMODEL_CODING_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API base URL |
 | `BIGMODEL_MODEL` | No | `glm-5` | Model name. Supports `glm-5`, `glm-5.1`, `glm-5.2`, and `glm-5v-turbo` |
 | `BOCHA_API_KEY` | No | — | Bocha AI search key |
@@ -247,6 +254,21 @@ Config is stored at `~/.goldbot/.env` — auto-created from template on first ru
 | `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config file path |
 | `HTTP_PROXY` | No | — | HTTP proxy |
 | `API_TIMEOUT_MS` | No | — | Request timeout in milliseconds |
+
+### Using DeepSeek V4.1 Flash
+
+**DeepSeek-V4.1-Flash-1017**, updated on October 17, 2026, uses the official API model name `deepseek-flash`. This name follows the latest official Flash version; see the [DeepSeek change log](https://api-docs.deepseek.com/updates/). Set the following in `~/.goldbot/.env`:
+
+```dotenv
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_EFFORT=high
+```
+
+After startup, open `/model` → `DeepSeek`. The menu shows only `DeepSeek-V4.1-Flash` and `DeepSeek-V4-Pro`, using the API names `deepseek-flash` and `deepseek-v4-pro`, respectively. Select a model, then choose its thinking effort. Press Tab to toggle thinking mode. Legacy `deepseek-v4-flash` configurations automatically map to `deepseek-flash` and no longer appear as a separate menu option.
+
+Without `LLM_PROVIDER`, detection checks Kimi first. If no Kimi key is present, a configured `BIGMODEL_API_KEY` selects GLM; otherwise, detection checks DeepSeek, MiniMax, then Mimo. Set `LLM_PROVIDER=deepseek` explicitly when multiple keys are configured.
 
 ## Technical Details
 

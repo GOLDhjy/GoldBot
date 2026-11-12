@@ -8,7 +8,7 @@ pub(crate) struct DeepSeekProvider;
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 
-// ── Wire types ────────────────────────────────────────────────────────────────
+// ── 请求类型 ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct ApiMessage {
@@ -24,8 +24,7 @@ struct ThinkingParam {
 
 /// DeepSeek 请求体。
 ///
-/// 思考模式（thinking 开启）下 `temperature` / `top_p` / `presence_penalty` /
-/// `frequency_penalty` 均不生效，为避免歧义一律不发送。
+/// 沿用 API 默认采样参数，不发送 `temperature` / `top_p` 等可选参数。
 /// 思考强度由 `reasoning_effort`（low/high/max）控制，默认 high。
 #[derive(Serialize)]
 struct ApiRequest {
@@ -42,7 +41,7 @@ struct ApiRequest {
     reasoning_effort: Option<String>,
 }
 
-// ── Response types ────────────────────────────────────────────────────────────
+// ── 响应类型 ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct ApiResponse {
@@ -63,7 +62,7 @@ struct ApiChoiceMessage {
     reasoning_content: Option<String>,
 }
 
-// ── SSE streaming types ───────────────────────────────────────────────────────
+// ── SSE 流式类型 ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct StreamEvent {
@@ -101,7 +100,7 @@ impl UsageParam {
     }
 }
 
-// ── Implementation ────────────────────────────────────────────────────────────
+// ── 接口实现 ──────────────────────────────────────────────────────────────────
 
 impl LlmProvider for DeepSeekProvider {
     async fn chat_stream_with<F, G>(
@@ -213,10 +212,7 @@ fn build_request(
 
 /// 归一化模型名：仅接受官方模型，未知值回落默认模型。
 fn normalize_deepseek_model(model: &str) -> String {
-    match model.trim().to_ascii_lowercase().as_str() {
-        "deepseek-v4-pro" | "deepseek-v4-flash" => model.trim().to_ascii_lowercase(),
-        _ => crate::agent::provider::default_deepseek_model(),
-    }
+    super::normalize_deepseek_model_name(model).unwrap_or_else(super::default_deepseek_model)
 }
 
 async fn parse_non_stream_response(resp: reqwest::Response) -> Result<(String, Usage)> {
@@ -322,9 +318,9 @@ mod tests {
 
     #[test]
     fn request_body_only_sends_thinking_fields() {
-        // 思考模式下 temperature/top_p 等采样参数不生效，不应出现在请求体中。
+        // 沿用 API 默认采样参数，确保 Flash 的请求不会混入其他 provider 的配置。
         let body = ApiRequest {
-            model: "deepseek-v4-pro".to_string(),
+            model: "deepseek-flash".to_string(),
             messages: vec![ApiMessage {
                 role: "user",
                 content: "Hi".to_string(),
@@ -339,7 +335,7 @@ mod tests {
         assert!(json.get("top_p").is_none());
         assert!(json.get("presence_penalty").is_none());
         assert!(json.get("frequency_penalty").is_none());
-        assert_eq!(json["model"], "deepseek-v4-pro");
+        assert_eq!(json["model"], "deepseek-flash");
         assert_eq!(json["stream"], true);
         assert_eq!(json["thinking"]["type"], "enabled");
         assert_eq!(json["reasoning_effort"], "high");
@@ -406,6 +402,11 @@ mod tests {
 
     #[test]
     fn model_aliases_normalize_to_official_names() {
+        assert_eq!(normalize_deepseek_model("deepseek-flash"), "deepseek-flash");
+        assert_eq!(
+            normalize_deepseek_model(" DeepSeek-Flash "),
+            "deepseek-flash"
+        );
         assert_eq!(
             normalize_deepseek_model("deepseek-v4-pro"),
             "deepseek-v4-pro"
@@ -416,7 +417,7 @@ mod tests {
         );
         assert_eq!(
             normalize_deepseek_model("deepseek-v4-flash"),
-            "deepseek-v4-flash"
+            "deepseek-flash"
         );
     }
 
@@ -435,23 +436,41 @@ mod tests {
     #[test]
     fn build_request_includes_effort_and_thinking_switch() {
         let _guard = ENV_LOCK.lock().unwrap();
+        let previous_key = std::env::var_os("DEEPSEEK_API_KEY");
+        let previous_model = std::env::var_os("DEEPSEEK_MODEL");
+        let previous_effort = std::env::var_os("DEEPSEEK_EFFORT");
 
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "test-key");
+            std::env::set_var("DEEPSEEK_MODEL", "deepseek-v4-pro");
             std::env::set_var("DEEPSEEK_EFFORT", "max");
         }
 
         let messages = vec![Message::user("hi")];
-        let (_, _, body) = build_request(&messages, "deepseek-v4-pro", true, true).unwrap();
+        let (_, _, body) = build_request(&messages, " DeepSeek-Flash ", true, true).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["model"], "deepseek-flash");
+        assert_eq!(json["messages"][0]["role"], "user");
+        assert_eq!(json["messages"][0]["content"], "hi");
+        assert_eq!(json["stream"], true);
         assert_eq!(body.reasoning_effort.as_deref(), Some("max"));
         assert_eq!(body.thinking.as_ref().unwrap().kind, "enabled");
 
-        let (_, _, body) = build_request(&messages, "deepseek-v4-pro", true, false).unwrap();
+        let (_, _, body) = build_request(&messages, "deepseek-flash", true, false).unwrap();
+        assert_eq!(body.model, "deepseek-flash");
         assert_eq!(body.thinking.as_ref().unwrap().kind, "disabled");
 
-        unsafe {
-            std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::remove_var("DEEPSEEK_EFFORT");
+        for (name, previous) in [
+            ("DEEPSEEK_API_KEY", previous_key),
+            ("DEEPSEEK_MODEL", previous_model),
+            ("DEEPSEEK_EFFORT", previous_effort),
+        ] {
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
         }
     }
 }
