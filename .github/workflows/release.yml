@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and publish (e.g. v0.10.2)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,9 +20,61 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve release tag
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            echo "::error::A release tag is required"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must have the format vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # 手动触发时从当前工作流构建指定标签，支持修复流程后补发已有版本。
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.resolve.outputs.tag }}
+
+      - name: Verify package version matches tag
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          if tag != f"v{version}":
+              raise SystemExit(f"::error::Tag {tag} does not match Cargo.toml version {version}")
+          PY
+
   build:
     name: build-${{ matrix.target }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -27,12 +84,12 @@ jobs:
             archive: tar.gz
             suffix: linux-x86_64
             bin_ext: ""
-          - os: macos-14
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
             suffix: macos-x86_64
             bin_ext: ""
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             archive: tar.gz
             suffix: macos-aarch64
@@ -46,6 +103,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -59,7 +118,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           PKG="${BIN_NAME}-v${VERSION}-${{ matrix.suffix }}"
           mkdir -p "dist/${PKG}"
           cp "target/${{ matrix.target }}/release/${BIN_BUILD_NAME}${{ matrix.bin_ext }}" "dist/${PKG}/${BIN_NAME}${{ matrix.bin_ext }}"
@@ -70,7 +129,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $Version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $Version = $env:RELEASE_TAG.TrimStart("v")
           $Pkg = "$env:BIN_NAME-v$Version-${{ matrix.suffix }}"
           New-Item -ItemType Directory -Force -Path "dist/$Pkg" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$env:BIN_BUILD_NAME${{ matrix.bin_ext }}" "dist/$Pkg/$env:BIN_NAME${{ matrix.bin_ext }}"
@@ -85,8 +144,7 @@ jobs:
 
   release:
     name: publish-release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -105,5 +163,13 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
           files: dist/*
           generate_release_notes: true
+          make_latest: true
+
+  update-formula:
+    needs: [prepare, release]
+    uses: ./.github/workflows/update-formula.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
