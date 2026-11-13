@@ -47,8 +47,8 @@ jobs:
             echo "tag is empty"
             exit 1
           fi
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "tag must use the stable version format vX.Y.Z"
+          if [[ "$TAG" != v* ]]; then
+            echo "tag must start with v, got: $TAG"
             exit 1
           fi
           VERSION="${TAG#v}"
