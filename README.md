@@ -17,7 +17,7 @@
 - 上下文自动压缩：消息超阈值时自动摘要并截断，防止 token 膨胀
 - 持久化记忆：短期按日期存储，长期自动提取偏好，每次请求随 System Prompt 发送
 - MCP 工具接入：启动时自动发现并映射为 `mcp_<server>_<tool>`
-- 联网搜索：接入 Bocha AI，LLM 可主动检索实时信息
+- 联网搜索：内置 DeepSeek 服务端搜索，可检索网页并获取来源链接和摘要
 - Skills 系统：启动时自动发现 `~/.goldbot/skills/` 下的技能，注入系统提示词
 - **@ 文件附加**：输入框中键入 `@` 实时搜索文件，选中后自动附加到消息发送给 LLM
 - **Slash 命令**：`/` 打开命令选择器，内置 8 个实用命令，支持用户自定义扩展
@@ -258,7 +258,7 @@ description: 整理和处理 PDF 文件
 |---|---|---|---|
 | `BIGMODEL_API_KEY` | 否 | — | BigModel API 密钥 |
 | `KIMI_API_KEY` | 否 | — | Kimi API 密钥 |
-| `DEEPSEEK_API_KEY` | 否 | — | DeepSeek API 密钥 |
+| `DEEPSEEK_API_KEY` | 否 | — | DeepSeek 对话和内置 `web_search` 所用的 API 密钥 |
 | `MIMO_API_KEY` | 否 | — | Xiaomi MiMo API 密钥 |
 | `MINIMAX_API_KEY` | 否 | — | MiniMax API 密钥 |
 | `LLM_PROVIDER` | 否 | 自动检测 | 显式指定 `glm`、`kimi`、`mimo`、`deepseek`、`minimax` |
@@ -266,7 +266,7 @@ description: 整理和处理 PDF 文件
 | `BIGMODEL_MODEL` | 否 | `glm-5` | 模型名称，默认预设为 `glm-5`、`glm-5.1`、`glm-5.2`、`glm-5v-turbo` |
 | `KIMI_BASE_URL` | 否 | `https://api.kimi.com/coding/v1` 或 `https://api.moonshot.cn/v1` | Kimi API 基础 URL |
 | `KIMI_MODEL` | 否 | `kimi-for-coding` 或 `kimi-k2.5` | Kimi 模型名称 |
-| `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | DeepSeek API 基础 URL |
+| `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | DeepSeek 对话和联网搜索的 API 基础 URL |
 | `DEEPSEEK_MODEL` | 否 | `deepseek-flash` | DeepSeek API 模型名称：`deepseek-flash`、`deepseek-v4-pro`；旧配置 `deepseek-v4-flash` 自动映射为 `deepseek-flash` |
 | `DEEPSEEK_EFFORT` | 否 | 官方默认 `high` | 思考强度：`low`、`high`、`max`；Tab 可切换思考模式 |
 | `DEEPSEEK_CONTEXT_WINDOW_TOKENS` | 否 | `1000000` | DeepSeek 上下文预算估算值 |
@@ -275,12 +275,13 @@ description: 整理和处理 PDF 文件
 | `MIMO_CONTEXT_WINDOW_TOKENS` | 否 | 按模型估算 | MiMo 上下文预算估算值，`mimo-v2.5-pro` 默认为 `1000000`，其他预设默认为 `256000` |
 | `MINIMAX_BASE_URL` | 否 | `https://api.minimaxi.com/v1` | MiniMax API 基础 URL |
 | `MINIMAX_MODEL` | 否 | `MiniMax-M2.5` | MiniMax 模型名称 |
-| `BOCHA_API_KEY` | 否 | — | Bocha AI 搜索密钥 |
 | `GOLDBOT_TASK` | 否 | — | 启动时直接执行的任务 |
 | `GOLDBOT_MCP_SERVERS` | 否 | — | MCP 配置 JSON（覆盖文件） |
 | `GOLDBOT_MCP_SERVERS_FILE` | 否 | `~/.goldbot/mcp_servers.json` | MCP 配置文件路径 |
 | `HTTP_PROXY` | 否 | — | HTTP 代理 |
-| `API_TIMEOUT_MS` | 否 | — | 请求超时（毫秒） |
+| `API_TIMEOUT_MS` | 否 | 联网搜索为 `60000` | 请求超时（毫秒） |
+
+在 `~/.goldbot/.env` 中配置 `DEEPSEEK_API_KEY` 即可使用内置联网搜索。搜索固定使用 `deepseek-flash`，可以搭配任意对话模型使用。使用自定义 `DEEPSEEK_BASE_URL` 时，服务端需要支持 `deepseek_web_search`。DeepSeek 免收服务端搜索费，模型 Token 按量计费。 [DeepSeek 联网工具文档](https://api-docs.deepseek.com/zh-cn/guides/web_tools/)
 
 ### 使用 DeepSeek V4.1 Flash
 
@@ -312,7 +313,7 @@ DEEPSEEK_EFFORT=high
   │     ├─ 拓扑排序 → 自动并行/串行
   │     ├─ 依赖合并 → InputMerge (Concat/Structured)
   │     └─ 输出汇总 → OutputMerge (All/First/Concat)
-  ├─ web_search → Bocha AI → 返回摘要继续循环
+  ├─ web_search → DeepSeek → 返回网页来源和摘要继续循环
   ├─ plan       → 渲染 markdown 计划
   ├─ question   → 显示选项菜单，等待用户回答
   ├─ mcp_*      → 调用对应 MCP server

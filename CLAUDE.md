@@ -62,7 +62,7 @@ When a task starts (`start_task` in `agent/step.rs`):
 | `src/tools/shell.rs` | Command execution (bash on Unix, PowerShell on Windows), command classification (Read/Write/Update/Search/Bash) |
 | `src/tools/safety.rs` | `assess_command()` - three-tier risk: Block (dangerous), Confirm (destructive), Safe (read-only) |
 | `src/tools/mcp.rs` | MCP server discovery (stdio), tool registration, execution, `augment_system_prompt()` |
-| `src/tools/web_search.rs` | Bocha AI integration for internet search |
+| `src/tools/web_search.rs` | DeepSeek integration for internet search |
 | `src/tools/skills.rs` | Skill discovery from `~/.goldbot/skills/*/SKILL.md` |
 | `src/memory/store.rs` | Dual-layer memory: short-term daily logs (`memory/YYYY-MM-DD.md`), long-term (`MEMORY.md`) |
 | `src/memory/compactor.rs` | Context compression logic |
@@ -87,7 +87,7 @@ The LLM responds with XML-style tags:
 
 Supported tools:
 - `shell` - Execute command (risk-assessed)
-- `web_search` - Internet search via Bocha AI
+- `web_search` - Internet search via DeepSeek
 - `plan` - Render markdown plan to TUI
 - `question` - Ask user with numbered options
 - `mcp_<server>_<tool>` - Call MCP tool
@@ -134,7 +134,7 @@ Trigger with `GE` prefix in input.
 | `BIGMODEL_API_KEY` | Yes | — | GLM API key |
 | `BIGMODEL_CODING_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM coding endpoint |
 | `BIGMODEL_MODEL` | No | `glm-5` | Model name. Supports `glm-5`, `glm-5.1`, `glm-5.2`, and `glm-5v-turbo` |
-| `BOCHA_API_KEY` | No | — | Bocha AI search key |
+| `DEEPSEEK_API_KEY` | No | — | DeepSeek API key for chat and web search |
 | `GOLDBOT_TASK` | No | — | Predefined task on startup |
 | `GOLDBOT_MCP_SERVERS` | No | — | MCP config JSON |
 | `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config path |

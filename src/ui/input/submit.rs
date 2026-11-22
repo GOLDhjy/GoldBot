@@ -47,7 +47,7 @@ pub(super) fn should_interrupt_llm_chat_loop(app: &App) -> bool {
 }
 
 pub(super) fn interrupt_llm_chat_loop(app: &mut App, screen: &mut Screen) {
-    let canceling_shell = app.shell_task_running;
+    let canceling_shell = app.shell_task_running && !app.web_search_pending;
     if canceling_shell {
         crate::tools::shell::request_cancel_running_shell_commands();
     }

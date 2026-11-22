@@ -14,7 +14,7 @@ A cross-platform TUI Agent built with Rust that automatically plans and executes
 - **Auto Context Compaction**: Summarizes old messages when threshold is reached
 - **Persistent Memory**: Short-term (daily) + long-term (auto-extracted preferences), injected into every request
 - **MCP Tools**: Auto-discover and expose MCP tools as `mcp_<server>_<tool>`
-- **Web Search**: Bocha AI integration — LLM can proactively search for up-to-date information
+- **Web Search** with DeepSeek returns live web sources and snippets
 - **Skills System**: Auto-discovers skills from `~/.goldbot/skills/` and injects them into the system prompt
 - **@ File Attachment**: Type `@` in the input box to search and attach files — they are sent with the message to the LLM
 - **Slash Commands**: Type `/` to open a command picker with 8 built-in commands and user-defined extensions
@@ -240,20 +240,21 @@ Config is stored at `~/.goldbot/.env` — auto-created from template on first ru
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `BIGMODEL_API_KEY` | No | — | BigModel API key; configure at least one provider key |
-| `DEEPSEEK_API_KEY` | No | — | DeepSeek API key |
+| `DEEPSEEK_API_KEY` | No | — | DeepSeek API key for chat and the built-in `web_search` tool |
 | `LLM_PROVIDER` | No | Auto-detected | Explicit provider: `glm`, `kimi`, `mimo`, `deepseek`, or `minimax` |
-| `DEEPSEEK_BASE_URL` | No | `https://api.deepseek.com` | DeepSeek API base URL |
+| `DEEPSEEK_BASE_URL` | No | `https://api.deepseek.com` | DeepSeek API base URL for chat and web search |
 | `DEEPSEEK_MODEL` | No | `deepseek-flash` | API model name: `deepseek-flash` or `deepseek-v4-pro`; legacy `deepseek-v4-flash` configurations automatically map to `deepseek-flash` |
 | `DEEPSEEK_EFFORT` | No | API default `high` | Thinking effort: `low`, `high`, or `max`; Tab toggles thinking mode |
 | `DEEPSEEK_CONTEXT_WINDOW_TOKENS` | No | `1000000` | Estimated DeepSeek context budget |
 | `BIGMODEL_CODING_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM Coding API base URL |
 | `BIGMODEL_MODEL` | No | `glm-5` | Model name. Supports `glm-5`, `glm-5.1`, `glm-5.2`, and `glm-5v-turbo` |
-| `BOCHA_API_KEY` | No | — | Bocha AI search key |
 | `GOLDBOT_TASK` | No | — | Task to run immediately on startup |
 | `GOLDBOT_MCP_SERVERS` | No | — | MCP config JSON (overrides file) |
 | `GOLDBOT_MCP_SERVERS_FILE` | No | `~/.goldbot/mcp_servers.json` | MCP config file path |
 | `HTTP_PROXY` | No | — | HTTP proxy |
-| `API_TIMEOUT_MS` | No | — | Request timeout in milliseconds |
+| `API_TIMEOUT_MS` | No | `60000` for web search | Request timeout in milliseconds |
+
+Set `DEEPSEEK_API_KEY` in `~/.goldbot/.env` to enable built-in web search. The tool uses `deepseek-flash` with any chat model. If you override `DEEPSEEK_BASE_URL`, the server must support `deepseek_web_search`. DeepSeek charges for model tokens and waives the server-side search fee. [DeepSeek web tools documentation](https://api-docs.deepseek.com/guides/web_tools/)
 
 ### Using DeepSeek V4.1 Flash
 
@@ -281,7 +282,7 @@ User input → start_task() → LLM call → process_llm_result()
   │     ├─ Safe    → Execute directly, capture before/after diff
   │     ├─ Confirm → Show confirmation menu
   │     └─ Block   → Show blocked command, return error to LLM
-  ├─ web_search → Bocha AI → return summary, continue loop
+  ├─ web_search → DeepSeek → return web sources and snippets, continue loop
   ├─ plan       → Render markdown plan
   ├─ question   → Show option menu, wait for user answer
   ├─ mcp_*      → Call MCP server
@@ -319,7 +320,7 @@ src/
 │   ├── shell.rs         # Command execution, classification, diff capture
 │   ├── safety.rs        # Risk assessment (Safe/Confirm/Block)
 │   ├── mcp.rs           # MCP server discovery and invocation
-│   ├── web_search.rs    # Bocha AI search
+│   ├── web_search.rs    # DeepSeek web search
 │   ├── skills.rs        # Skills loading
 │   └── command.rs       # Slash command definitions and discovery
 ├── memory/

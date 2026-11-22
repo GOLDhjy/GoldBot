@@ -144,7 +144,7 @@ Follow Conventional Commits: `feat: ...`, `fix: ...`, `refactor: ...`. Include `
 | `BIGMODEL_API_KEY` | — | GLM API key (required) |
 | `BIGMODEL_CODING_BASE_URL` | `https://open.bigmodel.cn/api/coding/paas/v4` | GLM coding endpoint |
 | `BIGMODEL_MODEL` | `GLM-4.7` | Model name |
-| `BOCHA_API_KEY` | — | Web search via Bocha AI |
+| `DEEPSEEK_API_KEY` | — | DeepSeek API key for chat and web search |
 | `GOLDBOT_TASK` | — | Pre-filled task on startup |
 | `GOLDBOT_MCP_SERVERS` | — | MCP config JSON (inline) |
 | `GOLDBOT_MCP_SERVERS_FILE` | `~/.goldbot/mcp_servers.json` | MCP config path |

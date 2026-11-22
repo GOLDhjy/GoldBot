@@ -6,8 +6,6 @@ use crate::agent::provider::{LlmProvider, Message, Role, Usage, Utf8StreamDecode
 #[derive(Clone, Copy)]
 pub(crate) struct DeepSeekProvider;
 
-const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
-
 // ── 请求类型 ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -181,8 +179,7 @@ fn build_request(
     show_thinking: bool,
 ) -> Result<(String, String, ApiRequest)> {
     let api_key = std::env::var("DEEPSEEK_API_KEY").context("DEEPSEEK_API_KEY env var not set")?;
-    let base_url =
-        std::env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url = super::deepseek_base_url();
     let model = normalize_deepseek_model(model);
 
     let api_messages: Vec<ApiMessage> = messages

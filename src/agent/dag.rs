@@ -337,11 +337,9 @@ async fn run_subagent_worker(
                                     .unwrap_or_else(|_| "[Glob: task panicked]".to_string())
                                 }
                                 crate::types::LlmAction::WebSearch { query } => {
-                                    tokio::task::spawn_blocking(move || execute_web_search(&query))
+                                    crate::tools::web_search::search(&config.http_client, &query)
                                         .await
-                                        .unwrap_or_else(|_| {
-                                            "[WebSearch: task panicked]".to_string()
-                                        })
+                                        .unwrap_or_else(|e| format!("[Web search error: {e}]"))
                                 }
                                 crate::types::LlmAction::Skill { name } => {
                                     skill_tool_result(config.skills.as_ref(), &name)
@@ -560,13 +558,6 @@ fn execute_update(path: &str, line_start: usize, line_end: usize, new_string: &s
     match std::fs::write(path, final_content) {
         Ok(()) => format!("[Updated {path}: lines {line_start}-{line_end} replaced]"),
         Err(e) => format!("[Update write error: {}]", e),
-    }
-}
-
-fn execute_web_search(query: &str) -> String {
-    match crate::tools::web_search::search(query) {
-        Ok(result) => result.output,
-        Err(e) => format!("[Web search error: {e}]"),
     }
 }
 

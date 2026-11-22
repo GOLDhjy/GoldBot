@@ -50,6 +50,9 @@ pub(crate) enum ShellExecResult {
     Search {
         result: Result<crate::tools::search::SearchResult, String>,
     },
+    WebSearch {
+        result: Result<String, String>,
+    },
 }
 
 pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
@@ -85,6 +88,7 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     app.todo_items.clear();
     app.shell_task_running = false;
     app.shell_exec_rx = None;
+    app.web_search_pending = false;
     app.total_usage = Default::default();
     screen.todo_items.clear();
     // 新任务开始时清空已加载的 skill，避免将前一个任务的 skill 注入到新任务的 Sub-Agent。
@@ -718,6 +722,10 @@ pub(crate) fn handle_shell_exec_result(
                 record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
             }
         },
+        ShellExecResult::WebSearch { result } => match result {
+            Ok(output) => record_tool_result(app, screen, "Tool result (exit=0):", 0, output),
+            Err(err) => record_tool_result(app, screen, "Tool result (exit=-1):", -1, err),
+        },
     }
 
     screen.status.clear();
@@ -996,6 +1004,12 @@ pub(crate) fn execute_search_files(app: &mut App, screen: &mut Screen, pattern: 
 }
 
 pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str) {
+    if app.shell_task_running {
+        let msg = "Another task is still running. Please wait.";
+        record_tool_result(app, screen, "Tool result (exit=-1):", -1, msg);
+        return;
+    }
+
     let call_ev = Event::ToolCall {
         label: format!("WebSearch({query})"),
         command: query.to_string(),
@@ -1004,15 +1018,30 @@ pub(crate) fn execute_web_search(app: &mut App, screen: &mut Screen, query: &str
     emit_live_event(screen, &call_ev);
     app.task_events.push(call_ev);
 
-    match run_blocking_compat(|| crate::tools::web_search::search(query)) {
-        Ok(result) => {
-            record_tool_result(app, screen, "Tool result (exit=0):", 0, result.output);
+    let Some(client) = app.http_client.clone() else {
+        let msg = "Web search HTTP client is unavailable.";
+        record_tool_result(app, screen, "Tool result (exit=-1):", -1, msg);
+        return;
+    };
+
+    screen.status = format!("Searching web: {}", shorten_text(query, 40));
+    screen.refresh();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.shell_exec_rx = Some(rx);
+    app.shell_task_running = true;
+    app.web_search_pending = true;
+
+    let query = query.to_owned();
+    tokio::spawn(async move {
+        tokio::select! {
+            result = crate::tools::web_search::search(&client, &query) => {
+                let result = result.map_err(|e| format!("web search failed: {e}"));
+                let _ = tx.send(ShellExecResult::WebSearch { result });
+            }
+            _ = tx.closed() => {}
         }
-        Err(e) => {
-            let err = format!("web search failed: {e}");
-            record_tool_result(app, screen, "Tool result (exit=-1):", -1, err);
-        }
-    }
+    });
 }
 
 pub(crate) fn execute_glob_files(app: &mut App, screen: &mut Screen, pattern: &str, path: &str) {
@@ -1974,26 +2003,24 @@ pub(crate) fn poll_shell_exec_result(app: &mut App, screen: &mut Screen) {
         return;
     };
 
-    match rx.try_recv() {
-        Ok(result) => {
-            app.shell_exec_rx = None;
-            app.shell_task_running = false;
-            clear_running_shell_cancel_request();
-            handle_shell_exec_result(app, screen, result);
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            app.shell_exec_rx = None;
-            app.shell_task_running = false;
-            clear_running_shell_cancel_request();
-            handle_shell_exec_result(
-                app,
-                screen,
-                ShellExecResult::Command {
-                    result: Err("shell worker disconnected unexpectedly".to_string()),
-                },
-            );
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+    let result = match rx.try_recv() {
+        Ok(result) => result,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => ShellExecResult::Command {
+            result: Err("tool worker disconnected unexpectedly".to_string()),
+        },
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+    };
+    app.shell_exec_rx = None;
+    app.shell_task_running = false;
+    app.web_search_pending = false;
+    clear_running_shell_cancel_request();
+    handle_shell_exec_result(app, screen, result);
+}
+
+fn cancel_web_search(app: &mut App) {
+    if std::mem::take(&mut app.web_search_pending) {
+        app.shell_exec_rx = None;
+        app.shell_task_running = false;
     }
 }
 
@@ -2002,6 +2029,7 @@ pub(crate) fn interrupt_active_llm_loop(
     screen: &mut Screen,
     llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    cancel_web_search(app);
     if app.shell_task_running {
         request_cancel_running_shell_commands();
     }
@@ -2035,6 +2063,7 @@ pub(crate) async fn shutdown_background_work(
     screen: &mut Screen,
     llm_task_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    cancel_web_search(app);
     if app.shell_task_running {
         request_cancel_running_shell_commands();
         let deadline = std::time::Instant::now() + Duration::from_millis(300);

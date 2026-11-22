@@ -264,6 +264,10 @@ pub(crate) fn default_deepseek_model() -> String {
         .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string())
 }
 
+pub(crate) fn deepseek_base_url() -> String {
+    std::env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com".to_string())
+}
+
 fn normalize_deepseek_model_name(model: &str) -> Option<String> {
     match model.trim().to_ascii_lowercase().as_str() {
         DEFAULT_DEEPSEEK_MODEL | "deepseek-v4-flash" => Some(DEFAULT_DEEPSEEK_MODEL.to_string()),
@@ -531,11 +535,7 @@ impl LlmBackend {
                     Some(e) => format!("{model} · {e}"),
                     None => model.clone(),
                 };
-                (
-                    label,
-                    std::env::var("DEEPSEEK_BASE_URL")
-                        .unwrap_or_else(|_| "https://api.deepseek.com".to_string()),
-                )
+                (label, deepseek_base_url())
             }
         }
     }
