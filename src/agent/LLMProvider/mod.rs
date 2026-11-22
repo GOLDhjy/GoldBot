@@ -107,6 +107,63 @@ pub(crate) trait LlmProvider {
         G: FnMut(&str);
 }
 
+// ── Stream UTF-8 incremental decoder ─────────────────────────────────────────
+
+/// 流式 UTF-8 增量解码器，解决网络分包（chunk）截断多字节 UTF-8 字符（如中文）导致的乱码问题。
+#[derive(Default, Debug)]
+pub(crate) struct Utf8StreamDecoder {
+    buf: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    pub(crate) fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// 将新的网络分包字节追加并增量解码为有效 UTF-8 字符串追加到 target。
+    /// 若末尾包含不完整的多字节序列，则缓存在内部 buffer 中等待下一次输入。
+    pub(crate) fn decode_chunk(&mut self, chunk: &[u8], target: &mut String) {
+        self.buf.extend_from_slice(chunk);
+        loop {
+            match std::str::from_utf8(&self.buf) {
+                Ok(valid) => {
+                    target.push_str(valid);
+                    self.buf.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid_str =
+                            std::str::from_utf8(&self.buf[..valid_up_to]).unwrap_or_default();
+                        target.push_str(valid_str);
+                        self.buf.drain(..valid_up_to);
+                    }
+                    match e.error_len() {
+                        Some(err_len) => {
+                            // 遇到明确非法的字节序列，替换为 Unicode 替换字符，跳过错误字节继续
+                            target.push('\u{FFFD}');
+                            self.buf.drain(..err_len);
+                        }
+                        None => {
+                            // 末尾是不完整的多字节 UTF-8 序列，保留在 buf 中等待下一个 chunk
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 流结束时调用，将缓冲区中剩余的字节（若有不完整残留）以 lossy 方式刷入 target。
+    pub(crate) fn finish(&mut self, target: &mut String) {
+        if !self.buf.is_empty() {
+            target.push_str(&String::from_utf8_lossy(&self.buf));
+            self.buf.clear();
+        }
+    }
+}
+
 // ── HTTP client ───────────────────────────────────────────────────────────────
 
 pub fn build_http_client() -> Result<reqwest::Client> {
@@ -523,7 +580,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::{
         BACKEND_PRESETS, DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS, DEFAULT_MIMO_MODEL, LlmBackend,
-        MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS, default_mimo_context_window_tokens,
+        MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS, Utf8StreamDecoder, default_mimo_context_window_tokens,
         normalize_mimo_model_name,
     };
 
@@ -705,5 +762,63 @@ mod tests {
             default_mimo_context_window_tokens("mimo-v2-pro"),
             DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS
         );
+    }
+
+    #[test]
+    fn utf8_stream_decoder_handles_split_chinese_char() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        // "文件搜索、或"：其中 "或" 的 UTF-8 编码为 [0xE6, 0x88, 0x96]
+        let chunk1 = ["文件搜索、".as_bytes(), &[0xE6, 0x88]].concat();
+        let chunk2 = [&[0x96][..], "其他终端操作。".as_bytes()].concat();
+
+        decoder.decode_chunk(&chunk1, &mut out);
+        // 第一分块末尾的截断汉字应缓存在内部，此时输出应只有完整前缀
+        assert_eq!(out, "文件搜索、");
+
+        decoder.decode_chunk(&chunk2, &mut out);
+        decoder.finish(&mut out);
+        // 拼接第二个分块后，汉字应完整重组，不产生任何乱码或替换符
+        assert_eq!(out, "文件搜索、或其他终端操作。");
+    }
+
+    #[test]
+    fn utf8_stream_decoder_handles_split_emoji() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        // 🦀 编码为 [0xF0, 0x9F, 0xA6, 0x80] (4字节)
+        decoder.decode_chunk(&[0xF0], &mut out);
+        assert_eq!(out, "");
+        decoder.decode_chunk(&[0x9F, 0xA6], &mut out);
+        assert_eq!(out, "");
+        decoder.decode_chunk(&[0x80], &mut out);
+        assert_eq!(out, "🦀");
+        decoder.finish(&mut out);
+        assert_eq!(out, "🦀");
+    }
+
+    #[test]
+    fn utf8_stream_decoder_replaces_invalid_bytes_and_preserves_valid() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        // 包含非法字节 0xFF 与有效 ASCII 'A'
+        decoder.decode_chunk(&[0xFF, b'A'], &mut out);
+        decoder.finish(&mut out);
+        assert_eq!(out, "\u{FFFD}A");
+    }
+
+    #[test]
+    fn utf8_stream_decoder_finish_flushes_dangling_bytes() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        // 流结束时若残留不完整的 UTF-8 序列，finish 刷出替换符
+        decoder.decode_chunk(&[0xE6, 0x88], &mut out);
+        assert_eq!(out, "");
+        decoder.finish(&mut out);
+        assert_eq!(out, "\u{FFFD}");
     }
 }

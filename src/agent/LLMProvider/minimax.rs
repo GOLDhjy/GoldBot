@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{LlmProvider, Message, Role, Usage};
+use crate::agent::provider::{LlmProvider, Message, Role, Usage, Utf8StreamDecoder};
 
 #[derive(Clone, Copy)]
 pub(crate) struct MiniMaxProvider;
@@ -137,9 +137,10 @@ impl LlmProvider for MiniMaxProvider {
         // reasoning_details 是累积字符串，记录已向上层发送的字节数，避免重复推送
         let mut reasoning_seen = 0usize;
         let mut final_usage = Usage::default();
+        let mut decoder = Utf8StreamDecoder::new();
 
         while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
-            pending.push_str(&String::from_utf8_lossy(&chunk));
+            decoder.decode_chunk(&chunk, &mut pending);
             drain_sse_frames(
                 &mut pending,
                 &mut merged,
@@ -149,6 +150,7 @@ impl LlmProvider for MiniMaxProvider {
                 &mut on_thinking_delta,
             );
         }
+        decoder.finish(&mut pending);
         drain_sse_frames(
             &mut pending,
             &mut merged,

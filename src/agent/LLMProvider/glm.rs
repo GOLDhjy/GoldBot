@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::provider::{LlmProvider, Message, Role, Usage};
+use crate::agent::provider::{LlmProvider, Message, Role, Usage, Utf8StreamDecoder};
 
 #[derive(Clone, Copy)]
 pub(crate) struct GlmProvider;
@@ -159,9 +159,10 @@ where
     let mut merged = String::new();
     let mut pending = String::new();
     let mut final_usage = Usage::default();
+    let mut decoder = Utf8StreamDecoder::new();
 
     while let Some(chunk) = resp.chunk().await.context("failed reading stream chunk")? {
-        pending.push_str(&String::from_utf8_lossy(&chunk));
+        decoder.decode_chunk(&chunk, &mut pending);
         drain_sse_frames(
             &mut pending,
             &mut merged,
@@ -170,6 +171,7 @@ where
             &mut on_thinking_delta,
         );
     }
+    decoder.finish(&mut pending);
     drain_sse_frames(
         &mut pending,
         &mut merged,
