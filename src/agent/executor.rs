@@ -90,14 +90,15 @@ pub(crate) fn start_task(app: &mut App, screen: &mut Screen, task: String) {
     // 新任务开始时清空已加载的 skill，避免将前一个任务的 skill 注入到新任务的 Sub-Agent。
     app.active_skill_contents.clear();
     // 按当前任务关键词过滤记忆，拼到 user 消息头部；assistant context 保持干净。
-    let user_content = if app.no_memory {
-        task.clone()
-    } else {
+    // 默认不注入记忆，仅当 -M/--memory 启动或 /memory 命令切换开启后才注入。
+    let user_content = if app.use_memory {
         let store = ProjectStore::current();
         match store.build_memory_message(Some(&task)) {
             Some(mem) => format!("{mem}\n\n---\n\n{task}"),
             None => task.clone(),
         }
+    } else {
+        task.clone()
     };
     app.messages.push(Message::user(user_content));
     sync_context_budget(app, screen);

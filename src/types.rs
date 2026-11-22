@@ -62,8 +62,8 @@ pub enum Mode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AssistMode {
-    #[default]
     Off,
+    #[default]
     Yolo,
     Plan,
 }
@@ -309,6 +309,11 @@ pub enum LlmAction {
 #[cfg(test)]
 mod tests {
     use super::{AssistMode, InputQueue};
+
+    #[test]
+    fn assist_mode_default_is_yolo() {
+        assert_eq!(AssistMode::default(), AssistMode::Yolo);
+    }
 
     #[test]
     fn assist_mode_cycle_off_to_yolo() {

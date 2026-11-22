@@ -51,7 +51,7 @@ const BUILTIN_COMMANDS: &[(BuiltinCommand, &str, &str)] = &[
     (
         BuiltinCommand::NoMemory,
         "nomemory",
-        "切换无记忆模式（跳过记忆注入）",
+        "切换记忆注入开关（默认关闭）",
     ),
     (BuiltinCommand::Model, "model", "切换 LLM 后端与模型"),
     (BuiltinCommand::Session, "Session", "浏览并恢复历史会话"),

@@ -418,13 +418,13 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
             screen.emit(&[label]);
         }
         BuiltinCommand::NoMemory => {
-            app.no_memory = !app.no_memory;
-            let state = if app.no_memory {
-                "ON（记忆注入已禁用）"
+            app.use_memory = !app.use_memory;
+            let state = if app.use_memory {
+                "ON（记忆注入已启用）"
             } else {
-                "OFF（记忆注入已启用）"
+                "OFF（记忆注入已禁用）"
             };
-            screen.emit(&[format!("  NoMemory: {}", state)]);
+            screen.emit(&[format!("  Memory: {}", state)]);
         }
         BuiltinCommand::Skills => {
             if app.skills.is_empty() {
@@ -453,14 +453,14 @@ pub(super) fn dispatch_builtin_command(app: &mut App, screen: &mut Screen, cmd: 
             let ws = app.workspace.to_string_lossy().replace('\\', "/");
             let mode_str = app.assist_mode.display_name();
             let thinking = if app.show_thinking { "ON" } else { "OFF" };
-            let no_memory = if app.no_memory { "ON" } else { "OFF" };
+            let memory = if app.use_memory { "ON" } else { "OFF" };
             screen.emit(&[
                 format!("  Workspace:  {}", ws),
                 format!("  Backend:    {}", app.backend.backend_label()),
                 format!("  Model:      {}", app.backend.model_name()),
                 format!("  Mode:       {}", mode_str),
                 format!("  Thinking:   {}", thinking),
-                format!("  NoMemory:   {}", no_memory),
+                format!("  Memory:     {}", memory),
                 format!("  Skills:     {}", app.skills.len()),
                 format!("  Commands:   {} 用户 + 10 内置", app.user_commands.len()),
                 format!("  Messages:   {}", app.messages.len()),
