@@ -53,14 +53,87 @@ function Get-LatestTag {
         [string]$Repo = "GOLDhjy/GoldBot"
     )
     $apiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+    $headers = @{ "User-Agent" = "goldbot-installer" }
+    # 匿名请求限流 60 次/小时，设置 GITHUB_TOKEN 可提升限额并绕过 403。
+    if ($env:GITHUB_TOKEN) {
+        $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+    }
     try {
-        $resp = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "goldbot-installer" }
+        $resp = Invoke-RestMethod -Uri $apiUrl -Headers $headers
         if (-not $resp.tag_name) {
             throw "No tag_name in GitHub API response."
         }
         return [string]$resp.tag_name
     } catch {
-        throw "Failed to resolve latest release tag from $apiUrl. $($_.Exception.Message)"
+        Write-Host "GitHub API failed ($($_.Exception.Message)), falling back to redirect resolution..." -ForegroundColor DarkYellow
+    }
+
+    # 降级方案：/releases/latest 会 302 到 /releases/tag/<tag>，不受 API 匿名限流约束。
+    # 用 .NET HttpWebRequest 而不是 Invoke-WebRequest，因为 PS 5.1 的
+    # -MaximumRedirection 0 抛 InvalidOperationException 拿不到 Location 头。
+    $releaseUrl = "https://github.com/$Repo/releases/latest"
+    $location = $null
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($releaseUrl)
+        $req.AllowAutoRedirect = $false
+        $req.UserAgent = "goldbot-installer"
+        $req.Timeout = 15000
+        $resp = $req.GetResponse()
+        try {
+            $location = $resp.Headers["Location"]
+        } finally {
+            $resp.Close()
+        }
+    } catch [System.Net.WebException] {
+        # 3xx 不会抛错，这里只处理网络层异常；若带响应则尽力取 Location。
+        if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+            $location = $_.Exception.Response.Headers["Location"]
+        }
+    } catch {
+        Write-Host "Redirect resolution failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+    if ($location) {
+        $tag = ([string]$location).TrimEnd("/") -split "/" | Select-Object -Last 1
+        if ($tag -match "^v\d+(\.\d+)*$") {
+            return $tag
+        }
+    }
+    throw "Failed to resolve latest release tag from $apiUrl or $releaseUrl."
+}
+
+function Expand-ZipArchiveCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ZipPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+    # 旧版 .NET（< 4.7.1）上 Expand-Archive 会因缺少 3 参 ExtractToDirectory 报错，
+    # 这里手动遍历条目解压，仅依赖 .NET 4.5 就有的 ExtractToFile。
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $root = [System.IO.Path]::GetFullPath($Destination)
+        foreach ($entry in $zip.Entries) {
+            # 防御 zip-slip：跳过包含路径穿越或绝对路径的条目。
+            if ($entry.FullName -match "(^|/)\.\.(/|$)" -or $entry.FullName -match "^[a-zA-Z]:/" -or $entry.FullName.StartsWith("/")) {
+                continue
+            }
+            $destPath = Join-Path $Destination $entry.FullName
+            if (-not ([System.IO.Path]::GetFullPath($destPath)).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $destDir = Split-Path $destPath -Parent
+            if (-not (Test-Path $destDir)) {
+                New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            }
+            if ($entry.FullName.EndsWith("/")) {
+                continue
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+        }
+    } finally {
+        $zip.Dispose()
     }
 }
 
@@ -161,7 +234,11 @@ function Install-GoldBot {
         Invoke-WebRequestCompat -Uri $zipUrl -OutFile $zipPath
 
         Write-Host "Extracting archive..." -ForegroundColor Cyan
-        Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
+        try {
+            Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
+        } catch {
+            Expand-ZipArchiveCompat -ZipPath $zipPath -Destination $tempRoot
+        }
 
         $binary = Get-ChildItem -Path $tempRoot -Recurse -File -Filter "goldbot.exe" |
             Select-Object -First 1

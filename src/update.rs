@@ -68,22 +68,60 @@ fn build_update_command(windows: bool) -> (String, Vec<String>) {
     }
 }
 
-/// 查询 GitHub API 最新 release tag；任何失败都返回 None，不阻塞更新流程。
+/// 查询最新 release tag：优先走 GitHub API，失败（如匿名限流 403）时降级为
+/// 解析 github.com 的 `/releases/latest` 重定向；两者都失败才返回 None。
 fn fetch_latest_tag() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
         .user_agent(concat!("goldbot/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
+    fetch_tag_from_api(&client).or_else(fetch_tag_from_redirect)
+}
+
+/// 通过 api.github.com 查询；任何失败返回 None，交给降级方案兜底。
+fn fetch_tag_from_api(client: &reqwest::blocking::Client) -> Option<String> {
     let json: serde_json::Value = client
         .get(format!(
             "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         ))
         .send()
         .ok()?
+        .error_for_status()
+        .ok()?
         .json()
         .ok()?;
     json.get("tag_name")?.as_str().map(str::to_string)
+}
+
+/// 降级方案：`https://github.com/<repo>/releases/latest` 会 302 到
+/// `/releases/tag/<tag>`，该端点不受 API 匿名限流约束。
+fn fetch_tag_from_redirect() -> Option<String> {
+    let no_redirect = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
+        .user_agent(concat!("goldbot/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let resp = no_redirect
+        .get(format!("https://github.com/{GITHUB_REPO}/releases/latest"))
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    tag_from_location(
+        resp.headers()
+            .get(reqwest::header::LOCATION)?
+            .to_str()
+            .ok()?,
+    )
+}
+
+/// 从重定向地址（如 `.../releases/tag/v0.9.23`）提取末尾的版本 tag；
+/// 只接受形如 v0.9.23 的 tag，避免把异常页面当版本号。
+fn tag_from_location(location: &str) -> Option<String> {
+    let tag = location.trim_end_matches('/').rsplit('/').next()?;
+    (tag.starts_with('v') && tag.len() > 1).then(|| tag.to_string())
 }
 
 /// 比较形如 `v0.9.23` 与 `0.9.22` 的版本号；解析失败按有新版本处理，确保不会跳过更新。
@@ -151,5 +189,24 @@ mod tests {
     #[test]
     fn unparsable_tag_is_treated_as_newer() {
         assert!(is_newer_tag("latest", "0.9.22"));
+    }
+
+    #[test]
+    fn tag_from_location_extracts_trailing_tag() {
+        assert_eq!(
+            tag_from_location("https://github.com/GOLDhjy/GoldBot/releases/tag/v0.10.5"),
+            Some("v0.10.5".to_string())
+        );
+        // 尾部斜杠也能处理
+        assert_eq!(
+            tag_from_location("https://github.com/GOLDhjy/GoldBot/releases/tag/v0.10.5/"),
+            Some("v0.10.5".to_string())
+        );
+        // 非 tag 形式的地址返回 None
+        assert_eq!(
+            tag_from_location("https://github.com/GOLDhjy/GoldBot"),
+            None
+        );
+        assert_eq!(tag_from_location("https://github.com/"), None);
     }
 }
