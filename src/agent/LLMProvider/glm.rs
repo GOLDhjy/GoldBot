@@ -221,9 +221,10 @@ fn build_request(
 
 fn normalize_glm_model(model: &str) -> String {
     match model {
+        "glm-5.4" | "GLM-5.4" => "glm-5.4".to_string(),
         "glm-5.3" | "GLM-5.3" => "glm-5.3".to_string(),
-        // 仅支持 GLM-5.3，其他值统一回落到默认模型。
-        _ => "glm-5.3".to_string(),
+        // 仅支持 GLM-5.4 / GLM-5.3，其他值统一回落到默认模型。
+        _ => "glm-5.4".to_string(),
     }
 }
 
@@ -372,12 +373,15 @@ mod tests {
 
     #[test]
     fn glm_model_aliases_normalize_to_official_names() {
+        assert_eq!(normalize_glm_model("glm-5.4"), "glm-5.4");
+        assert_eq!(normalize_glm_model("GLM-5.4"), "glm-5.4");
         assert_eq!(normalize_glm_model("glm-5.3"), "glm-5.3");
         assert_eq!(normalize_glm_model("GLM-5.3"), "glm-5.3");
-        assert_eq!(normalize_glm_model("glm-5.1"), "glm-5.3");
-        assert_eq!(normalize_glm_model("glm-5"), "glm-5.3");
-        assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5.3");
-        assert_eq!(normalize_glm_model("glm-4.7"), "glm-5.3");
+        // 旧别名统一回落到最新默认模型。
+        assert_eq!(normalize_glm_model("glm-5.1"), "glm-5.4");
+        assert_eq!(normalize_glm_model("glm-5"), "glm-5.4");
+        assert_eq!(normalize_glm_model("glm-5v-turbo"), "glm-5.4");
+        assert_eq!(normalize_glm_model("glm-4.7"), "glm-5.4");
     }
 
     #[test]

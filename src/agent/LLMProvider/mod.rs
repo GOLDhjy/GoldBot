@@ -188,7 +188,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 
 /// 所有可用后端及其模型列表，用于 /model 选择器。
 /// 格式：(backend_label, &[model_name, ...])
-const GLM_MODEL_PRESETS: &[&str] = &["glm-5.3"];
+const GLM_MODEL_PRESETS: &[&str] = &["glm-5.4", "glm-5.3"];
 const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 const DEFAULT_MIMO_MODEL: &str = "mimo-v2.5-pro";
 const MIMO_MODEL_PRESETS: &[&str] = &[
@@ -239,11 +239,13 @@ fn default_glm_model() -> String {
         .or_else(|_| std::env::var("BIGMODEL_CODING_MODEL"))
         .ok()
         .and_then(|model| normalize_glm_model_name(&model))
-        .unwrap_or_else(|| "glm-5.3".to_string())
+        .unwrap_or_else(|| "glm-5.4".to_string())
 }
 
 fn normalize_glm_model_name(model: &str) -> Option<String> {
     match model.trim().to_ascii_lowercase().as_str() {
+        // 当前仅接受 GLM-5.4 / GLM-5.3 两个官方模型名。
+        "glm-5.4" => Some("glm-5.4".to_string()),
         "glm-5.3" => Some("glm-5.3".to_string()),
         _ => None,
     }
@@ -580,8 +582,8 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::{
         BACKEND_PRESETS, DEFAULT_MIMO_CONTEXT_WINDOW_TOKENS, DEFAULT_MIMO_MODEL, LlmBackend,
-        MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS, Utf8StreamDecoder, default_mimo_context_window_tokens,
-        normalize_mimo_model_name,
+        MIMO_V2_5_PRO_CONTEXT_WINDOW_TOKENS, Utf8StreamDecoder, default_glm_model,
+        default_mimo_context_window_tokens, normalize_mimo_model_name,
     };
 
     use super::ENV_LOCK;
@@ -615,15 +617,23 @@ mod tests {
     }
 
     #[test]
-    fn glm_backend_presets_only_include_glm_5_3() {
+    fn glm_backend_presets_include_selectable_models() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::remove_var("BIGMODEL_MODEL");
+            std::env::remove_var("BIGMODEL_CODING_MODEL");
+        }
         let glm_models = BACKEND_PRESETS
             .iter()
             .find(|(label, _)| *label == "GLM")
             .map(|(_, models)| *models)
             .expect("GLM backend preset should exist");
 
-        assert_eq!(glm_models.len(), 1);
+        assert_eq!(glm_models.len(), 2);
+        assert_eq!(glm_models[0], "glm-5.4");
         assert!(glm_models.contains(&"glm-5.3"));
+        assert_eq!(default_glm_model(), "glm-5.4");
     }
 
     #[test]
